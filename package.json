@@ -1,0 +1,31 @@
+{
+  "name": "pxd-uxp-panel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "PXD Photoshop UXP panel rebuilt with a clean bridge-driven architecture.",
+  "scripts": {
+    "dev": "uxp plugin watch --path ./dist",
+    "dev:browser": "vite",
+    "watch": "vite build --watch",
+    "build": "vite build",
+    "build:plugin": "npm run build && cp -r public/* dist/ && cp manifest.json dist/ && node -e \"const fs=require('fs');const html=fs.readFileSync('dist/index.html','utf8');if(!html.includes('uxp-polyfill')){const fixed=html.replace('</title>','</title>\\n    <script src=\\\"./uxp-polyfill.js\\\"></script>');fs.writeFileSync('dist/index.html',fixed);}\"",
+    "lint": "eslint \"src/**/*.{ts,tsx,js,jsx}\"",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "electron-builder": "^26.0.12",
+    "eslint": "^8.57.0",
+    "eslint-plugin-react": "^7.34.3",
+    "tar": "^7.5.1",
+    "typescript": "^5.4.5",
+    "vite": "^5.4.1"
+  }
+}
