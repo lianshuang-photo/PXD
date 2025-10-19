@@ -272,10 +272,34 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   const [sourceLanguage, setSourceLanguage] = useState("zh");
   const [targetLanguage, setTargetLanguage] = useState("en");
   const pollingRef = useRef<number | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearToastTimer = useCallback(() => {
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+  }, []);
   const pushToast = useCallback((type: ToastType, message: string) => {
     setToast({ type, message });
   }, []);
-  const dismissToast = useCallback(() => setToast(null), []);
+  const dismissToast = useCallback(() => {
+    clearToastTimer();
+    setToast(null);
+  }, [clearToastTimer]);
+  useEffect(() => {
+    if (!toast) {
+      clearToastTimer();
+      return;
+    }
+    clearToastTimer();
+    toastTimerRef.current = setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, 5000);
+    return () => {
+      clearToastTimer();
+    };
+  }, [toast, clearToastTimer]);
 
   const setFormValue = useCallback(
     <K extends keyof GenerationForm>(key: K, value: GenerationForm[K]) => {

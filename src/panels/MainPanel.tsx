@@ -1,6 +1,7 @@
-import { type CSSProperties, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import type { AppSettings } from "../context/types";
 import { useGenerationController } from "../hooks/useGenerationController";
+import OverlayPortal from "../components/OverlayPortal";
 
 interface Props {
   settings: AppSettings;
@@ -84,34 +85,101 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
   const [presetFile, setPresetFile] = useState<string>("");
   const [presetName, setPresetName] = useState<string>("");
   const [customResolution, setCustomResolution] = useState(false);
+  const [confirmOverwrite, setConfirmOverwrite] = useState(false);
+  const confirmResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!presets.length) {
       setPresetFile("");
+      setPresetName("");
+      setSelectedPreset(null);
       return;
     }
-    const matched = presets.find((preset) => preset.name === selectedPreset);
+    const matched = selectedPreset ? presets.find((preset) => preset.name === selectedPreset) : null;
     if (matched) {
       setPresetFile(matched.fileName);
-      setPresetName(matched.name);
-    } else if (!presetFile) {
-      setPresetFile(presets[0].fileName);
-      setPresetName(presets[0].name);
+    } else if (!presetFile || !presets.some((preset) => preset.fileName === presetFile)) {
+      const first = presets[0];
+      setPresetFile(first.fileName);
+      setSelectedPreset(first.name);
     }
-  }, [presetFile, presets, selectedPreset]);
+  }, [presetFile, presets, selectedPreset, setSelectedPreset]);
+
+  useEffect(() => {
+    setPresetName("");
+  }, [selectedPreset]);
+
+  const selectedPresetMeta = useMemo(
+    () => presets.find((item) => item.fileName === presetFile) ?? null,
+    [presetFile, presets]
+  );
+  const clearConfirmTimer = () => {
+    if (confirmResetTimer.current) {
+      clearTimeout(confirmResetTimer.current);
+      confirmResetTimer.current = null;
+    }
+  };
+  const scheduleConfirmReset = () => {
+    clearConfirmTimer();
+    confirmResetTimer.current = setTimeout(() => {
+      setConfirmOverwrite(false);
+      confirmResetTimer.current = null;
+    }, 5000);
+  };
+  useEffect(() => {
+    clearConfirmTimer();
+    setConfirmOverwrite(false);
+  }, [presetName, selectedPresetMeta]);
+  useEffect(
+    () => () => {
+      clearConfirmTimer();
+    },
+    []
+  );
+
+  const trimmedPresetName = presetName.trim();
+  const isSaveMode = trimmedPresetName.length > 0;
+  const saveButtonLabel = isSaveMode ? "保存" : "覆盖";
+  const isSaveDisabled = isSaveMode ? false : !selectedPresetMeta;
 
   const handleSavePreset = async () => {
     const name = presetName.trim();
-    if (!name) {
-      pushToast("warning", "请输入预设名称");
+    const targetPreset = selectedPresetMeta;
+    if (name) {
+      try {
+        await savePreset(name);
+        await loadPresets();
+        setConfirmOverwrite(false);
+        clearConfirmTimer();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "保存预设失败";
+        pushToast("error", message);
+      }
       return;
     }
+
+    if (!targetPreset) {
+      pushToast("warning", "请选择要覆盖的预设");
+      return;
+    }
+
+    if (!confirmOverwrite) {
+      setConfirmOverwrite(true);
+      pushToast("warning", "再次点击覆盖将替换当前预设");
+      scheduleConfirmReset();
+      return;
+    }
+
     try {
-      await savePreset(name);
+      await savePreset(targetPreset.name);
       await loadPresets();
+      setConfirmOverwrite(false);
+      clearConfirmTimer();
     } catch (err) {
       const message = err instanceof Error ? err.message : "保存预设失败";
       pushToast("error", message);
+      setConfirmOverwrite(false);
+      clearConfirmTimer();
     }
   };
 
@@ -252,7 +320,19 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
   };
 
   return (
-    <section className="app-panel" style={{ padding: "0", gap: "0", height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+    <>
+      <section
+        className="app-panel"
+        style={{
+          padding: "0",
+          gap: "0",
+          height: "100%",
+          display: "flex",
+          flexDirection: "column",
+          overflow: "visible",
+          position: "relative"
+        }}
+      >
       {/* 简化的操作栏 */}
       <div style={{ 
         display: "flex", 
@@ -321,7 +401,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
         </div>
       )}
 
-      <div style={{ flex: 1, overflow: "auto", padding: "0.2rem", boxSizing: "border-box" }}>
+      <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "0.2rem", boxSizing: "border-box" }}>
         <div style={{ maxWidth: "100%", width: "100%", boxSizing: "border-box" }}>
           <article style={{ width: "100%", padding: "0.25rem", background: "var(--bg-panel)", borderRadius: "4px", boxSizing: "border-box" }}>
             <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: "0.2rem", boxSizing: "border-box" }}>
@@ -332,10 +412,11 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                     className="input"
                     value={presetFile}
                     onChange={(event) => {
-                      setPresetFile(event.target.value);
-                      const meta = presets.find((item) => item.fileName === event.target.value);
-                      setPresetName(meta ? meta.name : "");
+                      const value = event.target.value;
+                      setPresetFile(value);
+                      const meta = presets.find((item) => item.fileName === value);
                       setSelectedPreset(meta ? meta.name : null);
+                      setPresetName("");
                     }}
                     style={{ flex: 1 }}
                   >
@@ -356,8 +437,22 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                   />
                 </div>
                 <div style={{ display: "flex", gap: "0.08rem", flexWrap: "wrap" }}>
-                  <button type="button" className="btn btn--primary" onClick={handleSavePreset} style={presetActionButtonStyle}>
-                    保存
+                  <button
+                    type="button"
+                    className="btn btn--primary"
+                    onClick={handleSavePreset}
+                    disabled={isSaveDisabled}
+                    style={{
+                      ...presetActionButtonStyle,
+                      ...(!isSaveMode && confirmOverwrite
+                        ? {
+                            borderColor: "rgba(239, 68, 68, 0.6)",
+                            background: "rgba(239, 68, 68, 0.12)"
+                          }
+                        : {})
+                    }}
+                  >
+                    {saveButtonLabel}
                   </button>
                   <button type="button" className="btn btn--ghost" onClick={handleApplyPreset} disabled={!presetFile} style={presetActionButtonStyle}>
                     应用
@@ -790,15 +885,18 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
         </div>
       </div>
 
+      </section>
       {toast && (
-        <div className={`toast toast--${toast.type}`}>
-          <span>{toast.message}</span>
-          <button type="button" className="btn btn--ghost" onClick={dismissToast}>
-            关闭
-          </button>
-        </div>
+        <OverlayPortal>
+          <div className={`toast toast--${toast.type}`}>
+            <span>{toast.message}</span>
+            <button type="button" className="btn btn--ghost" onClick={dismissToast}>
+              关闭
+            </button>
+          </div>
+        </OverlayPortal>
       )}
-    </section>
+    </>
   );
 };
 

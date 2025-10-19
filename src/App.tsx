@@ -59,6 +59,7 @@ const App = () => {
         </nav>
       </header>
       <main className="app-shell__content">{renderActiveView()}</main>
+      <div id="pxd-overlay-root" className="app-shell__overlay-root overlay-root" />
     </div>
   );
 };
