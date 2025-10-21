@@ -73,11 +73,50 @@ interface RequestOptions extends RequestInit {
 }
 
 const DEFAULT_TIMEOUT = 15_000;
+const BASE_RESOLUTION = 512 * 512;
+const BASE_TIMEOUT_BUDGET = 20_000;
+const TIMEOUT_MARGIN = 5_000;
+const DEFAULT_MAX_TIMEOUT = 120_000;
+const STEP_REFERENCE = 20;
+
+const clampNumber = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+interface TimeoutOptions {
+  multiplier?: number;
+  minMs?: number;
+  maxMs?: number;
+}
+
+// 根据输出分辨率与步数动态计算请求超时时间，兼顾高分辨率与低配置场景。
+const computeDynamicTimeout = (steps: number, width: number, height: number, options: TimeoutOptions = {}): number => {
+  if (
+    !Number.isFinite(steps) ||
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    steps <= 0 ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    return Math.max(DEFAULT_TIMEOUT, BASE_TIMEOUT_BUDGET);
+  }
+  const multiplier = Number.isFinite(options.multiplier) ? clampNumber(options.multiplier ?? 1, 0.25, 10) : 1;
+  const maxMsCandidate = Number.isFinite(options.maxMs) ? Math.max(BASE_TIMEOUT_BUDGET, options.maxMs ?? DEFAULT_MAX_TIMEOUT) : DEFAULT_MAX_TIMEOUT;
+  const minMs = Number.isFinite(options.minMs)
+    ? clampNumber(options.minMs ?? BASE_TIMEOUT_BUDGET, 5_000, maxMsCandidate)
+    : BASE_TIMEOUT_BUDGET;
+  const maxMs = Math.max(minMs, maxMsCandidate);
+  const areaScale = Math.max(1, (width * height) / BASE_RESOLUTION);
+  const stepScale = clampNumber(steps / STEP_REFERENCE, 0.5, 5);
+  const budget = (BASE_TIMEOUT_BUDGET + TIMEOUT_MARGIN) * areaScale * stepScale * multiplier;
+  return Math.round(clampNumber(budget, minMs, maxMs));
+};
 
 const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number): Promise<T> => {
   let timer: number;
   const timeout = new Promise<never>((_, reject) => {
-    timer = window.setTimeout(() => reject(new Error("Request timed out")), timeoutMs);
+    timer = window.setTimeout(() => {
+      reject(new Error(`Request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
   });
   try {
     const result = await Promise.race([promise, timeout]);
@@ -89,12 +128,18 @@ const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number): Promise<T
 
 const requestJson = async <T>(url: string, init: RequestOptions = {}): Promise<T> => {
   const { timeoutMs = DEFAULT_TIMEOUT, ...rest } = init;
-  const response = await withTimeout(fetch(url, rest), timeoutMs);
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(`Request failed (${response.status}): ${message}`);
+  const startedAt = Date.now();
+  try {
+    const response = await withTimeout(fetch(url, rest), timeoutMs);
+    if (!response.ok) {
+      const message = await response.text();
+      const elapsed = Date.now() - startedAt;
+      throw new Error(`Request failed (${response.status}) after ${elapsed}ms (timeout ${timeoutMs}ms): ${message}`);
+    }
+    return (await response.json()) as T;
+  } catch (error) {
+    throw error;
   }
-  return (await response.json()) as T;
 };
 
 const sanitizeBaseUrl = (input: string) => input.replace(/\/+$/, "");
@@ -212,6 +257,17 @@ const buildImg2ImgPayload = (params: Img2ImgParams) => {
 
 export const createPxdClient = (settings: AppSettings) => {
   const baseURL = sanitizeBaseUrl(settings.sdEndpoint);
+  const toMilliseconds = (seconds: number | undefined, fallbackMs: number) => {
+    if (!Number.isFinite(seconds)) return fallbackMs;
+    return Math.max(0, Math.round((seconds as number) * 1000));
+  };
+  const minMs = Math.max(5_000, toMilliseconds(settings.timeoutMinSeconds, BASE_TIMEOUT_BUDGET));
+  const maxMs = Math.max(minMs, toMilliseconds(settings.timeoutMaxSeconds, DEFAULT_MAX_TIMEOUT));
+  const timeoutOptions: TimeoutOptions = {
+    multiplier: clampNumber(settings.timeoutMultiplier ?? 1, 0.25, 10),
+    minMs,
+    maxMs
+  };
 
   const makeUrl = (path: string) => {
     if (!baseURL) {
@@ -305,15 +361,17 @@ export const createPxdClient = (settings: AppSettings) => {
     },
     async txt2img(params: Txt2ImgParams): Promise<Txt2ImgResponse> {
       const payload = buildTxt2ImgPayload(params);
+      const timeoutMs = computeDynamicTimeout(params.steps, params.width, params.height, timeoutOptions);
       return await fetchJson<Txt2ImgResponse>("/sdapi/v1/txt2img", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        timeoutMs: Math.max(DEFAULT_TIMEOUT, params.steps * 1000)
+        timeoutMs
       });
     },
     async img2img(params: Img2ImgParams): Promise<Txt2ImgResponse> {
       const baseImage = dataUrlToBase64(params.baseImage);
+      const timeoutMs = computeDynamicTimeout(params.steps, params.width, params.height, timeoutOptions);
       const payload = buildImg2ImgPayload({
         ...params,
         baseImage,
@@ -329,7 +387,7 @@ export const createPxdClient = (settings: AppSettings) => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        timeoutMs: Math.max(DEFAULT_TIMEOUT, params.steps * 1000)
+        timeoutMs
       });
     },
     async fetchProgress(): Promise<ProgressResponse | null> {

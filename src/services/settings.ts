@@ -16,7 +16,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sdEndpoint: "http://127.0.0.1:7860",
   offlineMode: true,
   outputDirectory: "",
-  brandColor: "#b794f6"
+  brandColor: "#b794f6",
+  timeoutMultiplier: 1,
+  timeoutMinSeconds: 20,
+  timeoutMaxSeconds: 120
 };
 
 export const loadSettings = async (): Promise<AppSettings> => {
@@ -27,12 +30,33 @@ export const loadSettings = async (): Promise<AppSettings> => {
     ...loaded,
     ...storedPrefs
   };
-  return result;
+  const minSeconds = Number.isFinite(result.timeoutMinSeconds)
+    ? Math.max(5, Math.min(result.timeoutMinSeconds, result.timeoutMaxSeconds || DEFAULT_SETTINGS.timeoutMaxSeconds))
+    : DEFAULT_SETTINGS.timeoutMinSeconds;
+  const maxSeconds = Number.isFinite(result.timeoutMaxSeconds)
+    ? Math.max(minSeconds, result.timeoutMaxSeconds)
+    : DEFAULT_SETTINGS.timeoutMaxSeconds;
+  const multiplier = Number.isFinite(result.timeoutMultiplier) ? Math.max(0.25, result.timeoutMultiplier) : DEFAULT_SETTINGS.timeoutMultiplier;
+  return {
+    ...result,
+    timeoutMinSeconds: minSeconds,
+    timeoutMaxSeconds: maxSeconds,
+    timeoutMultiplier: multiplier
+  };
 };
 
 export const saveSettings = async (next: AppSettings): Promise<void> => {
-  await bridge.writePreference<AppSettings>(SETTINGS_FILE, next);
-  await bridge.writeJsonFile<AppSettings>(SETTINGS_FILE, next);
+  const minSeconds = Math.max(5, Math.min(next.timeoutMinSeconds, next.timeoutMaxSeconds));
+  const maxSeconds = Math.max(minSeconds, next.timeoutMaxSeconds);
+  const multiplier = Math.max(0.25, next.timeoutMultiplier);
+  const payload: AppSettings = {
+    ...next,
+    timeoutMinSeconds: minSeconds,
+    timeoutMaxSeconds: maxSeconds,
+    timeoutMultiplier: multiplier
+  };
+  await bridge.writePreference<AppSettings>(SETTINGS_FILE, payload);
+  await bridge.writeJsonFile<AppSettings>(SETTINGS_FILE, payload);
 };
 
 export const openSettingsFolder = async (): Promise<void> => {

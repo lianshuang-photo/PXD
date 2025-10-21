@@ -3,6 +3,9 @@ export interface AppSettings {
   offlineMode: boolean;
   outputDirectory: string;
   brandColor: string;
+  timeoutMultiplier: number;
+  timeoutMinSeconds: number;
+  timeoutMaxSeconds: number;
 }
 
 export interface AppContextValue {

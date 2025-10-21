@@ -307,7 +307,7 @@ body {
 .form-grid {
   display: grid;
   gap: var(--gap-sm);
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .form-field {
@@ -326,6 +326,9 @@ body {
   font-size: 12px;
   color: var(--text-secondary);
   letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .form-field__hint {
@@ -740,6 +743,20 @@ select.input::-ms-expand {
   .language-row__swap {
     display: none;
   }
+
+  .panel__header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .panel__header .panel__actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .panel__header .panel__actions .btn {
+    flex: 1;
+  }
 }
 
 /* UXP 窄面板适配 (320-380px) */
@@ -779,7 +796,7 @@ select.input::-ms-expand {
   }
 
   .form-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .chip-group {
@@ -801,6 +818,6 @@ select.input::-ms-expand {
 /* UXP 中等面板适配 (380-460px) */
 @media (min-width: 380px) and (max-width: 460px) {
   .form-grid {
-    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }

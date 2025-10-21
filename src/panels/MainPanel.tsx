@@ -595,7 +595,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                         setFormValue("resolution", Number(val));
                       }
                     }}
-                    style={{ width: customResolution ? '100px' : 'auto', flex: customResolution ? '0 0 auto' : 1, minWidth: 0 }}
+                    style={{ width: customResolution ? '70px' : 'auto', flex: customResolution ? '0 0 auto' : 1, minWidth: 0 }}
                   >
                     {resolutionPresets.map((value) => (
                       <option key={value} value={value}>{value}</option>
@@ -615,7 +615,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                     />
                   )}
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", width: "120px", flexShrink: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", flex: "0 1 90px", minWidth: 0 }}>
                   <span style={{ ...compactLabelStyle, minWidth: "1.2rem" }}>羽化</span>
                   <input
                     className="input"
@@ -632,7 +632,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                     style={{ flex: 1, minWidth: 0 }}
                   />
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", flex: "0 1 90px", minWidth: 0 }}>
                   <span style={{ ...compactLabelStyle, minWidth: "1.5rem" }}>数量</span>
                   <input
                     className="input"

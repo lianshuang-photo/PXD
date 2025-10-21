@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AppSettings } from "../context/types";
-import { autodetectLocalEndpoint, openSettingsFolder } from "../services/settings";
+import { openSettingsFolder } from "../services/settings";
+import { openPresetFolder } from "../services/presets";
 
 interface Props {
   settings: AppSettings;
@@ -13,8 +14,6 @@ const SettingsPanel = ({ settings, onUpdate, onRefresh, saving }: Props) => {
   const [form, setForm] = useState<AppSettings>(settings);
   const [message, setMessage] = useState<string | null>(null);
   const [pingResult, setPingResult] = useState<"idle" | "success" | "error">("idle");
-  const [autoDetecting, setAutoDetecting] = useState(false);
-  const [autoDetectMessage, setAutoDetectMessage] = useState<string | null>(null);
 
   useEffect(() => {
     setForm(settings);
@@ -43,24 +42,21 @@ const SettingsPanel = ({ settings, onUpdate, onRefresh, saving }: Props) => {
     }
   };
 
-  const handleAutodetect = async () => {
-    setAutoDetecting(true);
-    setAutoDetectMessage(null);
+  const handleOpenDataFolder = async () => {
     try {
-      const endpoint = await autodetectLocalEndpoint();
-      if (endpoint) {
-        setForm((prev) => ({ ...prev, sdEndpoint: endpoint }));
-        await onUpdate({ sdEndpoint: endpoint });
-        setAutoDetectMessage(`已检测到本地服务：${endpoint}`);
-        setPingResult("idle");
-      } else {
-        setAutoDetectMessage("未找到可用的本地服务，请手动配置地址");
-      }
+      await openSettingsFolder();
     } catch (error) {
-      console.warn("Autodetect failed", error);
-      setAutoDetectMessage("自动探测失败，请检查本地服务是否已启动");
-    } finally {
-      setAutoDetecting(false);
+      console.warn("Open data folder failed", error);
+      setMessage("无法打开数据目录，请手动定位到插件数据目录。");
+    }
+  };
+
+  const handleOpenPresetFolder = async () => {
+    try {
+      await openPresetFolder();
+    } catch (error) {
+      console.warn("Open preset folder failed", error);
+      setMessage("无法打开预设目录，请手动定位到插件数据目录下的 presets 文件夹。");
     }
   };
 
@@ -75,11 +71,11 @@ const SettingsPanel = ({ settings, onUpdate, onRefresh, saving }: Props) => {
           <button type="button" className="btn btn--ghost" onClick={onRefresh} disabled={saving}>
             重新加载
           </button>
-          <button type="button" className="btn btn--ghost" onClick={openSettingsFolder}>
+          <button type="button" className="btn btn--ghost" onClick={handleOpenDataFolder}>
             打开数据目录
           </button>
-          <button type="button" className="btn btn--ghost" onClick={handleAutodetect} disabled={autoDetecting}>
-            {autoDetecting ? "探测中…" : "检测本地服务"}
+          <button type="button" className="btn btn--ghost" onClick={handleOpenPresetFolder}>
+            打开预设目录
           </button>
         </div>
       </header>
@@ -108,6 +104,75 @@ const SettingsPanel = ({ settings, onUpdate, onRefresh, saving }: Props) => {
           />
           <span className="form-field__hint">开启后禁用远程请求，仅使用本地算力。</span>
         </label>
+
+        <div style={{ display: "flex", gap: "0.12rem", marginBottom: "0.12rem" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", flex: 1, minWidth: 0 }}>
+            <span style={{ fontSize: "0.85rem", lineHeight: 1.3, color: "var(--text-secondary)", flexShrink: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: "1.5rem" }}>超时倍率</span>
+            <input
+              className="input"
+              type="number"
+              min={0.25}
+              step={0.1}
+              value={form.timeoutMultiplier}
+              onChange={(event) => {
+                const value = Number.parseFloat(event.target.value);
+                setForm((prev) => ({
+                  ...prev,
+                  timeoutMultiplier: Number.isFinite(value) ? Math.max(0.25, value) : prev.timeoutMultiplier
+                }));
+              }}
+              placeholder="放大延长等待"
+              style={{ flex: 1, minWidth: 0 }}
+            />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", flex: 1, minWidth: 0 }}>
+            <span style={{ fontSize: "0.85rem", lineHeight: 1.3, color: "var(--text-secondary)", flexShrink: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: "1.5rem" }}>最短(秒)</span>
+            <input
+              className="input"
+              type="number"
+              min={5}
+              step={1}
+              value={form.timeoutMinSeconds}
+              onChange={(event) => {
+                const value = Number.parseFloat(event.target.value);
+                setForm((prev) => {
+                  if (!Number.isFinite(value)) return prev;
+                  const minSeconds = Math.max(5, value);
+                  return {
+                    ...prev,
+                    timeoutMinSeconds: minSeconds,
+                    timeoutMaxSeconds: Math.max(minSeconds, prev.timeoutMaxSeconds)
+                  };
+                });
+              }}
+              placeholder="慢设备容错"
+              style={{ flex: 1, minWidth: 0 }}
+            />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", flex: 1, minWidth: 0 }}>
+            <span style={{ fontSize: "0.85rem", lineHeight: 1.3, color: "var(--text-secondary)", flexShrink: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: "1.5rem" }}>最长(秒)</span>
+            <input
+              className="input"
+              type="number"
+              min={10}
+              step={5}
+              value={form.timeoutMaxSeconds}
+              onChange={(event) => {
+                const value = Number.parseFloat(event.target.value);
+                setForm((prev) => {
+                  if (!Number.isFinite(value)) return prev;
+                  const maxSeconds = Math.max(prev.timeoutMinSeconds, value);
+                  return {
+                    ...prev,
+                    timeoutMaxSeconds: maxSeconds
+                  };
+                });
+              }}
+              placeholder="防止无限等待"
+              style={{ flex: 1, minWidth: 0 }}
+            />
+          </div>
+        </div>
 
         <label className="form-field">
           <span className="form-field__label">输出目录</span>
@@ -142,7 +207,6 @@ const SettingsPanel = ({ settings, onUpdate, onRefresh, saving }: Props) => {
         </div>
 
         {message && <div className="alert alert--info">{message}</div>}
-        {autoDetectMessage && <div className="alert alert--info">{autoDetectMessage}</div>}
         {pingResult === "success" && <div className="alert alert--success">连接成功</div>}
         {pingResult === "error" && <div className="alert alert--error">无法连接到算力端</div>}
       </div>

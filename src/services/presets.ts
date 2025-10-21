@@ -113,3 +113,24 @@ export const deletePresetFile = async (fileName: string): Promise<void> => {
     console.error(`Failed to delete preset ${fileName}`, error);
   }
 };
+
+export const openPresetFolder = async (): Promise<void> => {
+  try {
+    const folder = await ensurePresetFolder();
+    if (!folder) {
+      throw new Error("无法访问预设目录");
+    }
+    if (typeof bridge.revealEntry === "function") {
+      await bridge.revealEntry(folder);
+      return;
+    }
+    if (typeof (folder as any)?.reveal === "function") {
+      await (folder as any).reveal();
+      return;
+    }
+    throw new Error("当前环境不支持打开预设目录");
+  } catch (error) {
+    console.error("Failed to open preset folder", error);
+    throw error;
+  }
+};
