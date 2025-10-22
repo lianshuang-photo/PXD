@@ -174,6 +174,22 @@ const generateId = () => {
 
 const clampNumber = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
+const appendPromptValue = (current: string, addition: string) => {
+  const trimmedAddition = addition.trim();
+  if (!trimmedAddition) {
+    return { value: current, appended: false };
+  }
+  if (!current.trim()) {
+    return { value: trimmedAddition, appended: true };
+  }
+  const currentWithoutTrailingWhitespace = current.replace(/\s+$/, "");
+  const separator = /[,，]$/.test(currentWithoutTrailingWhitespace) ? " " : ", ";
+  return {
+    value: `${currentWithoutTrailingWhitespace}${separator}${trimmedAddition}`,
+    appended: true
+  };
+};
+
 const buildImg2ImgParams = (
   form: GenerationForm,
   baseImage: string,
@@ -385,10 +401,14 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       pushToast("warning", "没有可用的翻译内容");
       return;
     }
-    setForm((prev) => ({
-      ...prev,
-      positivePrompt: [prev.positivePrompt, text].filter(Boolean).join("\n")
-    }));
+    setForm((prev) => {
+      const { value, appended } = appendPromptValue(prev.positivePrompt, text);
+      if (!appended) return prev;
+      return {
+        ...prev,
+        positivePrompt: value
+      };
+    });
     pushToast("success", "已添加至正向提示词");
   }, [translationResult, pushToast]);
 
@@ -398,48 +418,50 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       pushToast("warning", "没有可用的翻译内容");
       return;
     }
-    setForm((prev) => ({
-      ...prev,
-      negativePrompt: [prev.negativePrompt, text].filter(Boolean).join("\n")
-    }));
+    setForm((prev) => {
+      const { value, appended } = appendPromptValue(prev.negativePrompt, text);
+      if (!appended) return prev;
+      return {
+        ...prev,
+        negativePrompt: value
+      };
+    });
     pushToast("success", "已添加至反向提示词");
   }, [translationResult, pushToast]);
 
   const appendExtraPromptToPositive = useCallback(() => {
-    let appended = false;
+    const extra = form.extraPrompt.trim();
+    if (!extra) {
+      pushToast("warning", "请输入追加提示词");
+      return;
+    }
     setForm((prev) => {
-      const extra = prev.extraPrompt.trim();
-      if (!extra) {
-        appended = false;
-        return prev;
-      }
-      appended = true;
+      const { value } = appendPromptValue(prev.positivePrompt, extra);
       return {
         ...prev,
-        positivePrompt: [prev.positivePrompt, extra].filter(Boolean).join("\n"),
+        positivePrompt: value,
         extraPrompt: ""
       };
     });
-    pushToast(appended ? "success" : "warning", appended ? "已添加至正向提示词" : "请输入追加提示词");
-  }, [pushToast]);
+    pushToast("success", "已添加至正向提示词");
+  }, [form.extraPrompt, pushToast]);
 
   const appendExtraPromptToNegative = useCallback(() => {
-    let appended = false;
+    const extra = form.extraPrompt.trim();
+    if (!extra) {
+      pushToast("warning", "请输入追加提示词");
+      return;
+    }
     setForm((prev) => {
-      const extra = prev.extraPrompt.trim();
-      if (!extra) {
-        appended = false;
-        return prev;
-      }
-      appended = true;
+      const { value } = appendPromptValue(prev.negativePrompt, extra);
       return {
         ...prev,
-        negativePrompt: [prev.negativePrompt, extra].filter(Boolean).join("\n"),
+        negativePrompt: value,
         extraPrompt: ""
       };
     });
-    pushToast(appended ? "success" : "warning", appended ? "已添加至反向提示词" : "请输入追加提示词");
-  }, [pushToast]);
+    pushToast("success", "已添加至反向提示词");
+  }, [form.extraPrompt, pushToast]);
 
   const refreshOptions = useCallback(async () => {
     if (!settings.sdEndpoint) {
