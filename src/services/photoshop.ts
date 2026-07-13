@@ -1,4 +1,5 @@
 import { bridge } from "./uxpBridge";
+import { runPSExclusive } from "./psLock";
 
 export interface SelectionBounds {
   left: number;
@@ -26,6 +27,12 @@ const ensureModule = <T>(moduleGetter: () => T | undefined, name: string): T => 
   }
   return mod;
 };
+
+const executeAsModalExclusive = <T>(
+  photoshop: any,
+  operation: () => Promise<T>,
+  options: Record<string, unknown>
+): Promise<T> => runPSExclusive(() => photoshop.core.executeAsModal(operation, options));
 
 const toBounds = (bounds: any): SelectionBounds => ({
   left: Math.round(Number(bounds.left)),
@@ -61,7 +68,7 @@ const MASK_MAX_CONTRACT = 120;
 const MASK_MAX_FEATHER = 1200;
 const DEFAULT_GROUP_NAME = "PXD生成结果";
 
-const runJsxCode = async (jsx: string) => {
+const runJsxCodeUnlocked = async (jsx: string) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
   const folder = await bridge.getDataFolder();
   if (!folder) return null;
@@ -90,6 +97,8 @@ const runJsxCode = async (jsx: string) => {
     { commandName: "run jsx code" }
   );
 };
+
+const runJsxCode = (jsx: string) => runPSExclusive(() => runJsxCodeUnlocked(jsx));
 
 const computeMaskAdjustments = (bounds: SelectionBounds, featherOverride?: number) => {
   const width = Math.max(0, bounds.right - bounds.left);
@@ -160,7 +169,7 @@ const resizeActiveLayerToBounds = async (bounds: SelectionBounds) => {
 const tryCreateMaskFromSelection = async (hasSelection: boolean) => {
   try {
     const photoshop = ensureModule(getPhotoshop, "Photoshop");
-    await photoshop.core.executeAsModal(async () => {
+    await executeAsModalExclusive(photoshop, async () => {
       await photoshop.app.batchPlay(
         [
           {
@@ -259,7 +268,7 @@ export const groupLayers = async (layerIds: number[], groupName = DEFAULT_GROUP_
     console.warn("groupLayers failed", error);
   }
   try {
-    const info = await photoshop.core.executeAsModal(async () => {
+    const info = await executeAsModalExclusive(photoshop, async () => {
       const result = await photoshop.app.batchPlay(
         [
           {
@@ -299,7 +308,8 @@ export const getSelectionPixels = async (): Promise<SelectionPixels | null> => {
       return null;
     }
     const bounds = toBounds(doc.selection.bounds);
-    return await photoshop.core.executeAsModal(
+    return await executeAsModalExclusive(
+      photoshop,
       async () => {
         const options = {
           documentID: doc.id,
@@ -333,7 +343,7 @@ export const getSelectionPixels = async (): Promise<SelectionPixels | null> => {
 
 export const setSelectionBounds = async (bounds: SelectionBounds) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  await photoshop.core.executeAsModal(async () => {
+  await executeAsModalExclusive(photoshop, async () => {
     await photoshop.app.batchPlay(
       [
         {
@@ -366,7 +376,8 @@ export const placeImageIntoSelection = async (
 
   const token = await createTempTokenFromBase64(base64, `img-${index}.png`);
 
-  await photoshop.core.executeAsModal(
+  await executeAsModalExclusive(
+    photoshop,
     async () => {
       const steps: any[] = [
         {
@@ -399,7 +410,7 @@ export const placeImageIntoSelection = async (
     { commandName: "import image file" }
   );
 
-  const info = await photoshop.core.executeAsModal(async () => {
+  const info = await executeAsModalExclusive(photoshop, async () => {
     const result = await photoshop.app.batchPlay(
       [
         {
@@ -430,7 +441,8 @@ export const placeImageIntoDocument = async (dataUrl: string, index = 1, docId?:
   const base64 = dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
   const token = await createTempTokenFromBase64(base64, `imgdoc-${index}.png`);
 
-  await photoshop.core.executeAsModal(
+  await executeAsModalExclusive(
+    photoshop,
     async () => {
       const steps: any[] = [
         {
@@ -456,7 +468,7 @@ export const placeImageIntoDocument = async (dataUrl: string, index = 1, docId?:
     { commandName: "import image file" }
   );
 
-  const info = await photoshop.core.executeAsModal(async () => {
+  const info = await executeAsModalExclusive(photoshop, async () => {
     const result = await photoshop.app.batchPlay(
       [
         {
@@ -473,7 +485,7 @@ export const placeImageIntoDocument = async (dataUrl: string, index = 1, docId?:
 
 export const moveActiveLayerToTop = async () => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  await photoshop.core.executeAsModal(async () => {
+  await executeAsModalExclusive(photoshop, async () => {
     await photoshop.app.batchPlay(
       [
         {
@@ -584,7 +596,7 @@ export const onBatchAddLayer = async (): Promise<[number, number, number] | null
 
 export const switchToDocument = async (docId: number) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  await photoshop.core.executeAsModal(async () => {
+  await executeAsModalExclusive(photoshop, async () => {
     await photoshop.app.batchPlay(
       [
         {
