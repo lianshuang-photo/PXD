@@ -18,6 +18,7 @@ import {
   switchToDocument,
   type SelectionPixels
 } from "../services/photoshop";
+import { clearPSLockQueue, isPSLockControlError } from "../services/psLock";
 import {
   deletePresetFile,
   listPresetMetas,
@@ -180,6 +181,13 @@ const generateId = () => {
     return crypto.randomUUID();
   }
   return `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+};
+
+const ignoreBestEffortPhotoshopError = (label: string, error: unknown) => {
+  if (isPSLockControlError(error)) {
+    throw error;
+  }
+  console.warn(label, error);
 };
 
 const clampNumber = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -543,12 +551,13 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   }, [client, stopPolling]);
 
   const runGeneration = useCallback(async () => {
+    const taskId = generateId();
     setStatus("running");
     setError(null);
     setProgress(0);
     dismissToast();
     try {
-      const selection = await getSelectionPixels();
+      const selection = await getSelectionPixels({ taskId });
       if (!selection) {
         throw new Error("请先在 Photoshop 中选择一个区域");
       }
@@ -583,17 +592,25 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       const feather = Number.isFinite(form.maskFeather) ? form.maskFeather : DEFAULT_FORM.maskFeather;
       for (let i = 0; i < images.length; i++) {
         const info = await placeImageIntoSelection(toDataUrl(images[i]), i + 1, {
-          feather
+          feather,
+          taskId
         });
         const id = extractLayerId(info);
         if (id) {
           placedLayerIds.push(id);
         }
       }
+      let topLayerId = placedLayerIds[placedLayerIds.length - 1];
       if (placedLayerIds.length > 1) {
-        await groupLayers(placedLayerIds).catch((error) => console.warn("groupLayers failed", error));
+        const groupId = await groupLayers(placedLayerIds, undefined, { taskId }).catch((error) => {
+          ignoreBestEffortPhotoshopError("groupLayers failed", error);
+          return null;
+        });
+        topLayerId = groupId ?? topLayerId;
       }
-      await moveActiveLayerToTop();
+      if (topLayerId) {
+        await moveActiveLayerToTop({ taskId, layerId: topLayerId });
+      }
       setLastImages(images.map(toDataUrl));
       setStatus("success");
       pushToast("success", "生成成功");
@@ -610,8 +627,9 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   }, [client, dismissToast, form, imageModelClient, pollProgress, pushToast, settings, stopPolling]);
 
   const addToBatch = useCallback(async () => {
+    const taskId = generateId();
     try {
-      const selection = await getSelectionPixels();
+      const selection = await getSelectionPixels({ taskId });
       if (!selection) {
         pushToast("warning", "没有检测到有效选区");
         return;
@@ -620,12 +638,12 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       const { width, height } = computeOverrideSize(selection.width, selection.height, target);
       let docInfo: [number, number, number] | null = null;
       try {
-        docInfo = await onBatchAddLayer();
+        docInfo = await onBatchAddLayer({ taskId });
       } catch (error) {
-        console.warn("onBatchAddLayer failed", error);
+        ignoreBestEffortPhotoshopError("onBatchAddLayer failed", error);
       }
       const item: BatchItem = {
-        id: generateId(),
+        id: taskId,
         name: createBatchItemName(form, batchItems.length),
         createdAt: new Date().toISOString(),
         form: { ...form },
@@ -651,26 +669,32 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
 
   const removeFromBatch = useCallback(
     async (id: string) => {
-      setBatchItems((prev) => {
-        const target = prev.find((item) => item.id === id);
-        if (target?.metadata?.batchDocumentId && target.metadata.activeDocumentId && target.metadata.newLayerId) {
-          closeDocument(target.metadata.batchDocumentId, target.metadata.activeDocumentId, target.metadata.newLayerId).catch(
-            (error) => console.warn("closeDocument failed", error)
-          );
-        }
-        return prev.filter((item) => item.id !== id);
-      });
+      const target = batchItems.find((item) => item.id === id);
+      clearPSLockQueue(id);
+      setBatchItems((prev) => prev.filter((item) => item.id !== id));
+      if (target?.metadata?.batchDocumentId && target.metadata.activeDocumentId && target.metadata.newLayerId) {
+        await closeDocument(
+          target.metadata.batchDocumentId,
+          target.metadata.activeDocumentId,
+          target.metadata.newLayerId,
+          { taskId: id }
+        );
+      }
     },
-    []
+    [batchItems]
   );
 
   const clearBatch = useCallback(async () => {
     const items = batchItems.slice();
     setBatchItems([]);
     for (const item of items) {
+      clearPSLockQueue(item.id);
       if (item.metadata?.batchDocumentId && item.metadata.activeDocumentId && item.metadata.newLayerId) {
-        await closeDocument(item.metadata.batchDocumentId, item.metadata.activeDocumentId, item.metadata.newLayerId).catch(
-          (error) => console.warn("closeDocument failed", error)
+        await closeDocument(
+          item.metadata.batchDocumentId,
+          item.metadata.activeDocumentId,
+          item.metadata.newLayerId,
+          { taskId: item.id }
         );
       }
     }
@@ -687,13 +711,13 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     try {
       for (const item of batchItems) {
         if (item.metadata?.activeDocumentId) {
-          await switchToDocument(item.metadata.activeDocumentId).catch((error) =>
-            console.warn("switchToDocument failed", error)
+          await switchToDocument(item.metadata.activeDocumentId, { taskId: item.id }).catch((error) =>
+            ignoreBestEffortPhotoshopError("switchToDocument failed", error)
           );
         }
         if (item.selection.selectionBounds) {
-          await setSelectionBounds(item.selection.selectionBounds).catch((error) =>
-            console.warn("setSelectionBounds failed", error)
+          await setSelectionBounds(item.selection.selectionBounds, { taskId: item.id }).catch((error) =>
+            ignoreBestEffortPhotoshopError("setSelectionBounds failed", error)
           );
         }
         let images: string[];
@@ -728,19 +752,25 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
             : DEFAULT_FORM.maskFeather;
         for (let i = 0; i < images.length; i++) {
           const info = await placeImageIntoSelection(toDataUrl(images[i]), i + 1, {
-            feather
+            feather,
+            taskId: item.id
           });
           const id = extractLayerId(info);
           if (id) {
             placedLayerIds.push(id);
           }
         }
+        let topLayerId = placedLayerIds[placedLayerIds.length - 1];
         if (placedLayerIds.length > 1) {
-          await groupLayers(placedLayerIds, item.name).catch((error) =>
-            console.warn("groupLayers failed", error)
-          );
+          const groupId = await groupLayers(placedLayerIds, item.name, { taskId: item.id }).catch((error) => {
+            ignoreBestEffortPhotoshopError("groupLayers failed", error);
+            return null;
+          });
+          topLayerId = groupId ?? topLayerId;
         }
-        await moveActiveLayerToTop();
+        if (topLayerId) {
+          await moveActiveLayerToTop({ taskId: item.id, layerId: topLayerId });
+        }
       }
       setBatchItems([]);
       setStatus("success");

@@ -32,6 +32,11 @@ export class PSOperationTimeoutError extends Error {
   }
 }
 
+export const isPSLockControlError = (
+  error: unknown
+): error is PSLockCancelledError | PSOperationTimeoutError =>
+  error instanceof PSLockCancelledError || error instanceof PSOperationTimeoutError;
+
 const waiters: LockWaiter[] = [];
 let isLocked = false;
 let cooldownTimer: ReturnType<typeof setTimeout> | null = null;
@@ -92,6 +97,8 @@ export const runPSExclusive = async <T>(
       : DEFAULT_TIMEOUT_MS;
   let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   const operationPromise = Promise.resolve().then(operation);
+  // UXP cannot cancel a running modal, so a timeout must not unlock concurrent work.
+  void operationPromise.then(release, release);
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutTimer = setTimeout(() => {
       reject(new PSOperationTimeoutError(timeoutMs, options.taskId));
@@ -104,6 +111,5 @@ export const runPSExclusive = async <T>(
     if (timeoutTimer) {
       clearTimeout(timeoutTimer);
     }
-    release();
   }
 };

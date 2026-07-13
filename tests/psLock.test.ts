@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { expect, test } from "vitest";
 import {
   acquirePSLock,
   clearPSLockQueue,
@@ -30,34 +29,42 @@ test("runPSExclusive executes queued operations in FIFO order without overlap", 
 
   await Promise.all([runOperation("a"), runOperation("b"), runOperation("c")]);
 
-  assert.equal(maximumActiveOperations, 1);
-  assert.deepEqual(events, ["start-a", "end-a", "start-b", "end-b", "start-c", "end-c"]);
+  expect(maximumActiveOperations).toBe(1);
+  expect(events).toEqual(["start-a", "end-a", "start-b", "end-b", "start-c", "end-c"]);
 });
 
-test("a timed-out operation rejects and releases the next queue entry", async () => {
-  const neverSettles = new Promise<void>(() => undefined);
-  const timedOut = runPSExclusive(() => neverSettles, { taskId: "hung", timeoutMs: 20 });
-  const following = runPSExclusive(() => "continued", { taskId: "next", timeoutMs: 500 });
+test("a timed-out operation keeps the queue blocked until the underlying work settles", async () => {
+  let settleHungOperation: (() => void) | undefined;
+  const hungOperation = new Promise<void>((resolve) => {
+    settleHungOperation = resolve;
+  });
+  let followingStarted = false;
+  const timedOut = runPSExclusive(() => hungOperation, { taskId: "hung", timeoutMs: 20 });
+  const following = runPSExclusive(() => {
+    followingStarted = true;
+    return "continued";
+  }, { taskId: "next", timeoutMs: 1_000 });
 
-  await assert.rejects(
-    timedOut,
-    (error: unknown) =>
-      error instanceof PSOperationTimeoutError && error.timeoutMs === 20 && error.taskId === "hung"
-  );
-  assert.equal(await following, "continued");
+  await expect(timedOut).rejects.toMatchObject({
+    name: PSOperationTimeoutError.name,
+    timeoutMs: 20,
+    taskId: "hung"
+  });
+  await delay(200);
+  expect(followingStarted).toBe(false);
+
+  settleHungOperation?.();
+  await expect(following).resolves.toBe("continued");
 });
 
 test("clearPSLockQueue only rejects pending entries for the selected task", async () => {
   const releaseActive = await acquirePSLock("active");
   const cancelled = acquirePSLock("cancelled");
   const retained = acquirePSLock("retained");
-  const cancelledAssertion = assert.rejects(
-    cancelled,
-    (error: unknown) => error instanceof PSLockCancelledError
-  );
+  const cancelledAssertion = expect(cancelled).rejects.toBeInstanceOf(PSLockCancelledError);
 
-  assert.equal(clearPSLockQueue("cancelled"), 1);
-  assert.equal(clearPSLockQueue("missing"), 0);
+  expect(clearPSLockQueue("cancelled")).toBe(1);
+  expect(clearPSLockQueue("missing")).toBe(0);
   releaseActive();
 
   await cancelledAssertion;
