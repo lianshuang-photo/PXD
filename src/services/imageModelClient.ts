@@ -43,11 +43,28 @@ interface GeminiResponse {
   }>;
 }
 
+const MAX_FALLBACK_IMAGE_BYTES = 20 * 1024 * 1024;
+const SUPPORTED_IMAGE_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "image/bmp",
+  "image/tiff"
+]);
+
 const sanitizeEndpoint = (value: string) => value.trim().replace(/\/+$/, "");
 const sanitizeModel = (value: string) => value.trim().replace(/^models\//, "");
 const stripDataUrl = (value: string) => value.replace(/^data:image\/[^;]+;base64,/i, "").replace(/\s/g, "");
 
 const ensureConfigured = (settings: AppSettings) => {
+  if (settings.offlineMode) {
+    throw new ImageModelError(
+      "离线模式下不能调用 Gemini 图像模型",
+      "OFFLINE_MODE",
+      "请在设置中关闭离线模式后再生成；选区图片只会在关闭后发送到所配置的服务。"
+    );
+  }
   if (!settings.geminiEndpoint.trim()) {
     throw new ImageModelError("未配置 Gemini 服务地址", "CONFIG_ENDPOINT", "请在设置中填写 Gemini Endpoint。");
   }
@@ -90,6 +107,139 @@ const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
   return btoa(binary);
 };
 
+const parseIpv4 = (hostname: string) => {
+  const parts = hostname.split(".");
+  if (parts.length !== 4 || parts.some((part) => !/^\d+$/.test(part))) return null;
+  const octets = parts.map(Number);
+  return octets.every((octet) => octet >= 0 && octet <= 255) ? octets : null;
+};
+
+const isBlockedIpv4 = ([a, b]: number[]) =>
+  a === 0 ||
+  a === 10 ||
+  a === 127 ||
+  (a === 100 && b >= 64 && b <= 127) ||
+  (a === 169 && b === 254) ||
+  (a === 172 && b >= 16 && b <= 31) ||
+  (a === 192 && (b === 0 || b === 168)) ||
+  (a === 198 && (b === 18 || b === 19)) ||
+  a >= 224;
+
+const parseIpv6 = (hostname: string) => {
+  let input = hostname;
+  const dottedTail = input.match(/(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+  if (dottedTail) {
+    const ipv4 = parseIpv4(dottedTail);
+    if (!ipv4) return null;
+    input = input.slice(0, -dottedTail.length) +
+      `${((ipv4[0] << 8) | ipv4[1]).toString(16)}:${((ipv4[2] << 8) | ipv4[3]).toString(16)}`;
+  }
+  const halves = input.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves[1] ? halves[1].split(":") : [];
+  if (halves.length === 1 && left.length !== 8) return null;
+  const omitted = 8 - left.length - right.length;
+  if (omitted < (halves.length === 2 ? 1 : 0)) return null;
+  const groups = [...left, ...Array(omitted).fill("0"), ...right];
+  if (groups.length !== 8 || groups.some((group) => !/^[a-f0-9]{1,4}$/i.test(group))) return null;
+  return groups.map((group) => Number.parseInt(group, 16));
+};
+
+const isBlockedIpv6 = (groups: number[]) => {
+  const allZeroPrefix = groups.slice(0, 6).every((group) => group === 0);
+  const embeddedIpv4 = [groups[6] >> 8, groups[6] & 0xff, groups[7] >> 8, groups[7] & 0xff];
+  return (
+    groups.every((group) => group === 0) ||
+    (groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1) ||
+    (groups[0] & 0xfe00) === 0xfc00 ||
+    (groups[0] & 0xffc0) === 0xfe80 ||
+    (groups[0] & 0xffc0) === 0xfec0 ||
+    (groups[0] & 0xff00) === 0xff00 ||
+    (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff && isBlockedIpv4(embeddedIpv4)) ||
+    (allZeroPrefix && isBlockedIpv4(embeddedIpv4))
+  );
+};
+
+const isBlockedHostname = (hostname: string) => {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (!normalized || normalized === "localhost" || normalized.endsWith(".localhost")) return true;
+  if (
+    normalized.endsWith(".local") ||
+    normalized.endsWith(".internal") ||
+    normalized.endsWith(".lan") ||
+    normalized.endsWith(".home") ||
+    normalized.endsWith(".home.arpa")
+  ) return true;
+
+  const ipv4 = parseIpv4(normalized);
+  if (ipv4) return isBlockedIpv4(ipv4);
+  if (normalized.includes(":")) {
+    const ipv6 = parseIpv6(normalized);
+    return ipv6 ? isBlockedIpv6(ipv6) : true;
+  }
+  return !normalized.includes(".");
+};
+
+const validatePublicImageUrl = (value: string) => {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ImageModelError("模型返回了无效的图片地址", "RESPONSE_IMAGE_URL", "请检查中转服务的响应格式。");
+  }
+  if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) {
+    throw new ImageModelError("模型返回了不安全的图片地址", "RESPONSE_IMAGE_URL", "仅支持不含凭据的公网 HTTP(S) 图片地址。");
+  }
+  if (isBlockedHostname(url.hostname)) {
+    throw new ImageModelError(
+      "模型返回的图片地址指向本地或私有网络",
+      "RESPONSE_IMAGE_PRIVATE_URL",
+      "请让服务以内联图片数据返回结果，或使用可公开访问的图片地址。"
+    );
+  }
+  return url.toString();
+};
+
+const readLimitedResponseBody = async (response: Response, declaredLength: number | null) => {
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    if (declaredLength === null) {
+      throw new ImageModelError(
+        "当前环境无法安全读取未声明大小的图片",
+        "RESPONSE_IMAGE_LENGTH_REQUIRED",
+        "请让图片服务返回 Content-Length，或以内联图片数据返回结果。"
+      );
+    }
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > MAX_FALLBACK_IMAGE_BYTES) {
+      throw new ImageModelError("模型返回的图片过大", "RESPONSE_IMAGE_TOO_LARGE", "请让服务返回 20 MB 以内的图片。");
+    }
+    return buffer;
+  }
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > MAX_FALLBACK_IMAGE_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new ImageModelError("模型返回的图片过大", "RESPONSE_IMAGE_TOO_LARGE", "请让服务返回 20 MB 以内的图片。");
+    }
+    chunks.push(value);
+  }
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output.buffer;
+};
+
 const extractEmbeddedBase64 = (text: string) => {
   const match = text.match(/data:image\/[a-z0-9.+-]+;base64,([a-z0-9+/=\s]+)/i);
   return match?.[1] ? stripDataUrl(match[1]) : null;
@@ -114,7 +264,8 @@ const safetyReasonLabel = (reason: string) => {
 };
 
 const downloadImageAsBase64 = async (url: string, signal: AbortSignal) => {
-  const response = await fetch(url, { method: "GET", signal });
+  const safeUrl = validatePublicImageUrl(url);
+  const response = await fetch(safeUrl, { method: "GET", signal, redirect: "error" });
   if (!response.ok) {
     throw new ImageModelError(
       `模型返回的图片下载失败（HTTP ${response.status}）`,
@@ -123,11 +274,18 @@ const downloadImageAsBase64 = async (url: string, signal: AbortSignal) => {
       response.status
     );
   }
-  const contentType = response.headers.get("content-type") ?? "";
-  if (contentType && !contentType.toLowerCase().startsWith("image/")) {
-    throw new ImageModelError("模型返回的地址不是图片", "RESPONSE_IMAGE_TYPE", "请检查中转服务的响应格式。");
+  const contentType = (response.headers.get("content-type") ?? "").split(";", 1)[0].trim().toLowerCase();
+  if (!SUPPORTED_IMAGE_TYPES.has(contentType)) {
+    throw new ImageModelError("模型返回的地址不是受支持的图片", "RESPONSE_IMAGE_TYPE", "请让图片服务返回有效的 PNG、JPEG、WebP、GIF、BMP 或 TIFF Content-Type。");
   }
-  return arrayBufferToBase64(await response.arrayBuffer());
+  const contentLengthHeader = response.headers.get("content-length");
+  const contentLength = contentLengthHeader && /^\d+$/.test(contentLengthHeader)
+    ? Number(contentLengthHeader)
+    : null;
+  if (contentLength !== null && (!Number.isSafeInteger(contentLength) || contentLength > MAX_FALLBACK_IMAGE_BYTES)) {
+    throw new ImageModelError("模型返回的图片过大", "RESPONSE_IMAGE_TOO_LARGE", "请让服务返回 20 MB 以内的图片。");
+  }
+  return arrayBufferToBase64(await readLimitedResponseBody(response, contentLength));
 };
 
 const parseImage = async (data: GeminiResponse, signal: AbortSignal): Promise<string> => {

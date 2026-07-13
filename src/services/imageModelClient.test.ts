@@ -5,6 +5,7 @@ import { createImageModelClient, ImageModelError } from "./imageModelClient";
 const settings = {
   ...DEFAULT_SETTINGS,
   imageProvider: "gemini" as const,
+  offlineMode: false,
   geminiEndpoint: "https://example.test/root/",
   geminiApiKey: "secret key",
   geminiModel: "models/image-model"
@@ -13,6 +14,11 @@ const settings = {
 const inlineResponse = (data = "OUTPUT_BASE64") =>
   new Response(JSON.stringify({
     candidates: [{ content: { parts: [{ text: "done" }, { inlineData: { mimeType: "image/png", data } }] } }]
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+const urlResponse = (url: string) =>
+  new Response(JSON.stringify({
+    candidates: [{ content: { parts: [{ text: `![result](${url})` }] } }]
   }), { status: 200, headers: { "Content-Type": "application/json" } });
 
 const editParams = {
@@ -27,6 +33,20 @@ afterEach(() => {
 });
 
 describe("createImageModelClient", () => {
+  it("refuses to upload the selection while offline mode is enabled", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await createImageModelClient({ ...settings, offlineMode: true })
+      .editImage(editParams)
+      .catch((caught) => caught);
+
+    expect(error).toMatchObject({ code: "OFFLINE_MODE" });
+    expect(error.message).toContain("离线模式");
+    expect(error.solution).toContain("关闭离线模式");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("builds a query-key request and returns the first inline image", async () => {
     const fetchMock = vi.fn().mockResolvedValue(inlineResponse());
     vi.stubGlobal("fetch", fetchMock);
@@ -108,6 +128,104 @@ describe("createImageModelClient", () => {
 
     await expect(createImageModelClient(settings).editImage(editParams)).resolves.toBe("ZmFrZQ==");
     expect(fetchMock.mock.calls[1][0]).toBe("https://cdn.test/result.png");
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({ redirect: "error" });
+  });
+
+  it.each([
+    "http://localhost/result.png",
+    "http://127.0.0.1/result.png",
+    "http://127.1/result.png",
+    "http://2130706433/result.png",
+    "http://10.0.0.1/result.png",
+    "http://172.16.0.1/result.png",
+    "http://192.168.1.1/result.png",
+    "http://169.254.169.254/latest.png",
+    "http://[::1]/result.png",
+    "http://[::ffff:127.0.0.1]/result.png",
+    "http://[fc00::1]/result.png",
+    "http://printer.local/result.png"
+  ])("blocks private or local fallback URL %s before downloading", async (url) => {
+    const fetchMock = vi.fn().mockResolvedValue(urlResponse(url));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createImageModelClient(settings).editImage(editParams))
+      .rejects.toMatchObject({ code: "RESPONSE_IMAGE_PRIVATE_URL" });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("requires a supported image Content-Type", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(urlResponse("https://cdn.test/result.png"))
+      .mockResolvedValueOnce(new Response("not an image", {
+        status: 200,
+        headers: { "Content-Type": "text/plain" }
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createImageModelClient(settings).editImage(editParams))
+      .rejects.toMatchObject({ code: "RESPONSE_IMAGE_TYPE" });
+  });
+
+  it("rejects an oversized declared Content-Length before reading", async () => {
+    const arrayBuffer = vi.fn();
+    const oversizedResponse = {
+      ok: true,
+      status: 200,
+      headers: new Headers({
+        "Content-Type": "image/png",
+        "Content-Length": String(20 * 1024 * 1024 + 1)
+      }),
+      body: null,
+      arrayBuffer
+    } as unknown as Response;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(urlResponse("https://cdn.test/result.png"))
+      .mockResolvedValueOnce(oversizedResponse);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createImageModelClient(settings).editImage(editParams))
+      .rejects.toMatchObject({ code: "RESPONSE_IMAGE_TOO_LARGE" });
+    expect(arrayBuffer).not.toHaveBeenCalled();
+  });
+
+  it("cancels a streaming download when actual bytes exceed the limit", async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const reader = {
+      read: vi.fn()
+        .mockResolvedValueOnce({ done: false, value: new Uint8Array(12 * 1024 * 1024) })
+        .mockResolvedValueOnce({ done: false, value: new Uint8Array(9 * 1024 * 1024) }),
+      cancel
+    };
+    const streamingResponse = {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "Content-Type": "image/png" }),
+      body: { getReader: () => reader }
+    } as unknown as Response;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(urlResponse("https://cdn.test/result.png"))
+      .mockResolvedValueOnce(streamingResponse);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createImageModelClient(settings).editImage(editParams))
+      .rejects.toMatchObject({ code: "RESPONSE_IMAGE_TOO_LARGE" });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("supports a bounded non-streaming response in UXP-style environments", async () => {
+    const fallbackResponse = {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "Content-Type": "image/png", "Content-Length": "4" }),
+      body: null,
+      arrayBuffer: vi.fn().mockResolvedValue(new Uint8Array([102, 97, 107, 101]).buffer)
+    } as unknown as Response;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(urlResponse("https://cdn.test/result.png"))
+      .mockResolvedValueOnce(fallbackResponse);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createImageModelClient(settings).editImage(editParams)).resolves.toBe("ZmFrZQ==");
   });
 
   it("reports an invalid success response without calling it a network failure", async () => {

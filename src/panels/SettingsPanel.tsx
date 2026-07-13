@@ -32,6 +32,12 @@ const SettingsPanel = ({ settings, onUpdate, onRefresh, saving, loading }: Props
 
   const handlePing = async () => {
     setPingResult("idle");
+    setMessage(null);
+    if (form.imageProvider === "gemini" && form.offlineMode) {
+      setMessage("离线模式已开启。请关闭离线模式后再连接 Gemini 服务。");
+      setPingResult("error");
+      return;
+    }
     try {
       const isGemini = form.imageProvider === "gemini";
       const model = form.geminiModel.trim().replace(/^models\//, "");
