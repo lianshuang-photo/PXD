@@ -1,25 +1,17 @@
-import { useCallback, useLayoutEffect, useRef } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef } from "react";
 import type { GenerationEngine } from "../services/generationEngine";
 
 export interface EngineGenerationToken {
   engine: GenerationEngine;
-  generation: number;
 }
 
 export const useEngineLifecycle = (engine: GenerationEngine) => {
-  const tokenRef = useRef<EngineGenerationToken>({ engine, generation: 0 });
+  const token = useMemo<EngineGenerationToken>(() => ({ engine }), [engine]);
+  const committedTokenRef = useRef(token);
   const pollingRef = useRef<{
     interval: ReturnType<typeof setInterval>;
     token: EngineGenerationToken;
   } | null>(null);
-
-  if (tokenRef.current.engine !== engine) {
-    tokenRef.current = {
-      engine,
-      generation: tokenRef.current.generation + 1
-    };
-  }
-  const token = tokenRef.current;
 
   const stopPolling = useCallback((candidate?: EngineGenerationToken) => {
     if (pollingRef.current && (!candidate || pollingRef.current.token === candidate)) {
@@ -29,7 +21,7 @@ export const useEngineLifecycle = (engine: GenerationEngine) => {
   }, []);
 
   const isCurrent = useCallback(
-    (candidate: EngineGenerationToken) => tokenRef.current === candidate,
+    (candidate: EngineGenerationToken) => committedTokenRef.current === candidate,
     []
   );
 
@@ -72,9 +64,10 @@ export const useEngineLifecycle = (engine: GenerationEngine) => {
   );
 
   useLayoutEffect(() => {
+    committedTokenRef.current = token;
     stopPolling();
     return () => stopPolling();
-  }, [engine, stopPolling]);
+  }, [stopPolling, token]);
 
   return {
     token,

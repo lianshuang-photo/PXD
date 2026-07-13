@@ -97,6 +97,48 @@ afterEach(() => {
 });
 
 describe("useGenerationController engine switching", () => {
+  it("clears options loading when a new Forge engine has no endpoint", async () => {
+    let resolveOldOptions: ((options: SdOptions) => void) | null = null;
+    const oldOptions = vi.fn().mockImplementation(() => new Promise<SdOptions>((resolve) => {
+      resolveOldOptions = resolve;
+    }));
+    const forgeWithEndpoint = makeEngine("forge", { fetchOptions: oldOptions });
+    const forgeWithoutEndpoint = makeEngine("forge");
+    let controller: GenerationControllerState | null = null;
+    const Harness = ({ settings }: { settings: AppSettings }) => {
+      controller = useGenerationController(settings);
+      return null;
+    };
+
+    boundary.engine = forgeWithEndpoint;
+    let renderer: TestRenderer.ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(createElement(Harness, { settings: DEFAULT_SETTINGS }));
+    });
+    await flushEffects();
+    expect(oldOptions).toHaveBeenCalledOnce();
+    expect((controller as unknown as GenerationControllerState).optionsLoading).toBe(true);
+
+    boundary.engine = forgeWithoutEndpoint;
+    act(() => renderer.update(createElement(Harness, {
+      settings: { ...DEFAULT_SETTINGS, sdEndpoint: "" }
+    })));
+    await flushEffects();
+
+    let current = controller as unknown as GenerationControllerState;
+    expect(current.optionsLoading).toBe(false);
+    expect(current.optionsError).toBe("请先在设置中配置算力地址");
+
+    await act(async () => {
+      resolveOldOptions?.(modelOptions("stale-model"));
+      await Promise.resolve();
+    });
+    current = controller as unknown as GenerationControllerState;
+    expect(current.optionsLoading).toBe(false);
+    expect(current.options.models).toEqual([]);
+    act(() => renderer.unmount());
+  });
+
   it("keeps the newest Forge options during a rapid Forge-Gemini-Forge switch", async () => {
     let resolveOldOptions: ((options: SdOptions) => void) | null = null;
     const oldOptions = vi.fn().mockImplementation(() => new Promise<SdOptions>((resolve) => {

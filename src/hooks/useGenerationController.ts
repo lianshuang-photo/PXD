@@ -524,6 +524,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       commitIfCurrent(requestToken, () => {
         setOptions(EMPTY_OPTIONS);
         setOptionsError("请先在设置中配置算力地址");
+        setOptionsLoading(false);
       });
       return;
     }
