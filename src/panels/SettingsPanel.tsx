@@ -32,9 +32,28 @@ const SettingsPanel = ({ settings, onUpdate, onRefresh, saving, loading }: Props
 
   const handlePing = async () => {
     setPingResult("idle");
+    setMessage(null);
+    if (form.imageProvider === "gemini" && form.offlineMode) {
+      setMessage("离线模式已开启。请关闭离线模式后再连接 Gemini 服务。");
+      setPingResult("error");
+      return;
+    }
     try {
-      const response = await fetch(`${form.sdEndpoint.replace(/\/+$/, "")}/sdapi/v1/sd-models`, {
-        method: "GET"
+      const isGemini = form.imageProvider === "gemini";
+      const model = form.geminiModel.trim().replace(/^models\//, "");
+      const geminiBaseUrl = `${form.geminiEndpoint.replace(/\/+$/, "")}/v1beta/models/${encodeURIComponent(model)}`;
+      const url =
+        isGemini && form.geminiAuthMode === "queryKey"
+          ? `${geminiBaseUrl}?key=${encodeURIComponent(form.geminiApiKey.trim())}`
+          : isGemini
+            ? geminiBaseUrl
+            : `${form.sdEndpoint.replace(/\/+$/, "")}/sdapi/v1/sd-models`;
+      const response = await fetch(url, {
+        method: "GET",
+        headers:
+          isGemini && form.geminiAuthMode === "bearer"
+            ? { Authorization: `Bearer ${form.geminiApiKey.trim()}` }
+            : undefined
       });
       setPingResult(response.ok ? "success" : "error");
     } catch (error) {
@@ -83,6 +102,73 @@ const SettingsPanel = ({ settings, onUpdate, onRefresh, saving, loading }: Props
 
       <div className="panel__body">
         <label className="form-field">
+          <span className="form-field__label">当前出图引擎</span>
+          <select
+            className="input"
+            value={form.imageProvider}
+            onChange={(event) =>
+              setForm((prev) => ({ ...prev, imageProvider: event.target.value as AppSettings["imageProvider"] }))
+            }
+          >
+            <option value="forge">Stable Diffusion Forge</option>
+            <option value="gemini">Gemini 图像模型</option>
+          </select>
+        </label>
+
+        {form.imageProvider === "gemini" && (
+          <>
+            <label className="form-field">
+              <span className="form-field__label">Gemini Endpoint</span>
+              <input
+                className="input"
+                type="text"
+                value={form.geminiEndpoint}
+                onChange={(event) => setForm((prev) => ({ ...prev, geminiEndpoint: event.target.value }))}
+                placeholder="https://generativelanguage.googleapis.com"
+              />
+            </label>
+
+            <label className="form-field">
+              <span className="form-field__label">Gemini API Key</span>
+              <input
+                className="input"
+                type="password"
+                value={form.geminiApiKey}
+                onChange={(event) => setForm((prev) => ({ ...prev, geminiApiKey: event.target.value }))}
+                autoComplete="off"
+                placeholder="输入 API Key"
+              />
+            </label>
+
+            <label className="form-field">
+              <span className="form-field__label">Gemini 模型</span>
+              <input
+                className="input"
+                type="text"
+                value={form.geminiModel}
+                onChange={(event) => setForm((prev) => ({ ...prev, geminiModel: event.target.value }))}
+                placeholder="gemini-2.5-flash-image"
+              />
+            </label>
+
+            <label className="form-field">
+              <span className="form-field__label">Gemini 鉴权模式</span>
+              <select
+                className="input"
+                value={form.geminiAuthMode}
+                onChange={(event) =>
+                  setForm((prev) => ({ ...prev, geminiAuthMode: event.target.value as AppSettings["geminiAuthMode"] }))
+                }
+              >
+                <option value="queryKey">URL Query Key（官方直连）</option>
+                <option value="bearer">Bearer Token（中转服务）</option>
+              </select>
+            </label>
+          </>
+        )}
+
+        {form.imageProvider === "forge" && (
+        <label className="form-field">
           <span className="form-field__label">Stable Diffusion 服务地址</span>
           <input
             className="input"
@@ -95,6 +181,7 @@ const SettingsPanel = ({ settings, onUpdate, onRefresh, saving, loading }: Props
             面板将直接连接本地或私有服务器，无需账号登录。
           </small>
         </label>
+        )}
 
         <label className="form-field form-field--row">
           <span className="form-field__label">离线模式</span>

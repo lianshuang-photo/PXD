@@ -8,6 +8,8 @@ type View = "main" | "settings";
 const App = () => {
   const [activeView, setActiveView] = useState<View>("main");
   const { settings, refresh, update, saving, loading } = useAppSettings();
+  const activeEndpoint =
+    settings.imageProvider === "gemini" ? settings.geminiEndpoint : settings.sdEndpoint;
 
   const renderActiveView = () => {
     switch (activeView) {
@@ -34,7 +36,7 @@ const App = () => {
           <h1 className="app-shell__title" style={{ margin: 0, fontSize: "14px", fontWeight: 600, whiteSpace: "nowrap" }}>PXD</h1>
           {activeView === "main" && (
             <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flex: 1, minWidth: 0, fontSize: "0.75rem" }}>
-              <span style={{ whiteSpace: "nowrap" }}>{settings.sdEndpoint ? "已连接" : "未配置"}</span>
+              <span style={{ whiteSpace: "nowrap" }}>{activeEndpoint ? "已配置" : "未配置"}</span>
               <span style={{ 
                 overflow: "hidden", 
                 textOverflow: "ellipsis", 
@@ -42,7 +44,7 @@ const App = () => {
                 color: "var(--text-secondary)",
                 fontSize: "0.7rem"
               }}>
-                {settings.sdEndpoint || ""}
+                {activeEndpoint || ""}
               </span>
             </div>
           )}

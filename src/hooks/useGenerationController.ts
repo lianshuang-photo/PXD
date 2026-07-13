@@ -6,6 +6,7 @@ import {
   type Img2ImgParams,
   type SdOptions
 } from "../services/apiClient";
+import { createImageModelClient, ImageModelError } from "../services/imageModelClient";
 import {
   closeDocument,
   getSelectionPixels,
@@ -130,6 +131,14 @@ const DEFAULT_FORM: GenerationForm = {
 };
 
 const toDataUrl = (base64: string) => `data:image/png;base64,${base64}`;
+const toBase64 = (dataUrl: string) => dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
+
+const formatGenerationError = (error: unknown, fallback: string) => {
+  if (error instanceof ImageModelError) {
+    return `${error.message}；建议：${error.solution}`;
+  }
+  return error instanceof Error ? error.message : fallback;
+};
 
 const computeOverrideSize = (width: number, height: number, target: number) => {
   if (width <= target && height <= target) {
@@ -270,6 +279,7 @@ export interface GenerationControllerState {
 
 export const useGenerationController = (settings: AppSettings): GenerationControllerState => {
   const client = useMemo(() => createPxdClient(settings), [settings]);
+  const imageModelClient = useMemo(() => createImageModelClient(settings), [settings]);
   const [form, setForm] = useState<GenerationForm>(DEFAULT_FORM);
   const [status, setStatus] = useState<GenerationStatus>("idle");
   const [progress, setProgress] = useState(0);
@@ -474,6 +484,12 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   }, [form.extraPrompt, pushToast]);
 
   const refreshOptions = useCallback(async () => {
+    if (settings.imageProvider === "gemini") {
+      setOptions(EMPTY_OPTIONS);
+      setOptionsError(null);
+      setOptionsLoading(false);
+      return;
+    }
     if (!settings.sdEndpoint) {
       setOptions(EMPTY_OPTIONS);
       setOptionsError("请先在设置中配置算力地址");
@@ -500,7 +516,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     } finally {
       setOptionsLoading(false);
     }
-  }, [client, settings.sdEndpoint]);
+  }, [client, settings.imageProvider, settings.sdEndpoint]);
 
   useEffect(() => {
     refreshOptions().catch((err) => {
@@ -538,12 +554,28 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       }
       const target = clampNumber(form.resolution, 128, 2048);
       const { width, height } = computeOverrideSize(selection.width, selection.height, target);
-      const params = buildImg2ImgParams(form, selection.dataUrl, width, height);
-      await pollProgress();
-      const result = await client.img2img(params);
-      stopPolling();
+      let images: string[];
+      if (settings.imageProvider === "gemini") {
+        const prompt = [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim();
+        const timeoutMs = Math.max(
+          5_000,
+          Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)
+        );
+        const image = await imageModelClient.editImage({
+          prompt,
+          baseImageBase64: toBase64(selection.dataUrl),
+          aspectRatio: "Auto",
+          timeoutMs
+        });
+        images = [image];
+      } else {
+        const params = buildImg2ImgParams(form, selection.dataUrl, width, height);
+        await pollProgress();
+        const result = await client.img2img(params);
+        stopPolling();
+        images = result.images ?? [];
+      }
       setProgress(1);
-      const images = result.images ?? [];
       if (!images.length) {
         throw new Error("未收到可用的生成图像");
       }
@@ -567,7 +599,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       pushToast("success", "生成成功");
     } catch (err) {
       stopPolling();
-      const message = err instanceof Error ? err.message : "生成失败";
+      const message = formatGenerationError(err, "生成失败");
       setStatus("error");
       setError(message);
       pushToast("error", message);
@@ -575,7 +607,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       stopPolling();
       setProgress(0);
     }
-  }, [client, form, pollProgress, stopPolling, pushToast]);
+  }, [client, dismissToast, form, imageModelClient, pollProgress, pushToast, settings, stopPolling]);
 
   const addToBatch = useCallback(async () => {
     try {
@@ -664,11 +696,28 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
             console.warn("setSelectionBounds failed", error)
           );
         }
-        const params = buildImg2ImgParams(item.form, item.selection.dataUrl, item.overrideWidth, item.overrideHeight);
-        await pollProgress();
-        const result = await client.img2img(params);
-        stopPolling();
-        const images = result.images ?? [];
+        let images: string[];
+        if (settings.imageProvider === "gemini") {
+          const prompt = [item.form.positivePrompt, item.form.extraPrompt].filter(Boolean).join("\n").trim();
+          const timeoutMs = Math.max(
+            5_000,
+            Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)
+          );
+          const image = await imageModelClient.editImage({
+            prompt,
+            baseImageBase64: toBase64(item.selection.dataUrl),
+            aspectRatio: "Auto",
+            timeoutMs,
+            taskId: item.id
+          });
+          images = [image];
+        } else {
+          const params = buildImg2ImgParams(item.form, item.selection.dataUrl, item.overrideWidth, item.overrideHeight);
+          await pollProgress();
+          const result = await client.img2img(params);
+          stopPolling();
+          images = result.images ?? [];
+        }
         if (!images.length) {
           throw new Error(`批次「${item.name}」未返回图像`);
         }
@@ -698,14 +747,14 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       pushToast("success", "批次执行完成");
     } catch (error) {
       stopPolling();
-      const message = error instanceof Error ? error.message : "批次执行失败";
+      const message = formatGenerationError(error, "批次执行失败");
       setStatus("error");
       setError(message);
       pushToast("error", message);
     } finally {
       stopPolling();
     }
-  }, [batchItems, client, pollProgress, stopPolling, pushToast]);
+  }, [batchItems, client, imageModelClient, pollProgress, pushToast, settings, stopPolling]);
 
   const applyPreset = useCallback(
     async (fileName: string) => {
