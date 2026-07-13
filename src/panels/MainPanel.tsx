@@ -1,8 +1,13 @@
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import type { AppSettings } from "../context/types";
 import { useGenerationController } from "../hooks/useGenerationController";
+import { useLayoutExperience } from "../hooks/useLayoutExperience";
 import OverlayPortal from "../components/OverlayPortal";
 import PromptParamControls from "../components/PromptParamControls";
+import LayoutSnapshotControls from "../components/LayoutSnapshotControls";
+import OnboardingGuide from "../components/OnboardingGuide";
+import WorkspaceSection from "../components/WorkspaceSection";
+import type { LayoutSectionId } from "../services/layoutExperience";
 
 interface Props {
   settings: AppSettings;
@@ -111,7 +116,17 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
   const [presetName, setPresetName] = useState<string>("");
   const [customResolution, setCustomResolution] = useState(false);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
+  const [layoutToolsOpen, setLayoutToolsOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
   const confirmResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const guideAutoStartChecked = useRef(false);
+  const layoutExperience = useLayoutExperience();
+
+  useEffect(() => {
+    if (layoutExperience.loading || guideAutoStartChecked.current) return;
+    guideAutoStartChecked.current = true;
+    if (!layoutExperience.store.guide.completed) setGuideOpen(true);
+  }, [layoutExperience.loading, layoutExperience.store.guide.completed]);
 
   useEffect(() => {
     if (!presets.length) {
@@ -344,6 +359,33 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     setTargetLanguage(sourceLanguage);
   };
 
+  const sectionProps = (id: LayoutSectionId) => {
+    const index = layoutExperience.store.layout.order.indexOf(id);
+    return {
+      id,
+      collapsed: layoutExperience.store.layout.collapsed.includes(id),
+      order: index,
+      first: index === 0,
+      last: index === layoutExperience.store.layout.order.length - 1,
+      busy: layoutExperience.saving,
+      onToggle: (sectionId: LayoutSectionId, collapsed: boolean) => {
+        void layoutExperience.setSectionCollapsed(sectionId, collapsed).catch(() => undefined);
+      },
+      onMove: (sectionId: LayoutSectionId, direction: -1 | 1) => {
+        void layoutExperience.moveSection(sectionId, direction).catch(() => undefined);
+      }
+    };
+  };
+
+  const startGuide = async () => {
+    try {
+      if (layoutExperience.store.guide.completed) await layoutExperience.restartGuide();
+      setGuideOpen(true);
+    } catch {
+      setLayoutToolsOpen(true);
+    }
+  };
+
   return (
     <>
       <section
@@ -359,7 +401,9 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
         }}
       >
       {/* 简化的操作栏 */}
-      <div style={{ 
+      <div
+        data-guide="primary-actions"
+        style={{
         display: "flex", 
         gap: "0.12rem", 
         padding: "0.12rem 0.18rem", 
@@ -368,6 +412,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
         flexShrink: 0
       }}>
         <button
+          data-guide="generate-button"
           type="button"
           className="btn btn--primary"
           onClick={runGeneration}
@@ -417,7 +462,38 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
         >
           {optionsLoading ? "同步中" : "刷新"}
         </button>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          data-guide="layout-controls"
+          aria-expanded={layoutToolsOpen}
+          onClick={() => setLayoutToolsOpen((current) => !current)}
+          style={compactTopActionButtonStyle}
+        >
+          布局
+        </button>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          onClick={() => void startGuide()}
+          style={compactTopActionButtonStyle}
+        >
+          引导
+        </button>
       </div>
+      {layoutToolsOpen && (
+        <LayoutSnapshotControls
+          snapshots={layoutExperience.store.snapshots}
+          canUndo={Boolean(layoutExperience.store.undoLayout)}
+          busy={layoutExperience.saving || layoutExperience.loading}
+          error={layoutExperience.error}
+          onSave={layoutExperience.saveSnapshot}
+          onApply={layoutExperience.applySnapshot}
+          onDelete={layoutExperience.deleteSnapshot}
+          onUndo={layoutExperience.undoLayout}
+          onReset={layoutExperience.resetLayout}
+        />
+      )}
       
       {/* 进度条和错误提示 */}
       {status === "running" && (
@@ -455,8 +531,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
         <div style={{ maxWidth: "100%", width: "100%", boxSizing: "border-box" }}>
           <article style={{ width: "100%", padding: "0.25rem", background: "var(--bg-panel)", borderRadius: "4px", boxSizing: "border-box" }}>
             <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: "0.2rem", boxSizing: "border-box" }}>
-              {/* 预设 */}
-              <div>
+              <WorkspaceSection {...sectionProps("presets")} title="预设">
                 <div style={{ display: "flex", gap: "0.12rem", marginBottom: "0.12rem" }}>
                   <select
                     className="input"
@@ -514,9 +589,8 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                     清空
                   </button>
                 </div>
-              </div>
+              </WorkspaceSection>
 
-              <hr style={{ margin: "0.2rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
               <section aria-label="生成历史">
                 <div className="generation-history__header">
                   <span style={compactLabelStyle}>生成历史</span>
@@ -568,8 +642,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                 )}
               </section>
 
-              {/* 模型与采样 */}
-              <hr style={{ margin: "0.2rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
+              <WorkspaceSection {...sectionProps("models")} title="模型与采样">
               <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", marginBottom: "0.12rem" }}>
                 <span style={{ ...compactLabelStyle, minWidth: "1.5rem" }}>模型</span>
                 <select className="input" value={form.model} onChange={(event) => setFormValue("model", event.target.value)} style={{ flex: 1, minWidth: 0 }}>
@@ -616,9 +689,9 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   />
                 </div>
               </div>
+              </WorkspaceSection>
               
-              {/* 生成参数 */}
-              <hr style={{ margin: "0.2rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
+              <WorkspaceSection {...sectionProps("generation")} title="生成参数">
               <div style={{ display: "flex", gap: "0.12rem", marginBottom: "0.12rem" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", flex: 1, minWidth: 0 }}>
                   <span style={{ ...compactLabelStyle, minWidth: "1.2rem" }}>步数</span>
@@ -749,9 +822,9 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   />
                 </div>
               </div>
+              </WorkspaceSection>
               
-              {/* ControlNet */}
-              <hr style={{ margin: "0.2rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
+              <WorkspaceSection {...sectionProps("controlnet")} title="ControlNet">
               <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", marginBottom: "0.12rem" }}>
                 <span style={{ ...compactLabelStyle, minWidth: "1.5rem" }}>模型</span>
                 <select
@@ -791,9 +864,9 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   />
                 </div>
               </div>
+              </WorkspaceSection>
               
-              {/* 提示词 */}
-              <hr style={{ margin: "0.5rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
+              <WorkspaceSection {...sectionProps("prompts")} title="提示词">
               <textarea
                 className="input input--multiline"
                 value={form.positivePrompt}
@@ -883,9 +956,9 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                 label="追加提示词"
                 onChange={(value) => setFormValue("extraPrompt", value)}
               />
+              </WorkspaceSection>
               
-              {/* 翻译 */}
-              <hr style={{ margin: "0.5rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
+              <WorkspaceSection {...sectionProps("translation")} title="翻译助手">
               <div style={{ fontSize: "0.7rem", fontWeight: 500, marginBottom: "0.25rem", color: "var(--text-secondary)" }}>翻译助手（这个懒得找api也没啥用，如果你向下滑看到了就当没看见吧～）</div>
               <div style={{ display: "flex", gap: "0.35rem", marginBottom: "0.35rem" }}>
                 <select
@@ -960,13 +1033,11 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                 style={{ marginBottom: "0.5rem" }}
               />
               {translationError && <div style={{ color: "var(--error-color)", fontSize: "0.875rem", marginTop: "-0.35rem", marginBottom: "0.5rem" }}>{translationError}</div>}
+              </WorkspaceSection>
               
-              {/* 批次队列 */}
               {batchItems.length > 0 && (
-                <>
-                  <hr style={{ margin: "1rem 0", border: "none", borderTop: "1px solid var(--border-color)" }} />
+                <WorkspaceSection {...sectionProps("batch")} title={`批次队列 (${batchItems.length})`}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
-                    <span style={{ fontSize: "0.875rem", fontWeight: 500 }}>批次队列 ({batchItems.length})</span>
                     <button type="button" className="btn btn--ghost" onClick={clearBatch} disabled={status === "running"} style={{ padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}>
                       清空
                     </button>
@@ -987,19 +1058,17 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                       </li>
                     ))}
                   </ul>
-                </>
+                </WorkspaceSection>
               )}
               
-              {/* 最近输出 */}
               {lastImages.length > 0 && (
-                <>
-                  <hr style={{ margin: "1rem 0", border: "none", borderTop: "1px solid var(--border-color)" }} />
+                <WorkspaceSection {...sectionProps("outputs")} title="最近输出">
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(100px, 1fr))", gap: "0.5rem" }}>
                     {lastImages.map((src, index) => (
                       <img key={`${src}-${index}`} src={src} alt={`result-${index}`} style={{ width: "100%", borderRadius: "4px" }} />
                     ))}
                   </div>
-                </>
+                </WorkspaceSection>
               )}
             </div>
           </article>
@@ -1017,6 +1086,20 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
           </div>
         </OverlayPortal>
       )}
+      <OnboardingGuide
+        open={guideOpen}
+        stepIndex={layoutExperience.store.guide.stepIndex}
+        onStepChange={layoutExperience.setGuideStep}
+        onComplete={async () => {
+          await layoutExperience.completeGuide();
+          setGuideOpen(false);
+        }}
+        onPause={() => setGuideOpen(false)}
+        onSkip={async () => {
+          await layoutExperience.completeGuide();
+          setGuideOpen(false);
+        }}
+      />
     </>
   );
 };
