@@ -5,6 +5,8 @@ import OverlayPortal from "../components/OverlayPortal";
 
 interface Props {
   settings: AppSettings;
+  settingsLoading: boolean;
+  onUpdateSettings: (next: Partial<AppSettings>) => Promise<void>;
   onOpenSettings: () => void;
 }
 
@@ -35,8 +37,11 @@ const formatDateTime = (value: string | number) => {
   }
 };
 
-const MainPanel = ({ settings, onOpenSettings }: Props) => {
-  const controller = useGenerationController(settings);
+const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings }: Props) => {
+  const controller = useGenerationController(settings, {
+    settingsLoading,
+    updateSettings: onUpdateSettings
+  });
   const {
     form,
     setFormValue,
@@ -505,7 +510,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                             <button
                               type="button"
                               className="btn btn--ghost"
-                              onClick={() => restoreHistoryConfig(entry.id)}
+                              onClick={() => void restoreHistoryConfig(entry.id)}
                             >
                               回填配置
                             </button>

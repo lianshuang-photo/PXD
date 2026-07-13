@@ -270,7 +270,7 @@ export interface GenerationControllerState {
   history: GenerationHistoryEntry<GenerationForm>[];
   historyLoading: boolean;
   historyError: string | null;
-  restoreHistoryConfig: (id: string) => void;
+  restoreHistoryConfig: (id: string) => Promise<void>;
   pasteHistoryResult: (id: string) => Promise<void>;
   batchItems: BatchItem[];
   addToBatch: () => Promise<void>;
@@ -304,7 +304,15 @@ export interface GenerationControllerState {
   appendExtraPromptToNegative: () => void;
 }
 
-export const useGenerationController = (settings: AppSettings): GenerationControllerState => {
+export interface GenerationControllerSettingsActions {
+  settingsLoading?: boolean;
+  updateSettings?: (next: Pick<AppSettings, "imageProvider">) => Promise<void>;
+}
+
+export const useGenerationController = (
+  settings: AppSettings,
+  settingsActions: GenerationControllerSettingsActions = {}
+): GenerationControllerState => {
   const client = useMemo(() => createPxdClient(settings), [settings]);
   const imageModelClient = useMemo(() => createImageModelClient(settings), [settings]);
   const [form, setForm] = useState<GenerationForm>(DEFAULT_FORM);
@@ -328,6 +336,12 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   const pollingRef = useRef<number | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const presetsLoadGateRef = useRef(new LatestLoadGate());
+  const settingsRef = useRef(settings);
+  const historyRestoreGenerationRef = useRef(0);
+  const historyRestoreQueueRef = useRef<Promise<void>>(Promise.resolve());
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
   const clearToastTimer = useCallback(() => {
     if (toastTimerRef.current) {
       clearTimeout(toastTimerRef.current);
@@ -516,15 +530,43 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     pushToast("success", "已添加至反向提示词");
   }, [form.extraPrompt, pushToast]);
 
-  const restoreHistoryConfig = useCallback((id: string) => {
+  const restoreHistoryConfig = useCallback(async (id: string) => {
     const entry = history.find((candidate) => candidate.id === id);
     if (!entry) {
       pushToast("warning", "未找到这条生成历史");
       return;
     }
-    setForm(hydrateHistoryForm(entry.params, entry.prompt));
-    pushToast("success", "已回填历史配置");
-  }, [history, pushToast]);
+    if (settingsActions.settingsLoading) {
+      pushToast("warning", "设置仍在加载，请稍后回填历史配置");
+      return;
+    }
+    const generation = historyRestoreGenerationRef.current + 1;
+    historyRestoreGenerationRef.current = generation;
+    const restoredForm = hydrateHistoryForm(entry.params, entry.prompt);
+    const restore = historyRestoreQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (generation !== historyRestoreGenerationRef.current) return;
+        if (settingsRef.current.imageProvider !== entry.provider) {
+          if (!settingsActions.updateSettings) {
+            throw new Error("当前界面无法切换生成引擎，请先打开设置完成切换");
+          }
+          await settingsActions.updateSettings({ imageProvider: entry.provider });
+          settingsRef.current = { ...settingsRef.current, imageProvider: entry.provider };
+        }
+        if (generation !== historyRestoreGenerationRef.current) return;
+        setForm(restoredForm);
+        pushToast("success", "已回填历史配置与生成引擎");
+      });
+    historyRestoreQueueRef.current = restore;
+    try {
+      await restore;
+    } catch (caught) {
+      if (generation !== historyRestoreGenerationRef.current) return;
+      const message = caught instanceof Error ? caught.message : "历史配置回填失败";
+      pushToast("error", `历史配置回填失败：${message}`);
+    }
+  }, [history, pushToast, settingsActions.settingsLoading, settingsActions.updateSettings]);
 
   const pasteHistoryResult = useCallback(async (id: string) => {
     const entry = history.find((candidate) => candidate.id === id);
@@ -661,14 +703,14 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       }
       await moveActiveLayerToTop();
       setLastImages(images.map(toDataUrl));
-      await recordHistory({
+      const historyRecord = await recordHistory({
         provider: settings.imageProvider,
         prompt: effectivePromptFor(form),
         params: { ...form },
         resultDataUrl: toDataUrl(images[0])
       });
       setStatus("success");
-      pushToast("success", "生成成功");
+      if (historyRecord) pushToast("success", "生成成功");
     } catch (err) {
       stopPolling();
       const message = formatGenerationError(err, "生成失败");
@@ -756,6 +798,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     }
     setStatus("running");
     setError(null);
+    let historyRecorded = true;
     try {
       for (const item of batchItems) {
         if (item.metadata?.activeDocumentId) {
@@ -813,16 +856,17 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
           );
         }
         await moveActiveLayerToTop();
-        await recordHistory({
+        const historyRecord = await recordHistory({
           provider: settings.imageProvider,
           prompt: effectivePromptFor(item.form),
           params: { ...item.form },
           resultDataUrl: toDataUrl(images[0])
         });
+        if (!historyRecord) historyRecorded = false;
       }
       setBatchItems([]);
       setStatus("success");
-      pushToast("success", "批次执行完成");
+      if (historyRecorded) pushToast("success", "批次执行完成");
     } catch (error) {
       stopPolling();
       const message = formatGenerationError(error, "批次执行失败");

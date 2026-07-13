@@ -96,12 +96,15 @@ export const useGenerationHistory = <TParams>(onWarning: (message: string) => vo
       .catch(() => undefined)
       .then(() => saveGenerationHistory(next));
     writeChainRef.current = write;
-    void write.catch((caught) => {
+    try {
+      await write;
+      return entry;
+    } catch (caught) {
       const message = historyErrorMessage("保存", caught);
       if (mountedRef.current) setError(message);
       warningRef.current(message);
-    });
-    return entry;
+      return null;
+    }
   }, [load]);
 
   return { entries, loading, error, record, reload: load };

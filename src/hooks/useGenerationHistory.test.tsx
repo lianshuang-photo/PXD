@@ -65,13 +65,16 @@ describe("useGenerationHistory", () => {
     await flush();
     expect(getCurrent().entries).toEqual([persisted]);
 
+    let recordPromise!: Promise<GenerationHistoryEntry<TestParams> | null>;
     await act(async () => {
-      await getCurrent().record({
+      recordPromise = getCurrent().record({
         provider: "gemini",
         prompt: "new prompt",
         params: { prompt: "new prompt", steps: 28 },
         resultDataUrl: "data:image/png;base64,FULL"
       });
+      await Promise.resolve();
+      await Promise.resolve();
     });
 
     expect(getCurrent().entries).toHaveLength(2);
@@ -86,7 +89,7 @@ describe("useGenerationHistory", () => {
 
     await act(async () => {
       resolveSave?.();
-      await Promise.resolve();
+      await recordPromise;
     });
     act(() => renderer.unmount());
   });
