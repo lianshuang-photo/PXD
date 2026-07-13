@@ -24,6 +24,7 @@ import {
   savePresetFile,
   type PresetMeta
 } from "../services/presets";
+import { LatestLoadGate } from "../services/loadGate";
 import { translateText } from "../services/translator";
 
 export type GenerationStatus = "idle" | "running" | "success" | "error";
@@ -289,6 +290,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   const [targetLanguage, setTargetLanguage] = useState("en");
   const pollingRef = useRef<number | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const presetsLoadGateRef = useRef(new LatestLoadGate());
   const clearToastTimer = useCallback(() => {
     if (toastTimerRef.current) {
       clearTimeout(toastTimerRef.current);
@@ -358,8 +360,16 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   }, []);
 
   const loadPresets = useCallback(async () => {
-    const list = await listPresetMetas();
-    setPresets(list);
+    const gate = presetsLoadGateRef.current;
+    const generation = gate.begin();
+    try {
+      const list = await listPresetMetas();
+      if (gate.isCurrent(generation)) {
+        setPresets(list);
+      }
+    } finally {
+      gate.complete(generation);
+    }
   }, []);
 
   const runTranslation = useCallback(async () => {
@@ -716,6 +726,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
 
   const savePreset = useCallback(
     async (name: string) => {
+      presetsLoadGateRef.current.assertReady("预设仍在加载，请稍后重试");
       await savePresetFile<PresetPayload>(name, { form });
       setSelectedPreset(name);
       await loadPresets();
@@ -726,6 +737,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
 
   const deletePreset = useCallback(
     async (fileName: string) => {
+      presetsLoadGateRef.current.assertReady("预设仍在加载，请稍后重试");
       await deletePresetFile(fileName);
       await loadPresets();
       if (selectedPreset && fileName.startsWith(`${selectedPreset}`)) {

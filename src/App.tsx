@@ -7,13 +7,19 @@ type View = "main" | "settings";
 
 const App = () => {
   const [activeView, setActiveView] = useState<View>("main");
-  const { settings, refresh, update, saving } = useAppSettings();
+  const { settings, refresh, update, saving, loading } = useAppSettings();
 
   const renderActiveView = () => {
     switch (activeView) {
       case "settings":
         return (
-          <SettingsPanel settings={settings} onRefresh={refresh} onUpdate={update} saving={saving} />
+          <SettingsPanel
+            settings={settings}
+            onRefresh={refresh}
+            onUpdate={update}
+            saving={saving}
+            loading={loading}
+          />
         );
       case "main":
       default:

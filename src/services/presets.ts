@@ -1,4 +1,5 @@
 import { bridge } from "./uxpBridge";
+import { deletePresetEntries } from "./presetDeletion";
 
 const PRESET_FOLDER = "presets";
 
@@ -27,30 +28,36 @@ export const listPresetMetas = async (): Promise<PresetMeta[]> => {
     if (!folder) return [];
     const entries = await folder.getEntries();
     const presets: PresetMeta[] = [];
+    const presetFileNames = new Set<string>();
     for (const entry of entries) {
       if (!entry || !entry.isFile) continue;
       const name: string = entry.name || "";
-      if (!name.toLowerCase().endsWith(".json")) continue;
+      if (name.toLowerCase().endsWith(".json")) {
+        presetFileNames.add(name);
+      } else if (name.toLowerCase().endsWith(".json.bak")) {
+        presetFileNames.add(name.slice(0, -4));
+      }
+    }
+    for (const name of presetFileNames) {
       try {
-        const raw = await entry.read();
-        const parsed = JSON.parse(raw) as PresetFile;
+        const parsed = await bridge.readJsonEntry<PresetFile | null>(folder, name, null);
         if (parsed && parsed.meta && parsed.data !== undefined) {
           presets.push({
             name: parsed.meta.name,
-            fileName: entry.name,
+            fileName: name,
             createdAt: parsed.meta.createdAt
           });
         } else {
           presets.push({
             name: name.replace(/\.json$/i, ""),
-            fileName: entry.name,
+            fileName: name,
             createdAt: new Date().toISOString()
           });
         }
       } catch {
         presets.push({
           name: name.replace(/\.json$/i, ""),
-          fileName: entry.name,
+          fileName: name,
           createdAt: new Date().toISOString()
         });
       }
@@ -67,9 +74,7 @@ export const loadPresetFile = async <T = unknown>(fileName: string): Promise<Pre
   try {
     const folder = await ensurePresetFolder();
     if (!folder) return null;
-    const entry = await folder.getEntry(fileName);
-    const raw = await entry.read();
-    return JSON.parse(raw) as PresetFile<T>;
+    return await bridge.readJsonEntry<PresetFile<T> | null>(folder, fileName, null);
   } catch (error) {
     console.error(`Failed to load preset ${fileName}`, error);
     return null;
@@ -94,8 +99,7 @@ export const savePresetFile = async <T = unknown>(name: string, data: T): Promis
       data,
       version: 1
     };
-    const file = await folder.createFile(fileName, { overwrite: true });
-    await file.write(JSON.stringify(payload, null, 2));
+    await bridge.writeJsonEntry(folder, fileName, payload);
     return payload;
   } catch (error) {
     console.error("Failed to save preset", error);
@@ -106,11 +110,13 @@ export const savePresetFile = async <T = unknown>(name: string, data: T): Promis
 export const deletePresetFile = async (fileName: string): Promise<void> => {
   try {
     const folder = await ensurePresetFolder();
-    if (!folder) return;
-    const entry = await folder.getEntry(fileName);
-    await entry.delete();
+    if (!folder) {
+      throw new Error("Preset folder is unavailable");
+    }
+    await deletePresetEntries(folder, fileName);
   } catch (error) {
     console.error(`Failed to delete preset ${fileName}`, error);
+    throw error;
   }
 };
 

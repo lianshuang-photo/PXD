@@ -10,6 +10,7 @@
     "watch": "vite build --watch",
     "build": "vite build",
     "build:plugin": "npm run build && cp -r public/* dist/ && cp manifest.json dist/ && node -e \"const fs=require('fs');const html=fs.readFileSync('dist/index.html','utf8');if(!html.includes('uxp-polyfill')){const fixed=html.replace('</title>','</title>\\n    <script src=\\\"./uxp-polyfill.js\\\"></script>');fs.writeFileSync('dist/index.html',fixed);}\"",
+    "test": "sh -c 'trap \"rm -rf .test-dist\" EXIT; tsc src/services/atomicJson.ts src/services/loadGate.ts src/services/presetDeletion.ts --outDir .test-dist --module ES2020 --moduleResolution Node --target ES2020 --skipLibCheck && node --test tests/*.test.mjs'",
     "lint": "eslint \"src/**/*.{ts,tsx,js,jsx}\"",
     "preview": "vite preview"
   },
