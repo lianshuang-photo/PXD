@@ -23,7 +23,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 export const loadSettings = async (): Promise<AppSettings> => {
-  const storedPrefs = await bridge.readPreference<AppSettings>(SETTINGS_FILE, DEFAULT_SETTINGS);
+  const storedPrefs = await bridge.readPreference<Partial<AppSettings>>(SETTINGS_FILE, {});
   const loaded = await bridge.readJsonFile<AppSettings>(SETTINGS_FILE, DEFAULT_SETTINGS);
   const result = {
     ...DEFAULT_SETTINGS,

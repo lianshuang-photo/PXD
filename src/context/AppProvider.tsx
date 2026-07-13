@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AppContext } from "./AppContext";
 import type { AppSettings } from "./types";
 import { DEFAULT_SETTINGS, applyBrandColor, loadSettings, saveSettings } from "../services/settings";
@@ -10,11 +10,17 @@ interface Props {
 export const AppProvider = ({ children }: Props) => {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [saving, setSaving] = useState(false);
+  const loadedRef = useRef(false);
 
   const refreshSettings = useCallback(async () => {
-    const next = await loadSettings();
-    setSettings(next);
-    applyBrandColor(next.brandColor);
+    loadedRef.current = false;
+    try {
+      const next = await loadSettings();
+      setSettings(next);
+      applyBrandColor(next.brandColor);
+    } finally {
+      loadedRef.current = true;
+    }
   }, []);
 
   useEffect(() => {
@@ -28,6 +34,9 @@ export const AppProvider = ({ children }: Props) => {
   }, [settings.brandColor]);
 
   const updateSettings = useCallback(async (next: Partial<AppSettings>) => {
+    if (!loadedRef.current) {
+      return;
+    }
     setSaving(true);
     try {
       const merged: AppSettings = { ...settings, ...next };

@@ -1,4 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import {
+  readAtomicJson,
+  writeAtomicJson,
+  type TextFileStorage
+} from "./atomicJson";
+
 const resolveUxpModule = <T = any>(moduleId: string): T | undefined => {
   try {
     if (typeof window !== "undefined" && typeof (window as any).require === "function") {
@@ -22,6 +28,38 @@ const browserPersist: Storage | null =
     : null;
 
 const dataFolderName = "pxd-data";
+
+const browserTextStorage: TextFileStorage = {
+  async readText(fileName) {
+    return browserStorage.get(fileName) ?? null;
+  },
+  async writeText(fileName, content) {
+    browserStorage.set(fileName, content);
+  }
+};
+
+const createFolderTextStorage = (folder: any): TextFileStorage => ({
+  async readText(fileName) {
+    try {
+      const file = await folder.getEntry(fileName);
+      return await file.read();
+    } catch {
+      return null;
+    }
+  },
+  async writeText(fileName, content) {
+    const file = await folder.createFile(fileName, { overwrite: true });
+    const options = uxp ? { format: uxp.storage.formats.utf8 } : undefined;
+    await file.write(content, options);
+  }
+});
+
+const readJsonFromStorage = async <T>(storage: TextFileStorage, fileName: string, fallback: T): Promise<T> =>
+  await readAtomicJson(storage, fileName, fallback, {
+    onPrimaryError: (error) => console.warn(`Primary JSON read failed for ${fileName}`, error),
+    onBackupError: (error) => console.warn(`Backup JSON read failed for ${fileName}`, error),
+    onRepairError: (error) => console.warn(`Failed to repair ${fileName} from backup`, error)
+  });
 
 const ensureDataFolder = async () => {
   if (!uxp) {
@@ -217,39 +255,43 @@ export const bridge = {
   },
   async readJsonFile<T>(fileName: string, fallback: T): Promise<T> {
     if (isBrowserMode) {
-      const stored = browserStorage.get(fileName);
-      if (stored) {
-        try {
-          return JSON.parse(stored) as T;
-        } catch {
-          return fallback;
-        }
-      }
-      return fallback;
+      return await readJsonFromStorage(browserTextStorage, fileName, fallback);
     }
     try {
       const folder = await ensureDataFolder();
       if (!folder) return fallback;
-      const file = await folder.getEntry(fileName);
-      const text = await file.read();
-      return JSON.parse(text) as T;
+      return await readJsonFromStorage(createFolderTextStorage(folder), fileName, fallback);
     } catch (error) {
       console.warn(`readJsonFile fallback triggered for ${fileName}`, error);
       return fallback;
     }
   },
   async writeJsonFile<T>(fileName: string, payload: T): Promise<void> {
-    if (isBrowserMode) {
-      browserStorage.set(fileName, JSON.stringify(payload, null, 2));
-      return;
-    }
     try {
+      if (isBrowserMode) {
+        await writeAtomicJson(browserTextStorage, fileName, payload);
+        return;
+      }
       const folder = await ensureDataFolder();
       if (!folder || !uxp) return;
-      const file = await folder.createFile(fileName, { overwrite: true });
-      await file.write(JSON.stringify(payload, null, 2), { format: uxp.storage.formats.utf8 });
+      await writeAtomicJson(createFolderTextStorage(folder), fileName, payload);
     } catch (error) {
       console.error(`writeJsonFile failed for ${fileName}`, error);
+      throw error;
+    }
+  },
+  async readJsonEntry<T>(folder: any, fileName: string, fallback: T): Promise<T> {
+    if (!folder) return fallback;
+    return await readJsonFromStorage(createFolderTextStorage(folder), fileName, fallback);
+  },
+  async writeJsonEntry<T>(folder: any, fileName: string, payload: T): Promise<void> {
+    if (!folder) {
+      throw new Error(`Folder is unavailable while writing ${fileName}`);
+    }
+    try {
+      await writeAtomicJson(createFolderTextStorage(folder), fileName, payload);
+    } catch (error) {
+      console.error(`writeJsonEntry failed for ${fileName}`, error);
       throw error;
     }
   },
