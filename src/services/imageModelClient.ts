@@ -181,15 +181,19 @@ const isBlockedHostname = (hostname: string) => {
   return !normalized.includes(".");
 };
 
-const validatePublicImageUrl = (value: string) => {
+const effectivePort = (url: URL) => url.port || (url.protocol === "https:" ? "443" : "80");
+
+const validatePublicImageUrl = (value: string, trustedEndpoint: string) => {
   let url: URL;
+  let endpoint: URL;
   try {
     url = new URL(value);
+    endpoint = new URL(trustedEndpoint);
   } catch {
     throw new ImageModelError("模型返回了无效的图片地址", "RESPONSE_IMAGE_URL", "请检查中转服务的响应格式。");
   }
-  if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) {
-    throw new ImageModelError("模型返回了不安全的图片地址", "RESPONSE_IMAGE_URL", "仅支持不含凭据的公网 HTTP(S) 图片地址。");
+  if (url.protocol !== "https:" || url.username || url.password) {
+    throw new ImageModelError("模型返回了不安全的图片地址", "RESPONSE_IMAGE_URL", "仅支持不含凭据的 HTTPS 图片地址。");
   }
   if (isBlockedHostname(url.hostname)) {
     throw new ImageModelError(
@@ -198,24 +202,27 @@ const validatePublicImageUrl = (value: string) => {
       "请让服务以内联图片数据返回结果，或使用可公开访问的图片地址。"
     );
   }
+  if (
+    url.hostname.toLowerCase() !== endpoint.hostname.toLowerCase() ||
+    effectivePort(url) !== effectivePort(endpoint)
+  ) {
+    throw new ImageModelError(
+      "模型返回的图片地址不属于已信任的服务",
+      "RESPONSE_IMAGE_UNTRUSTED_ORIGIN",
+      "仅允许从所配置 Gemini Endpoint 的同域名、同端口下载图片；请让服务改为返回 inlineData。"
+    );
+  }
   return url.toString();
 };
 
-const readLimitedResponseBody = async (response: Response, declaredLength: number | null) => {
+const readLimitedResponseBody = async (response: Response) => {
   const reader = response.body?.getReader?.();
   if (!reader) {
-    if (declaredLength === null) {
-      throw new ImageModelError(
-        "当前环境无法安全读取未声明大小的图片",
-        "RESPONSE_IMAGE_LENGTH_REQUIRED",
-        "请让图片服务返回 Content-Length，或以内联图片数据返回结果。"
-      );
-    }
-    const buffer = await response.arrayBuffer();
-    if (buffer.byteLength > MAX_FALLBACK_IMAGE_BYTES) {
-      throw new ImageModelError("模型返回的图片过大", "RESPONSE_IMAGE_TOO_LARGE", "请让服务返回 20 MB 以内的图片。");
-    }
-    return buffer;
+    throw new ImageModelError(
+      "当前环境不支持安全的流式图片下载",
+      "RESPONSE_IMAGE_STREAM_REQUIRED",
+      "请让 Gemini Endpoint 直接返回 inlineData；为避免无界内存占用，不会使用 arrayBuffer 读取 URL。"
+    );
   }
 
   const chunks: Uint8Array[] = [];
@@ -263,8 +270,8 @@ const safetyReasonLabel = (reason: string) => {
   return labels[reason.toUpperCase()] ?? "安全策略";
 };
 
-const downloadImageAsBase64 = async (url: string, signal: AbortSignal) => {
-  const safeUrl = validatePublicImageUrl(url);
+const downloadImageAsBase64 = async (url: string, signal: AbortSignal, trustedEndpoint: string) => {
+  const safeUrl = validatePublicImageUrl(url, trustedEndpoint);
   const response = await fetch(safeUrl, { method: "GET", signal, redirect: "error" });
   if (!response.ok) {
     throw new ImageModelError(
@@ -285,10 +292,10 @@ const downloadImageAsBase64 = async (url: string, signal: AbortSignal) => {
   if (contentLength !== null && (!Number.isSafeInteger(contentLength) || contentLength > MAX_FALLBACK_IMAGE_BYTES)) {
     throw new ImageModelError("模型返回的图片过大", "RESPONSE_IMAGE_TOO_LARGE", "请让服务返回 20 MB 以内的图片。");
   }
-  return arrayBufferToBase64(await readLimitedResponseBody(response, contentLength));
+  return arrayBufferToBase64(await readLimitedResponseBody(response));
 };
 
-const parseImage = async (data: GeminiResponse, signal: AbortSignal): Promise<string> => {
+const parseImage = async (data: GeminiResponse, signal: AbortSignal, trustedEndpoint: string): Promise<string> => {
   const blockReason = data.promptFeedback?.blockReason;
   if (blockReason) {
     throw new ImageModelError(
@@ -320,7 +327,7 @@ const parseImage = async (data: GeminiResponse, signal: AbortSignal): Promise<st
   if (embedded) return embedded;
 
   const imageUrl = extractImageUrl(text);
-  if (imageUrl) return await downloadImageAsBase64(imageUrl, signal);
+  if (imageUrl) return await downloadImageAsBase64(imageUrl, signal, trustedEndpoint);
 
   throw new ImageModelError(
     "图像模型未返回可用图片",
@@ -394,7 +401,7 @@ export const createImageModelClient = (settings: AppSettings): ImageModelClient 
           "请确认 Endpoint 指向 Gemini generateContent 兼容服务。"
         );
       }
-      return await parseImage(data, controller.signal);
+      return await parseImage(data, controller.signal, settings.geminiEndpoint);
     } catch (error) {
       if (error instanceof ImageModelError) throw error;
       if (controller.signal.aborted) {

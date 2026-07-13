@@ -115,10 +115,10 @@ describe("createImageModelClient", () => {
     await expect(createImageModelClient(settings).editImage(editParams)).resolves.toBe("ZmFrZQ==");
   });
 
-  it("downloads a returned image URL as base64", async () => {
+  it("downloads a same-host and same-port HTTPS image URL as base64", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({
-        candidates: [{ content: { parts: [{ text: "![result](https://cdn.test/result.png)" }] } }]
+        candidates: [{ content: { parts: [{ text: "![result](https://example.test/result.png)" }] } }]
       }), { status: 200 }))
       .mockResolvedValueOnce(new Response(new Uint8Array([102, 97, 107, 101]), {
         status: 200,
@@ -127,23 +127,60 @@ describe("createImageModelClient", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(createImageModelClient(settings).editImage(editParams)).resolves.toBe("ZmFrZQ==");
-    expect(fetchMock.mock.calls[1][0]).toBe("https://cdn.test/result.png");
+    expect(fetchMock.mock.calls[1][0]).toBe("https://example.test/result.png");
     expect(fetchMock.mock.calls[1][1]).toMatchObject({ redirect: "error" });
   });
 
   it.each([
-    "http://localhost/result.png",
-    "http://127.0.0.1/result.png",
-    "http://127.1/result.png",
-    "http://2130706433/result.png",
-    "http://10.0.0.1/result.png",
-    "http://172.16.0.1/result.png",
-    "http://192.168.1.1/result.png",
-    "http://169.254.169.254/latest.png",
-    "http://[::1]/result.png",
-    "http://[::ffff:127.0.0.1]/result.png",
-    "http://[fc00::1]/result.png",
-    "http://printer.local/result.png"
+    ["https://127.0.0.1.nip.io/result.png", "DNS-rebinding hostname"],
+    ["https://cdn.example.test/result.png", "cross-origin HTTPS hostname"],
+    ["https://example.test:444/result.png", "cross-origin HTTPS port"]
+  ])("blocks an untrusted %s before downloading", async (url) => {
+    const fetchMock = vi.fn().mockResolvedValue(urlResponse(url));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createImageModelClient(settings).editImage(editParams))
+      .rejects.toMatchObject({ code: "RESPONSE_IMAGE_UNTRUSTED_ORIGIN" });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("allows the configured non-default HTTPS port", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(urlResponse("https://example.test:8443/result.png"))
+      .mockResolvedValueOnce(new Response(new Uint8Array([102, 97, 107, 101]), {
+        status: 200,
+        headers: { "Content-Type": "image/png" }
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createImageModelClient({
+      ...settings,
+      geminiEndpoint: "https://example.test:8443/api"
+    }).editImage(editParams)).resolves.toBe("ZmFrZQ==");
+  });
+
+  it("rejects same-host HTTP fallback URLs", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(urlResponse("http://example.test/result.png"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createImageModelClient(settings).editImage(editParams))
+      .rejects.toMatchObject({ code: "RESPONSE_IMAGE_URL" });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    "https://localhost/result.png",
+    "https://127.0.0.1/result.png",
+    "https://127.1/result.png",
+    "https://2130706433/result.png",
+    "https://10.0.0.1/result.png",
+    "https://172.16.0.1/result.png",
+    "https://192.168.1.1/result.png",
+    "https://169.254.169.254/latest.png",
+    "https://[::1]/result.png",
+    "https://[::ffff:127.0.0.1]/result.png",
+    "https://[fc00::1]/result.png",
+    "https://printer.local/result.png"
   ])("blocks private or local fallback URL %s before downloading", async (url) => {
     const fetchMock = vi.fn().mockResolvedValue(urlResponse(url));
     vi.stubGlobal("fetch", fetchMock);
@@ -155,7 +192,7 @@ describe("createImageModelClient", () => {
 
   it("requires a supported image Content-Type", async () => {
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(urlResponse("https://cdn.test/result.png"))
+      .mockResolvedValueOnce(urlResponse("https://example.test/result.png"))
       .mockResolvedValueOnce(new Response("not an image", {
         status: 200,
         headers: { "Content-Type": "text/plain" }
@@ -179,7 +216,7 @@ describe("createImageModelClient", () => {
       arrayBuffer
     } as unknown as Response;
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(urlResponse("https://cdn.test/result.png"))
+      .mockResolvedValueOnce(urlResponse("https://example.test/result.png"))
       .mockResolvedValueOnce(oversizedResponse);
     vi.stubGlobal("fetch", fetchMock);
 
@@ -203,7 +240,7 @@ describe("createImageModelClient", () => {
       body: { getReader: () => reader }
     } as unknown as Response;
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(urlResponse("https://cdn.test/result.png"))
+      .mockResolvedValueOnce(urlResponse("https://example.test/result.png"))
       .mockResolvedValueOnce(streamingResponse);
     vi.stubGlobal("fetch", fetchMock);
 
@@ -212,20 +249,23 @@ describe("createImageModelClient", () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 
-  it("supports a bounded non-streaming response in UXP-style environments", async () => {
+  it("refuses a non-streaming response even when Content-Length looks safe", async () => {
+    const arrayBuffer = vi.fn().mockResolvedValue(new Uint8Array([102, 97, 107, 101]).buffer);
     const fallbackResponse = {
       ok: true,
       status: 200,
       headers: new Headers({ "Content-Type": "image/png", "Content-Length": "4" }),
       body: null,
-      arrayBuffer: vi.fn().mockResolvedValue(new Uint8Array([102, 97, 107, 101]).buffer)
+      arrayBuffer
     } as unknown as Response;
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(urlResponse("https://cdn.test/result.png"))
+      .mockResolvedValueOnce(urlResponse("https://example.test/result.png"))
       .mockResolvedValueOnce(fallbackResponse);
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(createImageModelClient(settings).editImage(editParams)).resolves.toBe("ZmFrZQ==");
+    await expect(createImageModelClient(settings).editImage(editParams))
+      .rejects.toMatchObject({ code: "RESPONSE_IMAGE_STREAM_REQUIRED" });
+    expect(arrayBuffer).not.toHaveBeenCalled();
   });
 
   it("reports an invalid success response without calling it a network failure", async () => {
