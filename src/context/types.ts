@@ -1,5 +1,10 @@
 export interface AppSettings {
   sdEndpoint: string;
+  imageProvider: "forge" | "gemini";
+  geminiEndpoint: string;
+  geminiApiKey: string;
+  geminiModel: string;
+  geminiAuthMode: "queryKey" | "bearer";
   offlineMode: boolean;
   outputDirectory: string;
   brandColor: string;

@@ -14,6 +14,11 @@ const PROBE_TIMEOUT = 3_000;
 
 export const DEFAULT_SETTINGS: AppSettings = {
   sdEndpoint: "http://127.0.0.1:7860",
+  imageProvider: "forge",
+  geminiEndpoint: "https://generativelanguage.googleapis.com",
+  geminiApiKey: "",
+  geminiModel: "gemini-2.5-flash-image",
+  geminiAuthMode: "queryKey",
   offlineMode: true,
   outputDirectory: "",
   brandColor: "#b794f6",
