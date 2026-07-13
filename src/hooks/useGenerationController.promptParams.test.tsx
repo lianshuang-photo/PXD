@@ -10,6 +10,7 @@ const serviceMocks = vi.hoisted(() => ({
   getSelectionPixels: vi.fn(),
   placeImageIntoSelection: vi.fn(),
   savePresetFile: vi.fn(),
+  loadPresetFile: vi.fn(),
   listPresetMetas: vi.fn()
 }));
 
@@ -36,14 +37,14 @@ vi.mock("../services/photoshop", () => ({
   moveActiveLayerToTop: vi.fn(),
   onBatchAddLayer: vi.fn(),
   placeImageIntoSelection: serviceMocks.placeImageIntoSelection,
-  setSelectionBounds: vi.fn(),
+  setSelectionBounds: vi.fn(async () => undefined),
   switchToDocument: vi.fn()
 }));
 
 vi.mock("../services/presets", () => ({
   deletePresetFile: vi.fn(),
   listPresetMetas: serviceMocks.listPresetMetas,
-  loadPresetFile: vi.fn(),
+  loadPresetFile: serviceMocks.loadPresetFile,
   savePresetFile: serviceMocks.savePresetFile
 }));
 
@@ -146,6 +147,66 @@ describe("useGenerationController prompt parameters", () => {
     await act(async () => harness.controller.runGeneration());
     expect(serviceMocks.editImage).toHaveBeenCalledWith(expect.objectContaining({
       prompt: "portrait @param:光:0.45"
+    }));
+    act(() => harness.renderer.unmount());
+  });
+
+  it.each(["forge", "gemini"] as const)(
+    "normalizes and sanitizes %s batch prompts",
+    async (provider) => {
+      const harness = await renderController(provider);
+      await act(async () => {
+        harness.controller.setFormValue(
+          "positivePrompt",
+          "scene;  @param:强:2; detail, @param:关:-3, tail"
+        );
+        harness.controller.setFormValue("extraPrompt", "extra @param:微:.456");
+      });
+      expect(harness.controller.form.positivePrompt).toBe(
+        "scene;  @param:强:1.00; detail, @param:关:0.00, tail"
+      );
+
+      await act(async () => {
+        await harness.controller.addToBatch();
+      });
+      expect(harness.controller.batchItems).toHaveLength(1);
+      await act(async () => {
+        await harness.controller.runBatch();
+      });
+
+      const expectedPrompt = "scene;  @param:强:1.00; detail, tail\nextra @param:微:0.46";
+      if (provider === "forge") {
+        expect(serviceMocks.img2img).toHaveBeenCalledWith(expect.objectContaining({
+          prompt: expectedPrompt
+        }));
+      } else {
+        expect(serviceMocks.editImage).toHaveBeenCalledWith(expect.objectContaining({
+          prompt: expectedPrompt
+        }));
+      }
+      act(() => harness.renderer.unmount());
+    }
+  );
+
+  it("normalizes prompt markers restored from a preset", async () => {
+    const harness = await renderController("forge");
+    serviceMocks.loadPresetFile.mockResolvedValueOnce({
+      meta: { name: "raw-params" },
+      data: {
+        form: {
+          ...harness.controller.form,
+          positivePrompt: "@param:过强:4",
+          negativePrompt: "【过低：-2】",
+          extraPrompt: "@param:正常:.4"
+        }
+      }
+    });
+
+    await act(async () => harness.controller.applyPreset("raw-params.json"));
+    expect(harness.controller.form).toEqual(expect.objectContaining({
+      positivePrompt: "@param:过强:1.00",
+      negativePrompt: "【过低：0.00】",
+      extraPrompt: "@param:正常:0.40"
     }));
     act(() => harness.renderer.unmount());
   });

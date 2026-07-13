@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import {
   PROMPT_PARAM_MAX,
   PROMPT_PARAM_MIN,
@@ -12,6 +12,46 @@ interface Props {
   label: string;
   onChange: (prompt: string) => void;
 }
+
+interface RangeProps {
+  controlName: string;
+  index: number;
+  value: number;
+  onUpdate: (index: number, nextValue: number) => void;
+}
+
+const PromptParamRange = ({ controlName, index, value, onUpdate }: RangeProps) => {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const updateRef = useRef(onUpdate);
+  updateRef.current = onUpdate;
+
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      if (event.deltaY === 0) return;
+      const direction = event.deltaY < 0 ? 1 : -1;
+      updateRef.current(index, value + direction * PROMPT_PARAM_STEP);
+    };
+    input.addEventListener("wheel", handleWheel, { passive: false });
+    return () => input.removeEventListener("wheel", handleWheel);
+  }, [index, value]);
+
+  return (
+    <input
+      ref={inputRef}
+      className="prompt-param__range"
+      type="range"
+      min={PROMPT_PARAM_MIN}
+      max={PROMPT_PARAM_MAX}
+      step={PROMPT_PARAM_STEP}
+      value={value}
+      aria-label={`${controlName}滑块`}
+      onChange={(event) => onUpdate(index, Number(event.target.value))}
+    />
+  );
+};
 
 const PromptParamControls = ({ prompt, label, onChange }: Props) => {
   const markers = useMemo(() => parsePromptParams(prompt), [prompt]);
@@ -30,21 +70,11 @@ const PromptParamControls = ({ prompt, label, onChange }: Props) => {
         return (
           <div className="prompt-param" key={marker.id}>
             <span className="prompt-param__name" title={marker.name}>{marker.name}</span>
-            <input
-              className="prompt-param__range"
-              type="range"
-              min={PROMPT_PARAM_MIN}
-              max={PROMPT_PARAM_MAX}
-              step={PROMPT_PARAM_STEP}
+            <PromptParamRange
+              controlName={controlName}
+              index={index}
               value={marker.value}
-              aria-label={`${controlName}滑块`}
-              onChange={(event) => updateMarker(index, Number(event.target.value))}
-              onWheel={(event) => {
-                event.preventDefault();
-                if (event.deltaY === 0) return;
-                const direction = event.deltaY < 0 ? 1 : -1;
-                updateMarker(index, marker.value + direction * PROMPT_PARAM_STEP);
-              }}
+              onUpdate={updateMarker}
             />
             <input
               className="input prompt-param__value"

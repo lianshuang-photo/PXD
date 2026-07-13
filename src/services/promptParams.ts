@@ -5,6 +5,7 @@ export const PROMPT_PARAM_STEP = 0.01;
 export interface PromptParamMarker {
   id: string;
   name: string;
+  rawValue: number;
   value: number;
   raw: string;
   start: number;
@@ -44,6 +45,7 @@ export const parsePromptParams = (prompt: string): PromptParamMarker[] => {
     markers.push({
       id: `${syntax}-${start}-${name}`,
       name,
+      rawValue: numericValue,
       value: clampValue(numericValue),
       raw: match[0],
       start,
@@ -62,19 +64,65 @@ export const replacePromptParam = (prompt: string, marker: PromptParamMarker, ne
   return `${prompt.slice(0, marker.valueStart)}${formatted}${prompt.slice(marker.valueEnd)}`;
 };
 
-export const sanitizePrompt = (prompt: string) => {
-  const zeroMarkers = parsePromptParams(prompt).filter((marker) => marker.value <= PROMPT_PARAM_MIN);
-  if (!zeroMarkers.length) return prompt;
-
-  let sanitized = prompt;
-  for (const marker of zeroMarkers.reverse()) {
-    sanitized = `${sanitized.slice(0, marker.start)}${sanitized.slice(marker.end)}`;
+export const normalizePromptParams = (prompt: string) => {
+  let normalized = prompt;
+  for (const marker of parsePromptParams(prompt).reverse()) {
+    const formatted = formatPromptParamValue(marker.rawValue);
+    if (formatted === null) continue;
+    normalized = `${normalized.slice(0, marker.valueStart)}${formatted}${normalized.slice(marker.valueEnd)}`;
   }
-  return sanitized
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/([,，;；])(?:\s*[,，;；])+/g, "$1")
-    .replace(/^[ \t]*[,，;；]\s*/gm, "")
-    .replace(/\s*[,，;；][ \t]*$/gm, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  return normalized;
+};
+
+const removeMarkerLocally = (prompt: string, marker: PromptParamMarker) => {
+  const lineStart = prompt.lastIndexOf("\n", marker.start - 1) + 1;
+  const nextNewline = prompt.indexOf("\n", marker.end);
+  const lineEnd = nextNewline === -1 ? prompt.length : nextNewline;
+  const beforeOnLine = prompt.slice(lineStart, marker.start);
+  const afterOnLine = prompt.slice(marker.end, lineEnd);
+
+  if (/^[ \t\r]*$/.test(beforeOnLine) && /^[ \t\r]*$/.test(afterOnLine)) {
+    if (lineEnd < prompt.length) {
+      return `${prompt.slice(0, lineStart)}${prompt.slice(lineEnd + 1)}`;
+    }
+    const removalStart = lineStart > 0 ? lineStart - 1 : lineStart;
+    return prompt.slice(0, removalStart);
+  }
+
+  const after = prompt.slice(marker.end);
+  const followingSeparator = after.match(/^[ \t]*[,，;；][ \t]*/)?.[0];
+  if (followingSeparator !== undefined) {
+    return `${prompt.slice(0, marker.start)}${prompt.slice(marker.end + followingSeparator.length)}`;
+  }
+
+  const before = prompt.slice(0, marker.start);
+  const precedingSeparator = before.match(/[ \t]*[,，;；][ \t]*$/)?.[0];
+  if (precedingSeparator !== undefined) {
+    return `${prompt.slice(0, marker.start - precedingSeparator.length)}${prompt.slice(marker.end)}`;
+  }
+
+  let removalStart = marker.start;
+  let removalEnd = marker.end;
+  const precedingWhitespace = before.match(/[ \t]+$/)?.[0];
+  const followingWhitespace = after.match(/^[ \t]+/)?.[0];
+  if (marker.start === 0 && followingWhitespace) {
+    removalEnd += followingWhitespace.length;
+  } else if (marker.end === prompt.length && precedingWhitespace) {
+    removalStart -= precedingWhitespace.length;
+  } else if (precedingWhitespace && followingWhitespace) {
+    removalEnd += followingWhitespace.length;
+  }
+  return `${prompt.slice(0, removalStart)}${prompt.slice(removalEnd)}`;
+};
+
+export const sanitizePrompt = (prompt: string) => {
+  const normalized = normalizePromptParams(prompt);
+  const zeroMarkers = parsePromptParams(normalized).filter((marker) => marker.value <= PROMPT_PARAM_MIN);
+  if (!zeroMarkers.length) return normalized;
+
+  let sanitized = normalized;
+  for (const marker of zeroMarkers.reverse()) {
+    sanitized = removeMarkerLocally(sanitized, marker);
+  }
+  return sanitized;
 };

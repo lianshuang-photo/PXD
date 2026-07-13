@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   formatPromptParamValue,
+  normalizePromptParams,
   parsePromptParams,
   replacePromptParam,
   sanitizePrompt
@@ -37,6 +38,20 @@ describe("prompt parameter parsing", () => {
     expect(parsePromptParams("@param:坏值:NaN")).toEqual([]);
     expect(parsePromptParams("@param:坏值:0.5.6 @param:指数:1e2")).toEqual([]);
   });
+
+  it("preserves raw out-of-range values and normalizes every marker consistently", () => {
+    const prompt = "@param:过强:2 + 【过低：-0.5】 + @param:正常:.375";
+    const markers = parsePromptParams(prompt);
+
+    expect(markers.map(({ rawValue, value, raw }) => ({ rawValue, value, raw }))).toEqual([
+      { rawValue: 2, value: 1, raw: "@param:过强:2" },
+      { rawValue: -0.5, value: 0, raw: "【过低：-0.5】" },
+      { rawValue: 0.375, value: 0.375, raw: "@param:正常:.375" }
+    ]);
+    expect(normalizePromptParams(prompt)).toBe(
+      "@param:过强:1.00 + 【过低：0.00】 + @param:正常:0.38"
+    );
+  });
 });
 
 describe("sanitizePrompt", () => {
@@ -50,5 +65,16 @@ describe("sanitizePrompt", () => {
   it("returns ordinary prompts byte-for-byte unchanged", () => {
     const prompt = "  ordinary prompt, no markers  ";
     expect(sanitizePrompt(prompt)).toBe(prompt);
+  });
+
+  it("only cleans separators adjacent to removed markers", () => {
+    const prompt = "  alpha  ; beta, @param:关闭:-2; gamma ;  delta  ";
+    expect(sanitizePrompt(prompt)).toBe("  alpha  ; beta, gamma ;  delta  ");
+  });
+
+  it("normalizes retained marker values without changing unrelated text", () => {
+    expect(sanitizePrompt("  high  ; @param:强度:2 ; keep  ")).toBe(
+      "  high  ; @param:强度:1.00 ; keep  "
+    );
   });
 });
