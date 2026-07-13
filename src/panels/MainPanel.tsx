@@ -3,6 +3,7 @@ import type { AppSettings } from "../context/types";
 import { useGenerationController } from "../hooks/useGenerationController";
 import OverlayPortal from "../components/OverlayPortal";
 import PromptParamControls from "../components/PromptParamControls";
+import ReferenceImageStrip from "../components/ReferenceImageStrip";
 
 interface Props {
   settings: AppSettings;
@@ -69,6 +70,13 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     refreshOptions,
     runGeneration,
     stopGeneration,
+    referenceImages,
+    referenceCaptureLoading,
+    referenceAspectWarning,
+    captureReferenceImage,
+    removeReferenceImage,
+    moveReferenceImage,
+    clearReferenceImages,
     history,
     historyLoading,
     historyError,
@@ -749,6 +757,18 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   />
                 </div>
               </div>
+
+              {settings.imageProvider === "gemini" && (
+                <ReferenceImageStrip
+                  images={referenceImages}
+                  loading={referenceCaptureLoading}
+                  aspectWarning={referenceAspectWarning}
+                  onCapture={captureReferenceImage}
+                  onRemove={removeReferenceImage}
+                  onMove={moveReferenceImage}
+                  onClear={clearReferenceImages}
+                />
+              )}
               
               {/* ControlNet */}
               <hr style={{ margin: "0.2rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
@@ -982,7 +1002,11 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                         </div>
                         <div style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>
                           {item.overrideWidth}×{item.overrideHeight} · {item.form.steps}步 · CFG{item.form.cfgScale} · {batchStatusLabelMap[item.status]}
+                          {item.referenceImages.length > 0 ? ` · ${item.referenceImages.length}张参考图` : ""}
                         </div>
+                        {item.referenceAspectWarning && (
+                          <div className="reference-images__warning">{item.referenceAspectWarning}</div>
+                        )}
                         {item.error && <div style={{ color: "#f87171", fontSize: "0.7rem", marginTop: "0.2rem" }}>{item.error}</div>}
                       </li>
                     ))}

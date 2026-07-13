@@ -88,7 +88,11 @@ describe("createGenerationEngine", () => {
     const clients = makeClients();
     const engine = createGenerationEngine(geminiSettings, clients.factories);
 
-    await expect(engine.generate({ ...request, forgeParams: undefined })).resolves.toEqual({
+    await expect(engine.generate({
+      ...request,
+      forgeParams: undefined,
+      refImagesBase64: ["REFERENCE"]
+    })).resolves.toEqual({
       images: ["GEMINI_IMAGE"]
     });
     expect(engine).toMatchObject({ provider: "gemini", progressMode: "indeterminate" });
@@ -99,6 +103,7 @@ describe("createGenerationEngine", () => {
     expect(clients.geminiClient.editImage).toHaveBeenCalledWith({
       prompt: "edit",
       baseImageBase64: "INPUT",
+      refImagesBase64: ["REFERENCE"],
       aspectRatio: "Auto",
       timeoutMs: 30_000,
       taskId: undefined,

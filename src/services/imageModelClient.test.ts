@@ -93,6 +93,28 @@ describe("createImageModelClient", () => {
     expect(body.generationConfig.imageConfig).toEqual({ aspectRatio: "16:9" });
   });
 
+  it("rejects more than four reference images before making a request", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createImageModelClient(settings).editImage({
+      ...editParams,
+      refImagesBase64: ["ONE", "TWO", "THREE", "FOUR", "FIVE"]
+    })).rejects.toMatchObject({ code: "CONFIG_REFERENCE_LIMIT" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized reference image before making a request", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createImageModelClient(settings).editImage({
+      ...editParams,
+      refImagesBase64: ["A".repeat(6 * 1024 * 1024)]
+    })).rejects.toMatchObject({ code: "CONFIG_REFERENCE_SIZE" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it.each([
     [{ promptFeedback: { blockReason: "PROHIBITED_CONTENT" } }, "SAFETY_INPUT", "输入内容触发安全审查"],
     [{ candidates: [{ finishReason: "SAFETY" }] }, "SAFETY_OUTPUT_SAFETY", "输出内容被拦截"],

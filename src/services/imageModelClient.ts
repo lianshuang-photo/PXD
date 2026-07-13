@@ -1,4 +1,10 @@
 import type { AppSettings } from "../context/types";
+import {
+  REFERENCE_IMAGE_LIMIT,
+  REFERENCE_IMAGE_MAX_BYTES,
+  REFERENCE_IMAGES_MAX_TOTAL_BYTES,
+  estimateBase64Bytes
+} from "./referenceImages";
 
 export interface EditImageParams {
   prompt: string;
@@ -78,6 +84,32 @@ const ensureConfigured = (settings: AppSettings) => {
   }
   if (!settings.geminiModel.trim()) {
     throw new ImageModelError("未配置 Gemini 模型", "CONFIG_MODEL", "请在设置中填写支持图像编辑的模型名称。");
+  }
+};
+
+const validateReferenceImages = (images: string[]) => {
+  if (images.length > REFERENCE_IMAGE_LIMIT) {
+    throw new ImageModelError(
+      `参考图不能超过 ${REFERENCE_IMAGE_LIMIT} 张`,
+      "CONFIG_REFERENCE_LIMIT",
+      "请删除部分参考图后重试。"
+    );
+  }
+  const sizes = images.map(estimateBase64Bytes);
+  if (sizes.some((bytes) => bytes <= 0 || bytes > REFERENCE_IMAGE_MAX_BYTES)) {
+    throw new ImageModelError(
+      "单张参考图体积过大或数据无效",
+      "CONFIG_REFERENCE_SIZE",
+      "请重新捕获较小的选区后重试。"
+    );
+  }
+  const totalBytes = sizes.reduce((sum, bytes) => sum + bytes, 0);
+  if (totalBytes > REFERENCE_IMAGES_MAX_TOTAL_BYTES) {
+    throw new ImageModelError(
+      "参考图总体积过大",
+      "CONFIG_REFERENCE_SIZE",
+      "请缩小选区或删除部分参考图后重试。"
+    );
   }
 };
 
@@ -371,6 +403,7 @@ export const createImageModelClient = (settings: AppSettings): ImageModelClient 
   return {
     async editImage(params) {
     ensureConfigured(settings);
+    validateReferenceImages(params.refImagesBase64 ?? []);
     if (!params.prompt.trim()) {
       throw new ImageModelError("请输入图像编辑指令", "CONFIG_PROMPT", "请填写提示词后重试。");
     }
