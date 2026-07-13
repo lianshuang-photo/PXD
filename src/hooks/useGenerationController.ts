@@ -27,6 +27,7 @@ import {
 } from "../services/presets";
 import { LatestLoadGate } from "../services/loadGate";
 import { translateText } from "../services/translator";
+import { sanitizePrompt } from "../services/promptParams";
 
 export type GenerationStatus = "idle" | "running" | "success" | "error";
 export type ToastType = "info" | "success" | "warning" | "error";
@@ -206,10 +207,12 @@ const buildImg2ImgParams = (
   width: number,
   height: number
 ): Img2ImgParams => {
-  const effectivePrompt = [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim();
+  const effectivePrompt = sanitizePrompt(
+    [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim()
+  );
   return {
-    prompt: effectivePrompt || form.positivePrompt,
-    negativePrompt: form.negativePrompt,
+    prompt: effectivePrompt,
+    negativePrompt: sanitizePrompt(form.negativePrompt),
     steps: clampNumber(form.steps, 1, 150),
     cfgScale: clampNumber(form.cfgScale, 1, 30),
     sampler: form.sampler || undefined,
@@ -556,7 +559,9 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       const { width, height } = computeOverrideSize(selection.width, selection.height, target);
       let images: string[];
       if (settings.imageProvider === "gemini") {
-        const prompt = [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim();
+        const prompt = sanitizePrompt(
+          [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim()
+        );
         const timeoutMs = Math.max(
           5_000,
           Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)
@@ -698,7 +703,9 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
         }
         let images: string[];
         if (settings.imageProvider === "gemini") {
-          const prompt = [item.form.positivePrompt, item.form.extraPrompt].filter(Boolean).join("\n").trim();
+          const prompt = sanitizePrompt(
+            [item.form.positivePrompt, item.form.extraPrompt].filter(Boolean).join("\n").trim()
+          );
           const timeoutMs = Math.max(
             5_000,
             Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)

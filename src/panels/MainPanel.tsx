@@ -2,6 +2,7 @@ import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react"
 import type { AppSettings } from "../context/types";
 import { useGenerationController } from "../hooks/useGenerationController";
 import OverlayPortal from "../components/OverlayPortal";
+import PromptParamControls from "../components/PromptParamControls";
 
 interface Props {
   settings: AppSettings;
@@ -711,6 +712,11 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                 placeholder="正向提示词"
                 style={{ marginBottom: "0.35rem" }}
               />
+              <PromptParamControls
+                prompt={form.positivePrompt}
+                label="正向提示词"
+                onChange={(value) => setFormValue("positivePrompt", value)}
+              />
               <textarea
                 className="input input--multiline"
                 value={form.negativePrompt}
@@ -731,6 +737,11 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                 rows={2}
                 placeholder="反向提示词"
                 style={{ marginBottom: "0.35rem" }}
+              />
+              <PromptParamControls
+                prompt={form.negativePrompt}
+                label="反向提示词"
+                onChange={(value) => setFormValue("negativePrompt", value)}
               />
               <div style={{ display: "flex", gap: "0.35rem", marginBottom: "0.35rem" }}>
                 <textarea
@@ -763,6 +774,11 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                   </button>
                 </div>
               </div>
+              <PromptParamControls
+                prompt={form.extraPrompt}
+                label="追加提示词"
+                onChange={(value) => setFormValue("extraPrompt", value)}
+              />
               
               {/* 翻译 */}
               <hr style={{ margin: "0.5rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />

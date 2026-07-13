@@ -393,6 +393,43 @@ select.input::-ms-expand {
   display: none;
 }
 
+.prompt-params {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin: -0.15rem 0 0.35rem;
+}
+
+.prompt-param {
+  display: grid;
+  grid-template-columns: minmax(3.5rem, 0.8fr) minmax(4.5rem, 2fr) 3.4rem;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.prompt-param__name {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt-param__range {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--brand-color);
+}
+
+.input.prompt-param__value {
+  width: 3.4rem;
+  min-width: 0;
+  padding-right: 0.15rem;
+  padding-left: 0.25rem;
+  text-align: right;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;
