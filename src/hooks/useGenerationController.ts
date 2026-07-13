@@ -529,6 +529,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   }, [form.extraPrompt, pushToast]);
 
   const refreshOptions = useCallback(async () => {
+    if (runGateRef.current.current) return;
     const gate = optionsLoadGateRef.current;
     const generation = gate.begin();
     if (settings.imageProvider === "gemini") {
@@ -561,6 +562,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       }));
     } catch (err) {
       if (!mountedRef.current || !gate.isCurrent(generation)) return;
+      if (isPxdRequestCancelledError(err)) return;
       const message = err instanceof Error ? err.message : "选项获取失败";
       setOptionsError(message);
       pushToast("error", message);

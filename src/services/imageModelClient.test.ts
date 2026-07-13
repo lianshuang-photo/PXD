@@ -354,22 +354,34 @@ describe("createImageModelClient", () => {
     expect(client.cancel("gemini-complete")).toBe(false);
   });
 
-  it("honors cancellation while a successful image model response is still parsing", async () => {
+  it("keeps replacement cancellation while parsing past the original timeout", async () => {
+    vi.useFakeTimers();
     let finishParsing: (() => void) | undefined;
     const json = vi.fn(() => new Promise((resolve) => {
       finishParsing = () => resolve({
         candidates: [{ content: { parts: [{ inlineData: { data: "LATE_IMAGE" } }] } }]
       });
     }));
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json } as unknown as Response));
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json } as unknown as Response)
+      .mockImplementationOnce((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      }));
+    vi.stubGlobal("fetch", fetchMock);
     const client = createImageModelClient(settings);
-    const pending = client.editImage({ ...editParams, taskId: "gemini-parsing" });
-    const assertion = expect(pending).rejects.toMatchObject({ code: "CANCELLED" });
-    await vi.waitFor(() => expect(json).toHaveBeenCalledOnce());
+    const pending = client.editImage({ ...editParams, taskId: "gemini-parsing", timeoutMs: 50 });
+    const result = pending.catch((error) => error);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(json).toHaveBeenCalledOnce();
 
-    expect(client.cancel("gemini-parsing")).toBe(true);
+    const replacement = client.editImage({ ...editParams, taskId: "gemini-parsing", timeoutMs: 500 });
+    const replacementResult = replacement.catch((error) => error);
+    await vi.advanceTimersByTimeAsync(50);
     finishParsing?.();
-    await assertion;
+    expect(await result).toMatchObject({ code: "CANCELLED" });
+    expect(client.cancel("gemini-parsing")).toBe(true);
+    expect(await replacementResult).toMatchObject({ code: "CANCELLED" });
   });
 
   it("reports missing browser configuration before sending a request", async () => {

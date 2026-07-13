@@ -105,6 +105,10 @@ export class PxdRequestTimeoutError extends Error {
 export const isPxdRequestCancelledError = (error: unknown): error is PxdRequestCancelledError =>
   error instanceof PxdRequestCancelledError;
 
+const rethrowCancellation = (error: unknown) => {
+  if (isPxdRequestCancelledError(error)) throw error;
+};
+
 const DEFAULT_TIMEOUT = 15_000;
 const BASE_RESOLUTION = 512 * 512;
 const BASE_TIMEOUT_BUDGET = 20_000;
@@ -260,7 +264,14 @@ const buildImg2ImgPayload = (params: Img2ImgParams) => {
 export const createPxdClient = (settings: AppSettings) => {
   const baseURL = sanitizeBaseUrl(settings.sdEndpoint);
   const controllers = new Map<string, AbortController>();
+  const abortCauses = new WeakMap<AbortController, "cancelled" | "timeout">();
   let requestSequence = 0;
+  const abortWithCause = (controller: AbortController, cause: "cancelled" | "timeout") => {
+    if (abortCauses.has(controller) || controller.signal.aborted) return false;
+    abortCauses.set(controller, cause);
+    controller.abort();
+    return true;
+  };
   const toMilliseconds = (seconds: number | undefined, fallbackMs: number) => {
     if (!Number.isFinite(seconds)) return fallbackMs;
     return Math.max(0, Math.round((seconds as number) * 1000));
@@ -290,18 +301,18 @@ export const createPxdClient = (settings: AppSettings) => {
     const requestId = taskId ?? `pxd-request-${++requestSequence}`;
     const previousController = controllers.get(requestId);
     if (previousController) {
-      previousController.abort();
+      abortWithCause(previousController, "cancelled");
     }
 
     const controller = new AbortController();
     controllers.set(requestId, controller);
-    let timedOut = false;
-    const abortFromExternal = () => controller.abort(externalSignal?.reason);
+    const abortFromExternal = () => abortWithCause(controller, "cancelled");
     if (externalSignal?.aborted) abortFromExternal();
     else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
     const timeout = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
+      if (controllers.get(requestId) === controller) {
+        abortWithCause(controller, "timeout");
+      }
     }, timeoutMs);
     const startedAt = Date.now();
 
@@ -325,7 +336,7 @@ export const createPxdClient = (settings: AppSettings) => {
       return data;
     } catch (error) {
       if (controller.signal.aborted) {
-        if (timedOut) {
+        if (abortCauses.get(controller) === "timeout") {
           throw new PxdRequestTimeoutError(timeoutMs, taskId);
         }
         throw new PxdRequestCancelledError(taskId);
@@ -343,14 +354,14 @@ export const createPxdClient = (settings: AppSettings) => {
   const cancel = (taskId: string) => {
     const controller = controllers.get(taskId);
     if (!controller) return false;
-    controller.abort();
+    abortWithCause(controller, "cancelled");
     return true;
   };
 
   const cancelAll = () => {
     const activeControllers = [...controllers.values()];
     for (const controller of activeControllers) {
-      controller.abort();
+      abortWithCause(controller, "cancelled");
     }
     return activeControllers.length;
   };
@@ -368,26 +379,34 @@ export const createPxdClient = (settings: AppSettings) => {
     },
     async fetchOptions(): Promise<SdOptions> {
       const modelsPromise = fetchJson<unknown[]>("/sdapi/v1/sd-models").catch((error) => {
+        rethrowCancellation(error);
         console.warn("Failed to fetch models", error);
         return [];
       });
       const vaePromise = (async () => {
-        const viaModules = await fetchJson<unknown[]>("/sdapi/v1/sd-modules").catch(() => null);
+        const viaModules = await fetchJson<unknown[]>("/sdapi/v1/sd-modules").catch((error) => {
+          rethrowCancellation(error);
+          return null;
+        });
         if (viaModules && Array.isArray(viaModules)) return viaModules;
         return await fetchJson<unknown[]>("/sdapi/v1/sd-vae").catch((error) => {
+          rethrowCancellation(error);
           console.warn("Failed to fetch VAE list", error);
           return [];
         });
       })();
       const loraPromise = fetchJson<unknown[]>("/sdapi/v1/loras").catch((error) => {
+        rethrowCancellation(error);
         console.warn("Failed to fetch loras", error);
         return [];
       });
       const samplerPromise = fetchJson<unknown[]>("/sdapi/v1/samplers").catch((error) => {
+        rethrowCancellation(error);
         console.warn("Failed to fetch samplers", error);
         return [];
       });
       const schedulerPromise = fetchJson<unknown[]>("/sdapi/v1/schedulers").catch((error) => {
+        rethrowCancellation(error);
         console.warn("Failed to fetch schedulers", error);
         return [];
       });
@@ -399,7 +418,10 @@ export const createPxdClient = (settings: AppSettings) => {
           "/controlnet/control_types"
         ];
         for (const endpoint of endpoints) {
-          const result = await fetchJson<unknown>(endpoint).catch(() => null);
+          const result = await fetchJson<unknown>(endpoint).catch((error) => {
+            rethrowCancellation(error);
+            return null;
+          });
           if (!result) continue;
           if (Array.isArray(result)) return result;
           if (result && typeof result === "object") {
@@ -410,6 +432,7 @@ export const createPxdClient = (settings: AppSettings) => {
         return [];
       })();
       const controlNetModulesPromise = fetchJson<unknown[]>("/controlnet/module_list").catch((error) => {
+        rethrowCancellation(error);
         console.warn("Failed to fetch controlnet modules", error);
         return [];
       });

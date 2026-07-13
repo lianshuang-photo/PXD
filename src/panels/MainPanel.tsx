@@ -397,7 +397,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
           type="button" 
           className="btn btn--ghost" 
           onClick={refreshOptions} 
-          disabled={optionsLoading}
+          disabled={optionsLoading || status === "running"}
           style={compactTopActionButtonStyle}
         >
           {optionsLoading ? "同步中" : "刷新"}

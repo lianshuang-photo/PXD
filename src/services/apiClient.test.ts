@@ -103,6 +103,7 @@ describe("createPxdClient cancellation", () => {
   });
 
   it("honors cancellation while a successful Forge response is still parsing", async () => {
+    vi.useFakeTimers();
     let finishParsing: (() => void) | undefined;
     const json = vi.fn(() => new Promise<{ images: string[] }>((resolve) => {
       finishParsing = () => resolve({ images: ["late"] });
@@ -110,12 +111,30 @@ describe("createPxdClient cancellation", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json } as unknown as Response));
     const client = createPxdClient(settings);
     const pending = client.img2img(params, { taskId: "parsing" });
-    const assertion = expect(pending).rejects.toBeInstanceOf(PxdRequestCancelledError);
-    await vi.waitFor(() => expect(json).toHaveBeenCalledOnce());
+    const result = pending.catch((error) => error);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(json).toHaveBeenCalledOnce();
 
     expect(client.cancel("parsing")).toBe(true);
+    await vi.advanceTimersByTimeAsync(12_500);
     finishParsing?.();
+    expect(await result).toBeInstanceOf(PxdRequestCancelledError);
+  });
+
+  it("stops option fallbacks immediately when all requests are cancelled", async () => {
+    const fetchMock = createAbortingFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createPxdClient(settings);
+    const pending = client.fetchOptions();
+    const assertion = expect(pending).rejects.toBeInstanceOf(PxdRequestCancelledError);
+    await vi.waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(7));
+
+    expect(client.cancelAll()).toBeGreaterThanOrEqual(7);
     await assertion;
+    const requestedPaths = fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname);
+    expect(requestedPaths).not.toContain("/sdapi/v1/sd-vae");
+    expect(requestedPaths).not.toContain("/controlnet/models");
   });
 
   it("does not let an older request remove a replacement with the same task ID", async () => {

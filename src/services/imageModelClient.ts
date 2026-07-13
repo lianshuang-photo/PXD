@@ -343,19 +343,27 @@ const parseImage = async (data: GeminiResponse, signal: AbortSignal, trustedEndp
 
 export const createImageModelClient = (settings: AppSettings): ImageModelClient => {
   const controllers = new Map<string, AbortController>();
+  const abortCauses = new WeakMap<AbortController, "cancelled" | "timeout">();
   let requestSequence = 0;
+
+  const abortWithCause = (controller: AbortController, cause: "cancelled" | "timeout") => {
+    if (abortCauses.has(controller) || controller.signal.aborted) return false;
+    abortCauses.set(controller, cause);
+    controller.abort();
+    return true;
+  };
 
   const cancel = (taskId: string) => {
     const controller = controllers.get(taskId);
     if (!controller) return false;
-    controller.abort();
+    abortWithCause(controller, "cancelled");
     return true;
   };
 
   const cancelAll = () => {
     const activeControllers = [...controllers.values()];
     for (const controller of activeControllers) {
-      controller.abort();
+      abortWithCause(controller, "cancelled");
     }
     return activeControllers.length;
   };
@@ -396,18 +404,18 @@ export const createImageModelClient = (settings: AppSettings): ImageModelClient 
     const requestId = params.taskId ?? `image-model-request-${++requestSequence}`;
     const previousController = controllers.get(requestId);
     if (previousController) {
-      previousController.abort();
+      abortWithCause(previousController, "cancelled");
     }
     const controller = new AbortController();
     controllers.set(requestId, controller);
-    let timedOut = false;
     const timeoutMs = Number.isFinite(params.timeoutMs) && params.timeoutMs > 0 ? params.timeoutMs : 120_000;
-    const abortFromExternal = () => controller.abort(params.signal?.reason);
+    const abortFromExternal = () => abortWithCause(controller, "cancelled");
     if (params.signal?.aborted) abortFromExternal();
     else params.signal?.addEventListener("abort", abortFromExternal, { once: true });
     const timeout = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
+      if (controllers.get(requestId) === controller) {
+        abortWithCause(controller, "timeout");
+      }
     }, timeoutMs);
 
     try {
@@ -440,7 +448,7 @@ export const createImageModelClient = (settings: AppSettings): ImageModelClient 
       return await parseImage(data, controller.signal, settings.geminiEndpoint);
     } catch (error) {
       if (controller.signal.aborted) {
-        if (timedOut) {
+        if (abortCauses.get(controller) === "timeout") {
           throw new ImageModelError(`图像生成超时（${Math.max(1, Math.ceil(timeoutMs / 1000))} 秒）`, "TIMEOUT", "请稍后重试，或在设置中增大最长超时。");
         }
         throw new ImageModelError("图像生成已取消", "CANCELLED", "可重新发起生成任务。");
