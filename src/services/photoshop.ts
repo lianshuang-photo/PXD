@@ -221,7 +221,15 @@ const uniqueLayerIds = (layerIds: number[]) =>
     )
   );
 
-export const groupLayers = async (layerIds: number[], groupName = DEFAULT_GROUP_NAME): Promise<number | null> => {
+export interface GroupLayersOptions {
+  requireGroup?: boolean;
+}
+
+export const groupLayers = async (
+  layerIds: number[],
+  groupName = DEFAULT_GROUP_NAME,
+  options: GroupLayersOptions = {}
+): Promise<number | null> => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
   const ids = uniqueLayerIds(layerIds);
   if (!ids.length) {
@@ -256,6 +264,7 @@ export const groupLayers = async (layerIds: number[], groupName = DEFAULT_GROUP_
   try {
     await runJsxCode(jsx);
   } catch (error) {
+    if (options.requireGroup) throw error;
     console.warn("groupLayers failed", error);
   }
   try {
@@ -274,8 +283,14 @@ export const groupLayers = async (layerIds: number[], groupName = DEFAULT_GROUP_
     const id = Number(
       info?.layerID ?? info?.layerId ?? info?.targetLayerID ?? info?.targetLayerId ?? 0
     );
-    return Number.isFinite(id) && id > 0 ? id : null;
+    const layerSection = info?.layerSection?._value ?? info?.layerSection;
+    const groupId = Number.isFinite(id) && id > 0 ? id : null;
+    if (options.requireGroup && (!groupId || layerSection !== "layerSectionStart")) {
+      throw new Error("Photoshop 未创建预期的图层组");
+    }
+    return groupId;
   } catch (error) {
+    if (options.requireGroup) throw error;
     console.warn("groupLayers get info failed", error);
     return null;
   }
@@ -424,15 +439,29 @@ export const placeImageIntoSelection = async (
   return info;
 };
 
+export interface GeneratedDocumentSession {
+  documentId: number;
+  previousDocumentId: number | null;
+}
+
 export const createGeneratedDocument = async (
   width: number,
   height: number,
   name = "PXD 文生图"
-): Promise<number> => {
+): Promise<GeneratedDocumentSession> => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
   const documentWidth = Math.max(32, Math.round(width));
   const documentHeight = Math.max(32, Math.round(height));
-  return await photoshop.core.executeAsModal(async () => {
+  let previousDocumentId: number | null = null;
+  try {
+    const previousIdCandidate = Number(photoshop.app.activeDocument?.id);
+    if (Number.isFinite(previousIdCandidate) && previousIdCandidate > 0) {
+      previousDocumentId = previousIdCandidate;
+    }
+  } catch {
+    // Text-to-image also supports starting with no open Photoshop document.
+  }
+  const documentId = await photoshop.core.executeAsModal(async () => {
     if (typeof photoshop.app.createDocument === "function") {
       try {
         const document = await photoshop.app.createDocument({
@@ -478,6 +507,44 @@ export const createGeneratedDocument = async (
     }
     return activeId;
   }, { commandName: "创建 PXD 文生图画布" });
+  return { documentId, previousDocumentId };
+};
+
+export const closeGeneratedDocument = async (
+  documentId: number,
+  restoreDocumentId: number | null
+): Promise<void> => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  let cleanupError: unknown;
+  try {
+    await photoshop.core.executeAsModal(async () => {
+      await photoshop.app.batchPlay(
+        [
+          {
+            _obj: "close",
+            _target: [{ _ref: "document", _id: documentId }],
+            saving: { _enum: "yesNo", _value: "no" }
+          }
+        ],
+        { synchronousExecution: true }
+      );
+    }, { commandName: "关闭失败的 PXD 文生图画布" });
+  } catch (error) {
+    cleanupError = error;
+  }
+  if (restoreDocumentId) {
+    try {
+      await photoshop.core.executeAsModal(async () => {
+        await photoshop.app.batchPlay(
+          [{ _obj: "select", _target: [{ _ref: "document", _id: restoreDocumentId }] }],
+          { synchronousExecution: true }
+        );
+      }, { commandName: "恢复原 Photoshop 文档" });
+    } catch (error) {
+      cleanupError ??= error;
+    }
+  }
+  if (cleanupError) throw cleanupError;
 };
 
 export const placeImageIntoDocument = async (dataUrl: string, index = 1, docId?: number) => {

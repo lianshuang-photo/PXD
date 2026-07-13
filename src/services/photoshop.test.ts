@@ -11,7 +11,7 @@ const boundary = vi.hoisted(() => ({
 
 vi.mock("./uxpBridge", () => ({ bridge: boundary.bridge }));
 
-import { createGeneratedDocument } from "./photoshop";
+import { closeGeneratedDocument, createGeneratedDocument, groupLayers } from "./photoshop";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -28,7 +28,7 @@ describe("createGeneratedDocument", () => {
 
     const id = await createGeneratedDocument(768, 512, "Generated");
 
-    expect(id).toBe(77);
+    expect(id).toEqual({ documentId: 77, previousDocumentId: 1 });
     expect(createDocument).toHaveBeenCalledWith({
       width: 768,
       height: 512,
@@ -51,7 +51,7 @@ describe("createGeneratedDocument", () => {
 
     const id = await createGeneratedDocument(1024, 1024);
 
-    expect(id).toBe(88);
+    expect(id).toEqual({ documentId: 88, previousDocumentId: 1 });
     expect(batchPlay).toHaveBeenCalledWith(
       [expect.objectContaining({
         _obj: "make",
@@ -63,5 +63,58 @@ describe("createGeneratedDocument", () => {
       })],
       { synchronousExecution: true }
     );
+  });
+
+  it("closes a failed generated document and restores the previous document", async () => {
+    const batchPlay = vi.fn().mockResolvedValue([]);
+    boundary.bridge.photoshop = {
+      app: { batchPlay, activeDocument: { id: 88 } },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+
+    await closeGeneratedDocument(88, 7);
+
+    expect(batchPlay).toHaveBeenNthCalledWith(1, [{
+      _obj: "close",
+      _target: [{ _ref: "document", _id: 88 }],
+      saving: { _enum: "yesNo", _value: "no" }
+    }], { synchronousExecution: true });
+    expect(batchPlay).toHaveBeenNthCalledWith(2, [
+      { _obj: "select", _target: [{ _ref: "document", _id: 7 }] }
+    ], { synchronousExecution: true });
+  });
+
+  it("still attempts to restore the previous document when closing fails", async () => {
+    const closeError = new Error("close failed");
+    const batchPlay = vi.fn()
+      .mockRejectedValueOnce(closeError)
+      .mockResolvedValueOnce([]);
+    boundary.bridge.photoshop = {
+      app: { batchPlay, activeDocument: { id: 88 } },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+
+    await expect(closeGeneratedDocument(88, 7)).rejects.toBe(closeError);
+
+    expect(batchPlay).toHaveBeenCalledTimes(2);
+    expect(batchPlay.mock.calls[1][0]).toEqual([
+      { _obj: "select", _target: [{ _ref: "document", _id: 7 }] }
+    ]);
+  });
+
+  it("rejects strict grouping when Photoshop leaves a regular layer active", async () => {
+    boundary.bridge.getDataFolder.mockResolvedValue(undefined);
+    const batchPlay = vi.fn().mockResolvedValue([{
+      layerID: 201,
+      layerSection: { _value: "layerSectionContent" }
+    }]);
+    boundary.bridge.photoshop = {
+      app: { batchPlay, activeDocument: { id: 1 } },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+
+    await expect(groupLayers([101, 102], "Generated", {
+      requireGroup: true
+    })).rejects.toThrow("Photoshop 未创建预期的图层组");
   });
 });

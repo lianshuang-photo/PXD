@@ -248,7 +248,7 @@ const buildTxt2ImgPayload = (params: Txt2ImgParams) => {
       pixel_perfect: params.controlNet.pixelPerfect ?? true
     };
     if (params.controlNet.image) {
-      unit.input_image = params.controlNet.image;
+      unit.image = params.controlNet.image;
     }
     payload.controlnet_units = [unit];
     payload.alwayson_scripts = {

@@ -25,6 +25,7 @@ const boundary = vi.hoisted(() => ({
     txt2img: vi.fn()
   },
   getSelectionPixels: vi.fn(),
+  closeGeneratedDocument: vi.fn(),
   createGeneratedDocument: vi.fn(),
   placeImageIntoDocument: vi.fn(),
   placeImageIntoSelection: vi.fn(),
@@ -39,6 +40,7 @@ vi.mock("../services/apiClient", () => ({
 
 vi.mock("../services/photoshop", () => ({
   closeDocument: vi.fn(),
+  closeGeneratedDocument: boundary.closeGeneratedDocument,
   createGeneratedDocument: boundary.createGeneratedDocument,
   getSelectionPixels: boundary.getSelectionPixels,
   groupLayers: boundary.groupLayers,
@@ -46,8 +48,8 @@ vi.mock("../services/photoshop", () => ({
   onBatchAddLayer: vi.fn().mockResolvedValue(null),
   placeImageIntoDocument: boundary.placeImageIntoDocument,
   placeImageIntoSelection: boundary.placeImageIntoSelection,
-  setSelectionBounds: vi.fn(),
-  switchToDocument: vi.fn()
+  setSelectionBounds: vi.fn().mockResolvedValue(undefined),
+  switchToDocument: vi.fn().mockResolvedValue(undefined)
 }));
 
 vi.mock("../services/presets", () => ({
@@ -98,16 +100,29 @@ const mountController = () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  Object.values(boundary.client).forEach((mock) => mock.mockReset());
+  boundary.getSelectionPixels.mockReset();
+  boundary.closeGeneratedDocument.mockReset();
+  boundary.createGeneratedDocument.mockReset();
+  boundary.placeImageIntoDocument.mockReset();
+  boundary.placeImageIntoSelection.mockReset();
+  boundary.groupLayers.mockReset();
+  boundary.moveActiveLayerToTop.mockReset();
+  boundary.listPresetMetas.mockReset();
   boundary.client.fetchOptions.mockResolvedValue(emptyOptions);
   boundary.client.fetchProgress.mockResolvedValue(null);
   boundary.client.img2img.mockResolvedValue({ images: ["IMG2IMG"] });
   boundary.client.txt2img.mockResolvedValue({ images: ["TXT_ONE", "TXT_TWO"] });
-  boundary.createGeneratedDocument.mockResolvedValue(42);
+  boundary.closeGeneratedDocument.mockResolvedValue(undefined);
+  boundary.createGeneratedDocument.mockResolvedValue({
+    documentId: 42,
+    previousDocumentId: 7
+  });
   boundary.placeImageIntoDocument
     .mockResolvedValueOnce({ layerID: 101 })
     .mockResolvedValueOnce({ layerID: 102 });
   boundary.placeImageIntoSelection.mockResolvedValue({ layerID: 201 });
-  boundary.groupLayers.mockResolvedValue(undefined);
+  boundary.groupLayers.mockResolvedValue(301);
   boundary.moveActiveLayerToTop.mockResolvedValue(undefined);
   boundary.listPresetMetas.mockResolvedValue([]);
 });
@@ -155,7 +170,11 @@ describe("useGenerationController Forge completion", () => {
       2,
       42
     );
-    expect(boundary.groupLayers).toHaveBeenCalledWith([101, 102]);
+    expect(boundary.groupLayers).toHaveBeenCalledWith(
+      [101, 102],
+      undefined,
+      { requireGroup: true }
+    );
     expect(harness.controller.status).toBe("success");
     expect(harness.controller.lastImages).toEqual([
       "data:image/png;base64,TXT_ONE",
@@ -231,6 +250,154 @@ describe("useGenerationController Forge completion", () => {
       await generationPromise!;
     });
     expect(harness.controller.progressPreview).toBeNull();
+    act(() => harness.renderer.unmount());
+  });
+
+  it("drops an in-flight progress response after stop and during the next generation", async () => {
+    vi.useFakeTimers();
+    boundary.getSelectionPixels.mockResolvedValue(selection);
+    let resolveProgress: ((value: {
+      progress: number;
+      eta_relative: number;
+      current_image: string;
+      textinfo: string;
+    }) => void) | null = null;
+    boundary.client.fetchProgress.mockImplementation(() => new Promise((resolve) => {
+      resolveProgress = resolve;
+    }));
+    let resolveFirst: ((value: { images: string[] }) => void) | null = null;
+    let resolveSecond: ((value: { images: string[] }) => void) | null = null;
+    boundary.client.img2img
+      .mockReset()
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveFirst = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveSecond = resolve;
+      }));
+    const harness = mountController();
+    await flushEffects();
+    let firstPromise: Promise<void>;
+    act(() => {
+      firstPromise = harness.controller.runGeneration();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+    expect(boundary.client.fetchProgress).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      resolveFirst?.({ images: ["FIRST"] });
+      await firstPromise!;
+    });
+    let secondPromise: Promise<void>;
+    act(() => {
+      secondPromise = harness.controller.runGeneration();
+    });
+    await act(async () => {
+      resolveProgress?.({
+        progress: 0.9,
+        eta_relative: 1,
+        current_image: "STALE_PREVIEW",
+        textinfo: "Stale"
+      });
+      await Promise.resolve();
+    });
+
+    expect(harness.controller.progress).toBe(0);
+    expect(harness.controller.progressPreview).toBeNull();
+    expect(harness.controller.progressText).toBeNull();
+    await act(async () => {
+      resolveSecond?.({ images: ["SECOND"] });
+      await secondPromise!;
+    });
+    act(() => harness.renderer.unmount());
+  });
+
+  it("clears the live preview in the batch finally path", async () => {
+    vi.useFakeTimers();
+    boundary.getSelectionPixels.mockResolvedValue(selection);
+    boundary.client.fetchProgress.mockResolvedValue({
+      progress: 0.25,
+      eta_relative: 4,
+      current_image: "BATCH_PREVIEW",
+      textinfo: "Batch sampling"
+    });
+    let resolveGeneration: ((value: { images: string[] }) => void) | null = null;
+    boundary.client.img2img.mockImplementation(() => new Promise((resolve) => {
+      resolveGeneration = resolve;
+    }));
+    const harness = mountController();
+    await flushEffects();
+    await act(async () => {
+      await harness.controller.addToBatch();
+    });
+    expect(harness.controller.batchItems).toHaveLength(1);
+    let batchPromise: Promise<void>;
+    act(() => {
+      batchPromise = harness.controller.runBatch();
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(boundary.client.img2img).toHaveBeenCalledOnce();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(harness.controller.progressPreview).toBe(
+      "data:image/png;base64,BATCH_PREVIEW"
+    );
+
+    await act(async () => {
+      resolveGeneration?.({ images: ["DONE"] });
+      await batchPromise!;
+    });
+    expect(harness.controller.progress).toBe(0);
+    expect(harness.controller.progressPreview).toBeNull();
+    expect(harness.controller.progressText).toBeNull();
+    act(() => harness.renderer.unmount());
+  });
+
+  it("cleans up a failed txt2img document without replacing the placement error", async () => {
+    boundary.getSelectionPixels.mockResolvedValue(null);
+    boundary.client.txt2img.mockResolvedValue({ images: ["OUTPUT"] });
+    boundary.placeImageIntoDocument
+      .mockReset()
+      .mockRejectedValueOnce(new Error("place failed"));
+    boundary.closeGeneratedDocument.mockRejectedValueOnce(new Error("cleanup failed"));
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const harness = mountController();
+    await flushEffects();
+
+    await act(async () => {
+      await harness.controller.runGeneration();
+    });
+
+    expect(boundary.closeGeneratedDocument).toHaveBeenCalledWith(42, 7);
+    expect(harness.controller.status).toBe("error");
+    expect(harness.controller.error).toBe("place failed");
+    expect(warning).toHaveBeenCalledWith(
+      "Failed to clean up generated document",
+      expect.objectContaining({ message: "cleanup failed" })
+    );
+    warning.mockRestore();
+    act(() => harness.renderer.unmount());
+  });
+
+  it("cleans up the txt2img document when strict grouping fails", async () => {
+    boundary.getSelectionPixels.mockResolvedValue(null);
+    boundary.groupLayers.mockRejectedValueOnce(new Error("group failed"));
+    const harness = mountController();
+    await flushEffects();
+
+    await act(async () => {
+      await harness.controller.runGeneration();
+    });
+
+    expect(boundary.closeGeneratedDocument).toHaveBeenCalledWith(42, 7);
+    expect(harness.controller.status).toBe("error");
+    expect(harness.controller.error).toBe("group failed");
     act(() => harness.renderer.unmount());
   });
 });

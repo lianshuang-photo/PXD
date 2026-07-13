@@ -90,7 +90,7 @@ describe("createPxdClient Forge protocols", () => {
       model: "control-canny",
       module: "canny",
       weight: 0.8,
-      input_image: "CONTROL"
+      image: "CONTROL"
     });
     expect(body.alwayson_scripts.ControlNet.args).toEqual(body.controlnet_units);
   });

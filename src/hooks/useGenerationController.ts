@@ -10,6 +10,7 @@ import {
 import { createImageModelClient, ImageModelError } from "../services/imageModelClient";
 import {
   closeDocument,
+  closeGeneratedDocument,
   createGeneratedDocument,
   getSelectionPixels,
   groupLayers,
@@ -19,6 +20,7 @@ import {
   placeImageIntoSelection,
   setSelectionBounds,
   switchToDocument,
+  type GeneratedDocumentSession,
   type SelectionPixels
 } from "../services/photoshop";
 import {
@@ -298,6 +300,12 @@ export interface GenerationControllerState {
   appendExtraPromptToNegative: () => void;
 }
 
+interface ProgressPollingSession {
+  generation: number;
+  interval: ReturnType<typeof setInterval> | null;
+  inFlight: boolean;
+}
+
 export const useGenerationController = (settings: AppSettings): GenerationControllerState => {
   const client = useMemo(() => createPxdClient(settings), [settings]);
   const imageModelClient = useMemo(() => createImageModelClient(settings), [settings]);
@@ -321,7 +329,8 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   const [translationLoading, setTranslationLoading] = useState(false);
   const [sourceLanguage, setSourceLanguage] = useState("zh");
   const [targetLanguage, setTargetLanguage] = useState("en");
-  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const generationRef = useRef(0);
+  const pollingRef = useRef<ProgressPollingSession | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const presetsLoadGateRef = useRef(new LatestLoadGate());
   const clearToastTimer = useCallback(() => {
@@ -385,12 +394,23 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     setTranslationInputState(value);
   }, []);
 
-  const stopPolling = useCallback(() => {
-    if (pollingRef.current) {
-      globalThis.clearInterval(pollingRef.current);
-      pollingRef.current = null;
-    }
+  const stopPolling = useCallback((generation?: number) => {
+    const session = pollingRef.current;
+    if (!session || (generation !== undefined && session.generation !== generation)) return;
+    if (session.interval !== null) globalThis.clearInterval(session.interval);
+    pollingRef.current = null;
   }, []);
+
+  const beginGeneration = useCallback(() => {
+    stopPolling();
+    generationRef.current += 1;
+    return generationRef.current;
+  }, [stopPolling]);
+
+  const isGenerationCurrent = useCallback(
+    (generation: number) => generationRef.current === generation,
+    []
+  );
 
   const loadPresets = useCallback(async () => {
     const gate = presetsLoadGateRef.current;
@@ -555,22 +575,43 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
 
   useEffect(() => stopPolling, [stopPolling]);
 
-  const pollProgress = useCallback(async () => {
+  const pollProgress = useCallback((generation: number) => {
+    if (!isGenerationCurrent(generation)) return;
     stopPolling();
-    pollingRef.current = globalThis.setInterval(async () => {
-      const progressInfo = await client.fetchProgress();
-      if (progressInfo && typeof progressInfo.progress === "number") {
-        setProgress(progressInfo.progress);
+    const session: ProgressPollingSession = {
+      generation,
+      inFlight: false,
+      interval: null
+    };
+    session.interval = globalThis.setInterval(async () => {
+      if (
+        session.inFlight ||
+        pollingRef.current !== session ||
+        !isGenerationCurrent(generation)
+      ) return;
+      session.inFlight = true;
+      try {
+        const progressInfo = await client.fetchProgress();
+        if (pollingRef.current !== session || !isGenerationCurrent(generation)) return;
+        if (progressInfo && typeof progressInfo.progress === "number") {
+          setProgress(progressInfo.progress);
+        }
+        if (progressInfo?.current_image) {
+          setProgressPreview(toDataUrl(progressInfo.current_image));
+        }
+        const text = progressInfo?.textinfo || progressInfo?.message;
+        if (text) setProgressText(text);
+      } catch {
+        // Progress is best-effort; request failures are handled by the generation call.
+      } finally {
+        session.inFlight = false;
       }
-      if (progressInfo?.current_image) {
-        setProgressPreview(toDataUrl(progressInfo.current_image));
-      }
-      const text = progressInfo?.textinfo || progressInfo?.message;
-      if (text) setProgressText(text);
     }, 1_000);
-  }, [client, stopPolling]);
+    pollingRef.current = session;
+  }, [client, isGenerationCurrent, stopPolling]);
 
   const runGeneration = useCallback(async () => {
+    const generation = beginGeneration();
     setStatus("running");
     setError(null);
     setProgress(0);
@@ -602,49 +643,71 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
         });
         images = [image];
       } else {
-        await pollProgress();
+        pollProgress(generation);
         const result = selection
           ? await client.img2img(buildImg2ImgParams(form, selection.dataUrl, width, height))
           : await client.txt2img(buildTxt2ImgParams(form, width, height));
-        stopPolling();
+        stopPolling(generation);
         images = result.images ?? [];
       }
+      if (!isGenerationCurrent(generation)) return;
       setProgress(1);
       if (!images.length) {
         throw new Error("未收到可用的生成图像");
       }
-      const placedLayerIds: number[] = [];
-      const feather = Number.isFinite(form.maskFeather) ? form.maskFeather : DEFAULT_FORM.maskFeather;
-      const documentId = selection ? undefined : await createGeneratedDocument(width, height);
-      for (let i = 0; i < images.length; i++) {
-        const info = selection
-          ? await placeImageIntoSelection(toDataUrl(images[i]), i + 1, { feather })
-          : await placeImageIntoDocument(toDataUrl(images[i]), i + 1, documentId);
-        const id = extractLayerId(info);
-        if (id) {
-          placedLayerIds.push(id);
+      let generatedDocument: GeneratedDocumentSession | null = null;
+      try {
+        const placedLayerIds: number[] = [];
+        const feather = Number.isFinite(form.maskFeather) ? form.maskFeather : DEFAULT_FORM.maskFeather;
+        if (!selection) generatedDocument = await createGeneratedDocument(width, height);
+        for (let i = 0; i < images.length; i++) {
+          const info = selection
+            ? await placeImageIntoSelection(toDataUrl(images[i]), i + 1, { feather })
+            : await placeImageIntoDocument(
+                toDataUrl(images[i]),
+                i + 1,
+                generatedDocument!.documentId
+              );
+          const id = extractLayerId(info);
+          if (id) placedLayerIds.push(id);
         }
+        if (placedLayerIds.length > 1) {
+          if (generatedDocument) {
+            await groupLayers(placedLayerIds, undefined, { requireGroup: true });
+          } else {
+            await groupLayers(placedLayerIds).catch((error) => console.warn("groupLayers failed", error));
+          }
+        }
+        await moveActiveLayerToTop();
+      } catch (placementError) {
+        if (generatedDocument) {
+          await closeGeneratedDocument(
+            generatedDocument.documentId,
+            generatedDocument.previousDocumentId
+          ).catch((cleanupError) => console.warn("Failed to clean up generated document", cleanupError));
+        }
+        throw placementError;
       }
-      if (placedLayerIds.length > 1) {
-        await groupLayers(placedLayerIds).catch((error) => console.warn("groupLayers failed", error));
-      }
-      await moveActiveLayerToTop();
+      if (!isGenerationCurrent(generation)) return;
       setLastImages(images.map(toDataUrl));
       setStatus("success");
       pushToast("success", "生成成功");
     } catch (err) {
-      stopPolling();
+      stopPolling(generation);
+      if (!isGenerationCurrent(generation)) return;
       const message = formatGenerationError(err, "生成失败");
       setStatus("error");
       setError(message);
       pushToast("error", message);
     } finally {
-      stopPolling();
-      setProgress(0);
-      setProgressPreview(null);
-      setProgressText(null);
+      stopPolling(generation);
+      if (isGenerationCurrent(generation)) {
+        setProgress(0);
+        setProgressPreview(null);
+        setProgressText(null);
+      }
     }
-  }, [client, dismissToast, form, imageModelClient, pollProgress, pushToast, settings, stopPolling]);
+  }, [beginGeneration, client, dismissToast, form, imageModelClient, isGenerationCurrent, pollProgress, pushToast, settings, stopPolling]);
 
   const addToBatch = useCallback(async () => {
     try {
@@ -719,8 +782,12 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       pushToast("warning", "批次列表为空");
       return;
     }
+    const generation = beginGeneration();
     setStatus("running");
     setError(null);
+    setProgress(0);
+    setProgressPreview(null);
+    setProgressText(null);
     try {
       for (const item of batchItems) {
         if (item.metadata?.activeDocumentId) {
@@ -750,11 +817,12 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
           images = [image];
         } else {
           const params = buildImg2ImgParams(item.form, item.selection.dataUrl, item.overrideWidth, item.overrideHeight);
-          await pollProgress();
+          pollProgress(generation);
           const result = await client.img2img(params);
-          stopPolling();
+          stopPolling(generation);
           images = result.images ?? [];
         }
+        if (!isGenerationCurrent(generation)) return;
         if (!images.length) {
           throw new Error(`批次「${item.name}」未返回图像`);
         }
@@ -779,19 +847,26 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
         }
         await moveActiveLayerToTop();
       }
+      if (!isGenerationCurrent(generation)) return;
       setBatchItems([]);
       setStatus("success");
       pushToast("success", "批次执行完成");
     } catch (error) {
-      stopPolling();
+      stopPolling(generation);
+      if (!isGenerationCurrent(generation)) return;
       const message = formatGenerationError(error, "批次执行失败");
       setStatus("error");
       setError(message);
       pushToast("error", message);
     } finally {
-      stopPolling();
+      stopPolling(generation);
+      if (isGenerationCurrent(generation)) {
+        setProgress(0);
+        setProgressPreview(null);
+        setProgressText(null);
+      }
     }
-  }, [batchItems, client, imageModelClient, pollProgress, pushToast, settings, stopPolling]);
+  }, [batchItems, beginGeneration, client, imageModelClient, isGenerationCurrent, pollProgress, pushToast, settings, stopPolling]);
 
   const applyPreset = useCallback(
     async (fileName: string) => {
