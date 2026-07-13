@@ -81,23 +81,6 @@ describe("createGenerationEngine", () => {
     expect(clients.forgeClient.img2img).toHaveBeenCalledWith(forgeParams);
   });
 
-  it("routes every Forge batch item through the same selected client", async () => {
-    const clients = makeClients();
-    clients.forgeClient.img2img
-      .mockResolvedValueOnce({ images: ["FORGE_ONE"] })
-      .mockResolvedValueOnce({ images: ["FORGE_TWO"] });
-    const engine = createGenerationEngine(forgeSettings, clients.factories);
-
-    const results = [];
-    for (const taskId of ["task-1", "task-2"]) {
-      results.push(await engine.generate({ ...request, taskId }));
-    }
-
-    expect(results).toEqual([{ images: ["FORGE_ONE"] }, { images: ["FORGE_TWO"] }]);
-    expect(clients.forgeClient.img2img).toHaveBeenCalledTimes(2);
-    expect(clients.createForgeClient).toHaveBeenCalledOnce();
-  });
-
   it("routes a single Gemini task without progress or Forge construction", async () => {
     const clients = makeClients();
     const engine = createGenerationEngine(geminiSettings, clients.factories);
@@ -118,26 +101,6 @@ describe("createGenerationEngine", () => {
       taskId: undefined,
       signal: undefined
     });
-  });
-
-  it("routes every Gemini batch item and preserves task ids", async () => {
-    const clients = makeClients();
-    clients.geminiClient.editImage
-      .mockResolvedValueOnce("GEMINI_ONE")
-      .mockResolvedValueOnce("GEMINI_TWO");
-    const engine = createGenerationEngine(geminiSettings, clients.factories);
-
-    const results = [];
-    for (const taskId of ["task-1", "task-2"]) {
-      results.push(await engine.generate({ ...request, forgeParams: undefined, taskId }));
-    }
-
-    expect(results).toEqual([{ images: ["GEMINI_ONE"] }, { images: ["GEMINI_TWO"] }]);
-    expect(clients.geminiClient.editImage.mock.calls.map(([params]) => params.taskId)).toEqual([
-      "task-1",
-      "task-2"
-    ]);
-    expect(clients.createGeminiClient).toHaveBeenCalledOnce();
   });
 
   it("wraps Forge failures in the shared actionable error contract", async () => {

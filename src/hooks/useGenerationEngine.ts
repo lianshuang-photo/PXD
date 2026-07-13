@@ -7,33 +7,25 @@ import {
   type GenerationEngineFactories
 } from "../services/generationEngine";
 
-export const generationEngineSettingsKey = (settings: AppSettings) => {
-  if (settings.imageProvider === "gemini") {
-    return JSON.stringify([
-      "gemini",
-      settings.geminiEndpoint,
-      settings.geminiApiKey,
-      settings.geminiModel,
-      settings.geminiAuthMode,
-      settings.offlineMode
-    ]);
-  }
-  return JSON.stringify([
-    "forge",
-    settings.sdEndpoint,
-    settings.timeoutMultiplier,
-    settings.timeoutMinSeconds,
-    settings.timeoutMaxSeconds
-  ]);
-};
-
 export const useGenerationEngine = (
   settings: AppSettings,
   factories: GenerationEngineFactories = DEFAULT_GENERATION_ENGINE_FACTORIES
 ): GenerationEngine => {
-  const settingsKey = generationEngineSettingsKey(settings);
+  const isForge = settings.imageProvider === "forge";
   return useMemo(
     () => createGenerationEngine(settings, factories),
-    [factories, settingsKey]
+    [
+      factories,
+      settings.imageProvider,
+      isForge ? settings.sdEndpoint : undefined,
+      isForge ? settings.timeoutMultiplier : undefined,
+      isForge ? settings.timeoutMinSeconds : undefined,
+      isForge ? settings.timeoutMaxSeconds : undefined,
+      isForge ? undefined : settings.geminiEndpoint,
+      isForge ? undefined : settings.geminiApiKey,
+      isForge ? undefined : settings.geminiModel,
+      isForge ? undefined : settings.geminiAuthMode,
+      isForge ? undefined : settings.offlineMode
+    ]
   );
 };
