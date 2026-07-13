@@ -11,6 +11,7 @@ import {
   closeDocument,
   getSelectionPixels,
   groupLayers,
+  hasActiveSelection,
   moveActiveLayerToTop,
   onBatchAddLayer,
   placeImageIntoSelection,
@@ -27,6 +28,8 @@ import {
 } from "../services/presets";
 import { LatestLoadGate } from "../services/loadGate";
 import { translateText } from "../services/translator";
+import { useGenerationHistory } from "./useGenerationHistory";
+import type { GenerationHistoryEntry } from "../services/generationHistory";
 
 export type GenerationStatus = "idle" | "running" | "success" | "error";
 export type ToastType = "info" | "success" | "warning" | "error";
@@ -129,6 +132,25 @@ const DEFAULT_FORM: GenerationForm = {
   tiling: false,
   presetShortcut: ""
 };
+
+const hydrateHistoryForm = (params: unknown, fallbackPrompt: string): GenerationForm => {
+  const restored = { ...DEFAULT_FORM };
+  if (params && typeof params === "object" && !Array.isArray(params)) {
+    const source = params as Record<string, unknown>;
+    for (const key of Object.keys(DEFAULT_FORM) as Array<keyof GenerationForm>) {
+      const candidate = source[key];
+      const defaultValue = DEFAULT_FORM[key];
+      if (typeof candidate !== typeof defaultValue) continue;
+      if (typeof candidate === "number" && !Number.isFinite(candidate)) continue;
+      (restored as unknown as Record<string, unknown>)[key] = candidate;
+    }
+  }
+  if (!restored.positivePrompt && fallbackPrompt) restored.positivePrompt = fallbackPrompt;
+  return restored;
+};
+
+const effectivePromptFor = (form: GenerationForm) =>
+  [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim();
 
 const toDataUrl = (base64: string) => `data:image/png;base64,${base64}`;
 const toBase64 = (dataUrl: string) => dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
@@ -245,6 +267,11 @@ export interface GenerationControllerState {
   optionsError: string | null;
   refreshOptions: () => Promise<void>;
   runGeneration: () => Promise<void>;
+  history: GenerationHistoryEntry<GenerationForm>[];
+  historyLoading: boolean;
+  historyError: string | null;
+  restoreHistoryConfig: (id: string) => void;
+  pasteHistoryResult: (id: string) => Promise<void>;
   batchItems: BatchItem[];
   addToBatch: () => Promise<void>;
   removeFromBatch: (id: string) => Promise<void>;
@@ -310,6 +337,12 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   const pushToast = useCallback((type: ToastType, message: string) => {
     setToast({ type, message });
   }, []);
+  const {
+    entries: history,
+    loading: historyLoading,
+    error: historyError,
+    record: recordHistory
+  } = useGenerationHistory<GenerationForm>((message) => pushToast("warning", message));
   const dismissToast = useCallback(() => {
     clearToastTimer();
     setToast(null);
@@ -483,6 +516,39 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     pushToast("success", "已添加至反向提示词");
   }, [form.extraPrompt, pushToast]);
 
+  const restoreHistoryConfig = useCallback((id: string) => {
+    const entry = history.find((candidate) => candidate.id === id);
+    if (!entry) {
+      pushToast("warning", "未找到这条生成历史");
+      return;
+    }
+    setForm(hydrateHistoryForm(entry.params, entry.prompt));
+    pushToast("success", "已回填历史配置");
+  }, [history, pushToast]);
+
+  const pasteHistoryResult = useCallback(async (id: string) => {
+    const entry = history.find((candidate) => candidate.id === id);
+    if (!entry) {
+      pushToast("warning", "未找到这条生成历史");
+      return;
+    }
+    try {
+      if (!(await hasActiveSelection())) {
+        pushToast("warning", "请先在 Photoshop 中选择一个区域");
+        return;
+      }
+      const restored = hydrateHistoryForm(entry.params, entry.prompt);
+      await placeImageIntoSelection(entry.thumbnailDataUrl, 1, {
+        feather: restored.maskFeather
+      });
+      await moveActiveLayerToTop();
+      pushToast("success", "历史结果已贴回当前选区");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "历史结果贴回失败";
+      pushToast("error", message);
+    }
+  }, [history, pushToast]);
+
   const refreshOptions = useCallback(async () => {
     if (settings.imageProvider === "gemini") {
       setOptions(EMPTY_OPTIONS);
@@ -595,6 +661,12 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       }
       await moveActiveLayerToTop();
       setLastImages(images.map(toDataUrl));
+      await recordHistory({
+        provider: settings.imageProvider,
+        prompt: effectivePromptFor(form),
+        params: { ...form },
+        resultDataUrl: toDataUrl(images[0])
+      });
       setStatus("success");
       pushToast("success", "生成成功");
     } catch (err) {
@@ -607,7 +679,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       stopPolling();
       setProgress(0);
     }
-  }, [client, dismissToast, form, imageModelClient, pollProgress, pushToast, settings, stopPolling]);
+  }, [client, dismissToast, form, imageModelClient, pollProgress, pushToast, recordHistory, settings, stopPolling]);
 
   const addToBatch = useCallback(async () => {
     try {
@@ -741,6 +813,12 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
           );
         }
         await moveActiveLayerToTop();
+        await recordHistory({
+          provider: settings.imageProvider,
+          prompt: effectivePromptFor(item.form),
+          params: { ...item.form },
+          resultDataUrl: toDataUrl(images[0])
+        });
       }
       setBatchItems([]);
       setStatus("success");
@@ -754,7 +832,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     } finally {
       stopPolling();
     }
-  }, [batchItems, client, imageModelClient, pollProgress, pushToast, settings, stopPolling]);
+  }, [batchItems, client, imageModelClient, pollProgress, pushToast, recordHistory, settings, stopPolling]);
 
   const applyPreset = useCallback(
     async (fileName: string) => {
@@ -812,6 +890,11 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     optionsError,
     refreshOptions,
     runGeneration,
+    history,
+    historyLoading,
+    historyError,
+    restoreHistoryConfig,
+    pasteHistoryResult,
     batchItems,
     addToBatch,
     removeFromBatch,
