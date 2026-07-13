@@ -40,7 +40,6 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
     setFormValue,
     resetForm,
     setResolution,
-    setPresetShortcut,
     status,
     progress,
     error,
@@ -766,7 +765,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
               
               {/* 翻译 */}
               <hr style={{ margin: "0.5rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
-              <div style={{ fontSize: "0.7rem", fontWeight: 500, marginBottom: "0.25rem", color: "var(--color-text-secondary)" }}>翻译助手（这个懒得找api也没啥用，如果你向下滑看到了就当没看见吧～）</div>
+              <div style={{ fontSize: "0.7rem", fontWeight: 500, marginBottom: "0.25rem", color: "var(--text-secondary)" }}>翻译助手（这个懒得找api也没啥用，如果你向下滑看到了就当没看见吧～）</div>
               <div style={{ display: "flex", gap: "0.35rem", marginBottom: "0.35rem" }}>
                 <select
                   className="input"
@@ -839,12 +838,12 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                 placeholder="翻译结果"
                 style={{ marginBottom: "0.5rem" }}
               />
-              {translationError && <div style={{ color: "var(--color-error)", fontSize: "0.875rem", marginTop: "-0.35rem", marginBottom: "0.5rem" }}>{translationError}</div>}
+              {translationError && <div style={{ color: "var(--error-color)", fontSize: "0.875rem", marginTop: "-0.35rem", marginBottom: "0.5rem" }}>{translationError}</div>}
               
               {/* 批次队列 */}
               {batchItems.length > 0 && (
                 <>
-                  <hr style={{ margin: "1rem 0", border: "none", borderTop: "1px solid var(--color-border, #e0e0e0)" }} />
+                  <hr style={{ margin: "1rem 0", border: "none", borderTop: "1px solid var(--border-color)" }} />
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
                     <span style={{ fontSize: "0.875rem", fontWeight: 500 }}>批次队列 ({batchItems.length})</span>
                     <button type="button" className="btn btn--ghost" onClick={clearBatch} style={{ padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}>
@@ -853,14 +852,14 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                   </div>
                   <ul style={{ listStyle: "none", padding: 0, margin: "0 0 1rem 0" }}>
                     {batchItems.map((item) => (
-                      <li key={item.id} style={{ padding: "0.5rem", border: "1px solid var(--color-border, #e0e0e0)", borderRadius: "4px", marginBottom: "0.5rem", fontSize: "0.75rem" }}>
+                      <li key={item.id} style={{ padding: "0.5rem", border: "1px solid var(--border-color)", borderRadius: "4px", marginBottom: "0.5rem", fontSize: "0.75rem" }}>
                         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.25rem" }}>
                           <span style={{ fontWeight: 500 }}>{item.name}</span>
                           <button type="button" className="btn btn--ghost" onClick={() => removeFromBatch(item.id)} style={{ padding: "0.125rem 0.5rem", fontSize: "0.75rem" }}>
                             移除
                           </button>
                         </div>
-                        <div style={{ color: "var(--color-text-secondary)", fontSize: "0.7rem" }}>
+                        <div style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>
                           {item.overrideWidth}×{item.overrideHeight} · {item.form.steps}步 · CFG{item.form.cfgScale}
                         </div>
                       </li>
@@ -872,7 +871,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
               {/* 最近输出 */}
               {lastImages.length > 0 && (
                 <>
-                  <hr style={{ margin: "1rem 0", border: "none", borderTop: "1px solid var(--color-border, #e0e0e0)" }} />
+                  <hr style={{ margin: "1rem 0", border: "none", borderTop: "1px solid var(--border-color)" }} />
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(100px, 1fr))", gap: "0.5rem" }}>
                     {lastImages.map((src, index) => (
                       <img key={`${src}-${index}`} src={src} alt={`result-${index}`} style={{ width: "100%", borderRadius: "4px" }} />

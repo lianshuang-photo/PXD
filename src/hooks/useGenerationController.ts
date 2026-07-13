@@ -59,7 +59,6 @@ export interface GenerationForm {
   clipSkip: number;
   restoreFaces: boolean;
   tiling: boolean;
-  presetShortcut: string;
 }
 
 export interface BatchItem {
@@ -126,8 +125,7 @@ const DEFAULT_FORM: GenerationForm = {
   seed: -1,
   clipSkip: 0,
   restoreFaces: false,
-  tiling: false,
-  presetShortcut: ""
+  tiling: false
 };
 
 const toDataUrl = (base64: string) => `data:image/png;base64,${base64}`;
@@ -235,7 +233,6 @@ export interface GenerationControllerState {
   setFormValue: <K extends keyof GenerationForm>(key: K, value: GenerationForm[K]) => void;
   resetForm: () => void;
   setResolution: (value: number) => void;
-  setPresetShortcut: (value: string) => void;
   status: GenerationStatus;
   progress: number;
   error: string | null;
@@ -346,13 +343,6 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   const setResolution = useCallback(
     (value: number) => {
       setFormValue("resolution", value);
-    },
-    [setFormValue]
-  );
-
-  const setPresetShortcut = useCallback(
-    (value: string) => {
-      setFormValue("presetShortcut", value);
     },
     [setFormValue]
   );
@@ -762,11 +752,15 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       if (!file?.data?.form) {
         throw new Error("预设文件格式不正确");
       }
-      setForm((prev) => ({
-        ...prev,
-        ...DEFAULT_FORM,
-        ...file.data.form
-      }));
+      setForm((prev) => {
+        const merged = {
+          ...prev,
+          ...DEFAULT_FORM,
+          ...file.data.form
+        } as GenerationForm & { presetShortcut?: unknown };
+        delete merged.presetShortcut;
+        return merged;
+      });
       setSelectedPreset(file.meta.name);
       pushToast("success", `已应用预设「${file.meta.name}」`);
     },
@@ -802,7 +796,6 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     setFormValue,
     resetForm,
     setResolution,
-    setPresetShortcut,
     status,
     progress,
     error,

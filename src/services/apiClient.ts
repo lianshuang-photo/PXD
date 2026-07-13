@@ -165,13 +165,14 @@ const extractLabel = (item: Record<string, unknown>, keys: string[]) => {
   return "";
 };
 
-const normalizeOptions = (collection: unknown, labelKeys: string[], valueKey?: string): SdOption[] => {
+export const normalizeOptions = (collection: unknown, labelKeys: string[], valueKey?: string): SdOption[] => {
   if (!Array.isArray(collection)) return [];
   return collection
     .map((item) => {
       if (!item || typeof item !== "object") return null;
       const objectItem = item as Record<string, unknown>;
-      const label = extractLabel(objectItem, labelKeys) || valueKey ? String(objectItem[valueKey ?? labelKeys[0]] ?? "") : "";
+      const base = extractLabel(objectItem, labelKeys);
+      const label = base || (valueKey ? String(objectItem[valueKey] ?? "") : "");
       const value =
         valueKey && typeof objectItem[valueKey] === "string"
           ? (objectItem[valueKey] as string)
