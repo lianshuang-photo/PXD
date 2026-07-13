@@ -13,4 +13,5 @@ export interface AppContextValue {
   updateSettings: (next: Partial<AppSettings>) => Promise<void>;
   refreshSettings: () => Promise<void>;
   saving: boolean;
+  loading: boolean;
 }

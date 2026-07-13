@@ -24,6 +24,7 @@ import {
   savePresetFile,
   type PresetMeta
 } from "../services/presets";
+import { LatestLoadGate } from "../services/loadGate";
 import { translateText } from "../services/translator";
 
 export type GenerationStatus = "idle" | "running" | "success" | "error";
@@ -289,7 +290,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   const [targetLanguage, setTargetLanguage] = useState("en");
   const pollingRef = useRef<number | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const presetsLoadedRef = useRef(false);
+  const presetsLoadGateRef = useRef(new LatestLoadGate());
   const clearToastTimer = useCallback(() => {
     if (toastTimerRef.current) {
       clearTimeout(toastTimerRef.current);
@@ -359,12 +360,15 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   }, []);
 
   const loadPresets = useCallback(async () => {
-    presetsLoadedRef.current = false;
+    const gate = presetsLoadGateRef.current;
+    const generation = gate.begin();
     try {
       const list = await listPresetMetas();
-      setPresets(list);
+      if (gate.isCurrent(generation)) {
+        setPresets(list);
+      }
     } finally {
-      presetsLoadedRef.current = true;
+      gate.complete(generation);
     }
   }, []);
 
@@ -722,9 +726,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
 
   const savePreset = useCallback(
     async (name: string) => {
-      if (!presetsLoadedRef.current) {
-        throw new Error("预设仍在加载，请稍后重试");
-      }
+      presetsLoadGateRef.current.assertReady("预设仍在加载，请稍后重试");
       await savePresetFile<PresetPayload>(name, { form });
       setSelectedPreset(name);
       await loadPresets();
@@ -735,9 +737,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
 
   const deletePreset = useCallback(
     async (fileName: string) => {
-      if (!presetsLoadedRef.current) {
-        throw new Error("预设仍在加载，请稍后重试");
-      }
+      presetsLoadGateRef.current.assertReady("预设仍在加载，请稍后重试");
       await deletePresetFile(fileName);
       await loadPresets();
       if (selectedPreset && fileName.startsWith(`${selectedPreset}`)) {

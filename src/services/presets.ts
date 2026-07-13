@@ -1,5 +1,5 @@
 import { bridge } from "./uxpBridge";
-import { jsonBackupFileName } from "./atomicJson";
+import { deletePresetEntries } from "./presetDeletion";
 
 const PRESET_FOLDER = "presets";
 
@@ -108,22 +108,15 @@ export const savePresetFile = async <T = unknown>(name: string, data: T): Promis
 };
 
 export const deletePresetFile = async (fileName: string): Promise<void> => {
-  const deleteIfPresent = async (folder: any, targetFileName: string) => {
-    try {
-      const entry = await folder.getEntry(targetFileName);
-      await entry.delete();
-    } catch {
-      // Missing files are valid after an interrupted write or for older presets.
-    }
-  };
-
   try {
     const folder = await ensurePresetFolder();
-    if (!folder) return;
-    await deleteIfPresent(folder, fileName);
-    await deleteIfPresent(folder, jsonBackupFileName(fileName));
+    if (!folder) {
+      throw new Error("Preset folder is unavailable");
+    }
+    await deletePresetEntries(folder, fileName);
   } catch (error) {
     console.error(`Failed to delete preset ${fileName}`, error);
+    throw error;
   }
 };
 

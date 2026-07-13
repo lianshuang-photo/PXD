@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import type { AppSettings } from "../context/types";
 import { openSettingsFolder } from "../services/settings";
 import { openPresetFolder } from "../services/presets";
@@ -8,14 +8,15 @@ interface Props {
   onUpdate: (next: Partial<AppSettings>) => Promise<void>;
   onRefresh: () => Promise<void>;
   saving: boolean;
+  loading: boolean;
 }
 
-const SettingsPanel = ({ settings, onUpdate, onRefresh, saving }: Props) => {
+const SettingsPanel = ({ settings, onUpdate, onRefresh, saving, loading }: Props) => {
   const [form, setForm] = useState<AppSettings>(settings);
   const [message, setMessage] = useState<string | null>(null);
   const [pingResult, setPingResult] = useState<"idle" | "success" | "error">("idle");
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     setForm(settings);
   }, [settings]);
 
@@ -68,7 +69,7 @@ const SettingsPanel = ({ settings, onUpdate, onRefresh, saving }: Props) => {
           <p className="panel__subtitle">控制算力来源与基础体验参数。</p>
         </div>
         <div className="panel__actions">
-          <button type="button" className="btn btn--ghost" onClick={onRefresh} disabled={saving}>
+          <button type="button" className="btn btn--ghost" onClick={onRefresh} disabled={saving || loading}>
             重新加载
           </button>
           <button type="button" className="btn btn--ghost" onClick={handleOpenDataFolder}>
@@ -201,8 +202,8 @@ const SettingsPanel = ({ settings, onUpdate, onRefresh, saving }: Props) => {
           <button type="button" className="btn btn--secondary" onClick={handlePing}>
             测试连接
           </button>
-          <button type="button" className="btn btn--primary" disabled={saving} onClick={handleSave}>
-            {saving ? "保存中…" : "保存设置"}
+          <button type="button" className="btn btn--primary" disabled={saving || loading} onClick={handleSave}>
+            {loading ? "加载中…" : saving ? "保存中…" : "保存设置"}
           </button>
         </div>
 
