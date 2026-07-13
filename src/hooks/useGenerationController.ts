@@ -1,12 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppSettings } from "../context/types";
 import {
-  createPxdClient,
   type ControlNetPayload,
   type Img2ImgParams,
   type SdOptions
 } from "../services/apiClient";
-import { createImageModelClient, ImageModelError } from "../services/imageModelClient";
+import {
+  formatGenerationError,
+  type EngineGenerateParams,
+  type EngineProgressMode,
+  type EngineResult
+} from "../services/generationEngine";
+import { useGenerationEngine } from "./useGenerationEngine";
 import {
   closeDocument,
   getSelectionPixels,
@@ -131,14 +136,7 @@ const DEFAULT_FORM: GenerationForm = {
 };
 
 const toDataUrl = (base64: string) => `data:image/png;base64,${base64}`;
-const toBase64 = (dataUrl: string) => dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
-
-const formatGenerationError = (error: unknown, fallback: string) => {
-  if (error instanceof ImageModelError) {
-    return `${error.message}；建议：${error.solution}`;
-  }
-  return error instanceof Error ? error.message : fallback;
-};
+const dataUrlToBase64 = (dataUrl: string) => dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
 
 const computeOverrideSize = (width: number, height: number, target: number) => {
   if (width <= target && height <= target) {
@@ -230,6 +228,31 @@ const buildImg2ImgParams = (
   };
 };
 
+const buildEngineGenerateParams = (
+  provider: AppSettings["imageProvider"],
+  settings: AppSettings,
+  form: GenerationForm,
+  selection: SelectionPixels,
+  width: number,
+  height: number,
+  taskId?: string
+): EngineGenerateParams => {
+  const prompt = [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim();
+  return {
+    prompt,
+    baseImageBase64: dataUrlToBase64(selection.dataUrl),
+    timeoutMs: Math.max(
+      5_000,
+      Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)
+    ),
+    taskId,
+    forgeParams:
+      provider === "forge"
+        ? buildImg2ImgParams(form, selection.dataUrl, width, height)
+        : undefined
+  };
+};
+
 export interface GenerationControllerState {
   form: GenerationForm;
   setFormValue: <K extends keyof GenerationForm>(key: K, value: GenerationForm[K]) => void;
@@ -238,6 +261,7 @@ export interface GenerationControllerState {
   setPresetShortcut: (value: string) => void;
   status: GenerationStatus;
   progress: number;
+  progressMode: EngineProgressMode;
   error: string | null;
   lastImages: string[];
   options: SdOptions;
@@ -278,8 +302,7 @@ export interface GenerationControllerState {
 }
 
 export const useGenerationController = (settings: AppSettings): GenerationControllerState => {
-  const client = useMemo(() => createPxdClient(settings), [settings]);
-  const imageModelClient = useMemo(() => createImageModelClient(settings), [settings]);
+  const engine = useGenerationEngine(settings);
   const [form, setForm] = useState<GenerationForm>(DEFAULT_FORM);
   const [status, setStatus] = useState<GenerationStatus>("idle");
   const [progress, setProgress] = useState(0);
@@ -484,7 +507,8 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   }, [form.extraPrompt, pushToast]);
 
   const refreshOptions = useCallback(async () => {
-    if (settings.imageProvider === "gemini") {
+    const fetchOptions = engine.fetchOptions;
+    if (!fetchOptions) {
       setOptions(EMPTY_OPTIONS);
       setOptionsError(null);
       setOptionsLoading(false);
@@ -498,7 +522,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     setOptionsLoading(true);
     setOptionsError(null);
     try {
-      const fetched = await client.fetchOptions();
+      const fetched = await fetchOptions();
       setOptions(fetched);
       setForm((prev) => ({
         ...prev,
@@ -516,7 +540,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     } finally {
       setOptionsLoading(false);
     }
-  }, [client, settings.imageProvider, settings.sdEndpoint]);
+  }, [engine, settings.sdEndpoint]);
 
   useEffect(() => {
     refreshOptions().catch((err) => {
@@ -534,13 +558,15 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
 
   const pollProgress = useCallback(async () => {
     stopPolling();
+    const fetchProgress = engine.fetchProgress;
+    if (!fetchProgress) return;
     pollingRef.current = window.setInterval(async () => {
-      const progressInfo = await client.fetchProgress();
+      const progressInfo = await fetchProgress();
       if (progressInfo && typeof progressInfo.progress === "number") {
         setProgress(progressInfo.progress);
       }
     }, 1_000);
-  }, [client, stopPolling]);
+  }, [engine, stopPolling]);
 
   const runGeneration = useCallback(async () => {
     setStatus("running");
@@ -554,27 +580,14 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       }
       const target = clampNumber(form.resolution, 128, 2048);
       const { width, height } = computeOverrideSize(selection.width, selection.height, target);
-      let images: string[];
-      if (settings.imageProvider === "gemini") {
-        const prompt = [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim();
-        const timeoutMs = Math.max(
-          5_000,
-          Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)
-        );
-        const image = await imageModelClient.editImage({
-          prompt,
-          baseImageBase64: toBase64(selection.dataUrl),
-          aspectRatio: "Auto",
-          timeoutMs
-        });
-        images = [image];
-      } else {
-        const params = buildImg2ImgParams(form, selection.dataUrl, width, height);
+      if (engine.progressMode === "determinate") {
         await pollProgress();
-        const result = await client.img2img(params);
-        stopPolling();
-        images = result.images ?? [];
       }
+      const result: EngineResult = await engine.generate(
+        buildEngineGenerateParams(engine.provider, settings, form, selection, width, height)
+      );
+      stopPolling();
+      const { images } = result;
       setProgress(1);
       if (!images.length) {
         throw new Error("未收到可用的生成图像");
@@ -607,7 +620,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       stopPolling();
       setProgress(0);
     }
-  }, [client, dismissToast, form, imageModelClient, pollProgress, pushToast, settings, stopPolling]);
+  }, [dismissToast, engine, form, pollProgress, pushToast, settings, stopPolling]);
 
   const addToBatch = useCallback(async () => {
     try {
@@ -696,28 +709,22 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
             console.warn("setSelectionBounds failed", error)
           );
         }
-        let images: string[];
-        if (settings.imageProvider === "gemini") {
-          const prompt = [item.form.positivePrompt, item.form.extraPrompt].filter(Boolean).join("\n").trim();
-          const timeoutMs = Math.max(
-            5_000,
-            Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)
-          );
-          const image = await imageModelClient.editImage({
-            prompt,
-            baseImageBase64: toBase64(item.selection.dataUrl),
-            aspectRatio: "Auto",
-            timeoutMs,
-            taskId: item.id
-          });
-          images = [image];
-        } else {
-          const params = buildImg2ImgParams(item.form, item.selection.dataUrl, item.overrideWidth, item.overrideHeight);
+        if (engine.progressMode === "determinate") {
           await pollProgress();
-          const result = await client.img2img(params);
-          stopPolling();
-          images = result.images ?? [];
         }
+        const result: EngineResult = await engine.generate(
+          buildEngineGenerateParams(
+            engine.provider,
+            settings,
+            item.form,
+            item.selection,
+            item.overrideWidth,
+            item.overrideHeight,
+            item.id
+          )
+        );
+        stopPolling();
+        const { images } = result;
         if (!images.length) {
           throw new Error(`批次「${item.name}」未返回图像`);
         }
@@ -742,6 +749,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
         }
         await moveActiveLayerToTop();
       }
+      setProgress(1);
       setBatchItems([]);
       setStatus("success");
       pushToast("success", "批次执行完成");
@@ -754,7 +762,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     } finally {
       stopPolling();
     }
-  }, [batchItems, client, imageModelClient, pollProgress, pushToast, settings, stopPolling]);
+  }, [batchItems, engine, pollProgress, pushToast, settings, stopPolling]);
 
   const applyPreset = useCallback(
     async (fileName: string) => {
@@ -805,6 +813,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     setPresetShortcut,
     status,
     progress,
+    progressMode: engine.progressMode,
     error,
     lastImages,
     options,

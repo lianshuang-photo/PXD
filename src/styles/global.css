@@ -202,6 +202,25 @@ body {
   transition: width 220ms ease;
 }
 
+.generation-progress__indeterminate {
+  width: 36%;
+  height: 100%;
+  background: var(--brand-color);
+  animation: generation-progress-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes generation-progress-pulse {
+  0% {
+    transform: translateX(-110%);
+  }
+  50% {
+    transform: translateX(90%);
+  }
+  100% {
+    transform: translateX(280%);
+  }
+}
+
 .status-chip {
   display: inline-flex;
   align-items: center;
