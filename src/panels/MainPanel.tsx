@@ -43,6 +43,8 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
     setPresetShortcut,
     status,
     progress,
+    progressPreview,
+    progressText,
     error,
     lastImages,
     options,
@@ -381,12 +383,18 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
       
       {/* 进度条和错误提示 */}
       {status === "running" && (
-        <div style={{ padding: "0.5rem", background: "rgba(60, 131, 246, 0.1)", borderBottom: "1px solid var(--border-color)", flexShrink: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.75rem" }}>
-            <div style={{ flex: 1, height: "4px", background: "rgba(255,255,255,0.1)", borderRadius: "2px", overflow: "hidden" }}>
-              <div style={{ height: "100%", background: "var(--brand-color)", width: `${progressPercent}%`, transition: "width 0.3s" }} />
+        <div className="generation-progress">
+          {progressPreview && (
+            <img className="generation-progress__preview" src={progressPreview} alt="Forge 实时预览" />
+          )}
+          <div className="generation-progress__details">
+            <div className="generation-progress__row">
+              <div className="generation-progress__track">
+                <div className="generation-progress__fill" style={{ width: `${progressPercent}%` }} />
+              </div>
+              <span>{progressPercent}%</span>
             </div>
-            <span>{progressPercent}%</span>
+            {progressText && <span className="generation-progress__text">{progressText}</span>}
           </div>
         </div>
       )}
@@ -503,6 +511,8 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                   <input
                     className="input"
                     type="number"
+                    min={-2}
+                    max={2}
                     step={0.1}
                     value={form.loraWeight}
                     onChange={(event) => setFormValue("loraWeight", Number(event.target.value))}
@@ -666,6 +676,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                     className="input"
                     value={form.controlNetModule}
                     onChange={(event) => setFormValue("controlNetModule", event.target.value)}
+                    disabled={!form.controlNetModel}
                     style={{ flex: 1, minWidth: 0 }}
                   >
                     {controlNetModuleOptions}

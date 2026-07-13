@@ -424,6 +424,62 @@ export const placeImageIntoSelection = async (
   return info;
 };
 
+export const createGeneratedDocument = async (
+  width: number,
+  height: number,
+  name = "PXD 文生图"
+): Promise<number> => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const documentWidth = Math.max(32, Math.round(width));
+  const documentHeight = Math.max(32, Math.round(height));
+  return await photoshop.core.executeAsModal(async () => {
+    if (typeof photoshop.app.createDocument === "function") {
+      try {
+        const document = await photoshop.app.createDocument({
+          width: documentWidth,
+          height: documentHeight,
+          resolution: 72,
+          mode: "RGBColorMode",
+          fill: "transparent",
+          name
+        });
+        const id = Number(document?.id);
+        if (Number.isFinite(id) && id > 0) return id;
+      } catch (error) {
+        console.warn("Photoshop createDocument failed, falling back to batchPlay", error);
+      }
+    }
+    const result = await photoshop.app.batchPlay(
+      [
+        {
+          _obj: "make",
+          _target: [{ _ref: "document" }],
+          using: {
+            _obj: "document",
+            name,
+            width: { _unit: "pixelsUnit", _value: documentWidth },
+            height: { _unit: "pixelsUnit", _value: documentHeight },
+            resolution: { _unit: "densityUnit", _value: 72 },
+            mode: { _class: "RGBColorMode" },
+            fill: { _enum: "fill", _value: "transparent" }
+          }
+        }
+      ],
+      { synchronousExecution: true }
+    );
+    const descriptor = result?.[0];
+    const descriptorId = Number(
+      descriptor?.documentID ?? descriptor?.documentId ?? descriptor?.ID ?? descriptor?.id
+    );
+    if (Number.isFinite(descriptorId) && descriptorId > 0) return descriptorId;
+    const activeId = Number(photoshop.app.activeDocument?.id);
+    if (!Number.isFinite(activeId) || activeId <= 0) {
+      throw new Error("Photoshop 未返回新建文档 ID");
+    }
+    return activeId;
+  }, { commandName: "创建 PXD 文生图画布" });
+};
+
 export const placeImageIntoDocument = async (dataUrl: string, index = 1, docId?: number) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
   const doc = photoshop.app.activeDocument;

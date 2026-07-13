@@ -4,15 +4,18 @@ import {
   createPxdClient,
   type ControlNetPayload,
   type Img2ImgParams,
-  type SdOptions
+  type SdOptions,
+  type Txt2ImgParams
 } from "../services/apiClient";
 import { createImageModelClient, ImageModelError } from "../services/imageModelClient";
 import {
   closeDocument,
+  createGeneratedDocument,
   getSelectionPixels,
   groupLayers,
   moveActiveLayerToTop,
   onBatchAddLayer,
+  placeImageIntoDocument,
   placeImageIntoSelection,
   setSelectionBounds,
   switchToDocument,
@@ -130,7 +133,8 @@ const DEFAULT_FORM: GenerationForm = {
   presetShortcut: ""
 };
 
-const toDataUrl = (base64: string) => `data:image/png;base64,${base64}`;
+const toDataUrl = (base64: string) =>
+  base64.startsWith("data:image/") ? base64 : `data:image/png;base64,${base64}`;
 const toBase64 = (dataUrl: string) => dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
 
 const formatGenerationError = (error: unknown, fallback: string) => {
@@ -200,12 +204,11 @@ const appendPromptValue = (current: string, addition: string) => {
   };
 };
 
-const buildImg2ImgParams = (
+const buildTxt2ImgParams = (
   form: GenerationForm,
-  baseImage: string,
   width: number,
   height: number
-): Img2ImgParams => {
+): Txt2ImgParams => {
   const effectivePrompt = [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim();
   return {
     prompt: effectivePrompt || form.positivePrompt,
@@ -216,15 +219,31 @@ const buildImg2ImgParams = (
     scheduler: form.scheduler || undefined,
     model: form.model || undefined,
     vae: form.vae || undefined,
-    loras: form.lora ? [{ name: form.lora, weight: form.loraWeight || 1 }] : undefined,
+    loras: form.lora
+      ? [{
+          name: form.lora,
+          weight: Number.isFinite(form.loraWeight) ? clampNumber(form.loraWeight, -2, 2) : 1
+        }]
+      : undefined,
     batchSize: clampNumber(form.imageCount, 1, 8),
     width,
     height,
-    denoisingStrength: clampNumber(form.denoisingStrength, 0, 0.99),
     seed: form.seed ?? -1,
     clipSkip: form.clipSkip > 0 ? form.clipSkip : undefined,
     restoreFaces: form.restoreFaces,
-    tiling: form.tiling,
+    tiling: form.tiling
+  };
+};
+
+const buildImg2ImgParams = (
+  form: GenerationForm,
+  baseImage: string,
+  width: number,
+  height: number
+): Img2ImgParams => {
+  return {
+    ...buildTxt2ImgParams(form, width, height),
+    denoisingStrength: clampNumber(form.denoisingStrength, 0, 0.99),
     controlNet: normalizeControlNetPayload(form, baseImage),
     baseImage
   };
@@ -238,6 +257,8 @@ export interface GenerationControllerState {
   setPresetShortcut: (value: string) => void;
   status: GenerationStatus;
   progress: number;
+  progressPreview: string | null;
+  progressText: string | null;
   error: string | null;
   lastImages: string[];
   options: SdOptions;
@@ -283,6 +304,8 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   const [form, setForm] = useState<GenerationForm>(DEFAULT_FORM);
   const [status, setStatus] = useState<GenerationStatus>("idle");
   const [progress, setProgress] = useState(0);
+  const [progressPreview, setProgressPreview] = useState<string | null>(null);
+  const [progressText, setProgressText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastImages, setLastImages] = useState<string[]>([]);
   const [options, setOptions] = useState<SdOptions>(EMPTY_OPTIONS);
@@ -298,7 +321,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   const [translationLoading, setTranslationLoading] = useState(false);
   const [sourceLanguage, setSourceLanguage] = useState("zh");
   const [targetLanguage, setTargetLanguage] = useState("en");
-  const pollingRef = useRef<number | null>(null);
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const presetsLoadGateRef = useRef(new LatestLoadGate());
   const clearToastTimer = useCallback(() => {
@@ -364,7 +387,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
 
   const stopPolling = useCallback(() => {
     if (pollingRef.current) {
-      window.clearInterval(pollingRef.current);
+      globalThis.clearInterval(pollingRef.current);
       pollingRef.current = null;
     }
   }, []);
@@ -506,8 +529,8 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
         scheduler: prev.scheduler || fetched.schedulers[0]?.value || "",
         model: prev.model || fetched.models[0]?.value || "",
         vae: prev.vae || fetched.vaes[0]?.value || "",
-        controlNetModel: prev.controlNetModel || fetched.controlNetModels[0]?.value || "",
-        controlNetModule: prev.controlNetModule || fetched.controlNetModules[0]?.value || ""
+        controlNetModel: prev.controlNetModel,
+        controlNetModule: prev.controlNetModule
       }));
     } catch (err) {
       const message = err instanceof Error ? err.message : "选项获取失败";
@@ -534,11 +557,16 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
 
   const pollProgress = useCallback(async () => {
     stopPolling();
-    pollingRef.current = window.setInterval(async () => {
+    pollingRef.current = globalThis.setInterval(async () => {
       const progressInfo = await client.fetchProgress();
       if (progressInfo && typeof progressInfo.progress === "number") {
         setProgress(progressInfo.progress);
       }
+      if (progressInfo?.current_image) {
+        setProgressPreview(toDataUrl(progressInfo.current_image));
+      }
+      const text = progressInfo?.textinfo || progressInfo?.message;
+      if (text) setProgressText(text);
     }, 1_000);
   }, [client, stopPolling]);
 
@@ -546,16 +574,21 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     setStatus("running");
     setError(null);
     setProgress(0);
+    setProgressPreview(null);
+    setProgressText(null);
     dismissToast();
     try {
       const selection = await getSelectionPixels();
-      if (!selection) {
+      if (!selection && settings.imageProvider === "gemini") {
         throw new Error("请先在 Photoshop 中选择一个区域");
       }
       const target = clampNumber(form.resolution, 128, 2048);
-      const { width, height } = computeOverrideSize(selection.width, selection.height, target);
+      const { width, height } = selection
+        ? computeOverrideSize(selection.width, selection.height, target)
+        : { width: target, height: target };
       let images: string[];
       if (settings.imageProvider === "gemini") {
+        if (!selection) throw new Error("请先在 Photoshop 中选择一个区域");
         const prompt = [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim();
         const timeoutMs = Math.max(
           5_000,
@@ -569,9 +602,10 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
         });
         images = [image];
       } else {
-        const params = buildImg2ImgParams(form, selection.dataUrl, width, height);
         await pollProgress();
-        const result = await client.img2img(params);
+        const result = selection
+          ? await client.img2img(buildImg2ImgParams(form, selection.dataUrl, width, height))
+          : await client.txt2img(buildTxt2ImgParams(form, width, height));
         stopPolling();
         images = result.images ?? [];
       }
@@ -581,10 +615,11 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       }
       const placedLayerIds: number[] = [];
       const feather = Number.isFinite(form.maskFeather) ? form.maskFeather : DEFAULT_FORM.maskFeather;
+      const documentId = selection ? undefined : await createGeneratedDocument(width, height);
       for (let i = 0; i < images.length; i++) {
-        const info = await placeImageIntoSelection(toDataUrl(images[i]), i + 1, {
-          feather
-        });
+        const info = selection
+          ? await placeImageIntoSelection(toDataUrl(images[i]), i + 1, { feather })
+          : await placeImageIntoDocument(toDataUrl(images[i]), i + 1, documentId);
         const id = extractLayerId(info);
         if (id) {
           placedLayerIds.push(id);
@@ -606,6 +641,8 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     } finally {
       stopPolling();
       setProgress(0);
+      setProgressPreview(null);
+      setProgressText(null);
     }
   }, [client, dismissToast, form, imageModelClient, pollProgress, pushToast, settings, stopPolling]);
 
@@ -805,6 +842,8 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     setPresetShortcut,
     status,
     progress,
+    progressPreview,
+    progressText,
     error,
     lastImages,
     options,
