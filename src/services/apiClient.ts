@@ -70,7 +70,40 @@ export interface ProgressResponse {
 
 interface RequestOptions extends RequestInit {
   timeoutMs?: number;
+  taskId?: string;
 }
+
+export interface RequestTaskOptions {
+  taskId?: string;
+  signal?: AbortSignal;
+}
+
+export class PxdRequestCancelledError extends Error {
+  readonly code = "CANCELLED";
+  readonly taskId?: string;
+
+  constructor(taskId?: string) {
+    super(taskId ? `Request cancelled for task ${taskId}` : "Request cancelled");
+    this.name = "PxdRequestCancelledError";
+    this.taskId = taskId;
+  }
+}
+
+export class PxdRequestTimeoutError extends Error {
+  readonly code = "TIMEOUT";
+  readonly timeoutMs: number;
+  readonly taskId?: string;
+
+  constructor(timeoutMs: number, taskId?: string) {
+    super(`Request timed out after ${timeoutMs}ms`);
+    this.name = "PxdRequestTimeoutError";
+    this.timeoutMs = timeoutMs;
+    this.taskId = taskId;
+  }
+}
+
+export const isPxdRequestCancelledError = (error: unknown): error is PxdRequestCancelledError =>
+  error instanceof PxdRequestCancelledError;
 
 const DEFAULT_TIMEOUT = 15_000;
 const BASE_RESOLUTION = 512 * 512;
@@ -109,37 +142,6 @@ const computeDynamicTimeout = (steps: number, width: number, height: number, opt
   const stepScale = clampNumber(steps / STEP_REFERENCE, 0.5, 5);
   const budget = (BASE_TIMEOUT_BUDGET + TIMEOUT_MARGIN) * areaScale * stepScale * multiplier;
   return Math.round(clampNumber(budget, minMs, maxMs));
-};
-
-const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number): Promise<T> => {
-  let timer: number;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = window.setTimeout(() => {
-      reject(new Error(`Request timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-  });
-  try {
-    const result = await Promise.race([promise, timeout]);
-    return result;
-  } finally {
-    window.clearTimeout(timer);
-  }
-};
-
-const requestJson = async <T>(url: string, init: RequestOptions = {}): Promise<T> => {
-  const { timeoutMs = DEFAULT_TIMEOUT, ...rest } = init;
-  const startedAt = Date.now();
-  try {
-    const response = await withTimeout(fetch(url, rest), timeoutMs);
-    if (!response.ok) {
-      const message = await response.text();
-      const elapsed = Date.now() - startedAt;
-      throw new Error(`Request failed (${response.status}) after ${elapsed}ms (timeout ${timeoutMs}ms): ${message}`);
-    }
-    return (await response.json()) as T;
-  } catch (error) {
-    throw error;
-  }
 };
 
 const sanitizeBaseUrl = (input: string) => input.replace(/\/+$/, "");
@@ -257,6 +259,8 @@ const buildImg2ImgPayload = (params: Img2ImgParams) => {
 
 export const createPxdClient = (settings: AppSettings) => {
   const baseURL = sanitizeBaseUrl(settings.sdEndpoint);
+  const controllers = new Map<string, AbortController>();
+  let requestSequence = 0;
   const toMilliseconds = (seconds: number | undefined, fallbackMs: number) => {
     if (!Number.isFinite(seconds)) return fallbackMs;
     return Math.max(0, Math.round((seconds as number) * 1000));
@@ -276,8 +280,79 @@ export const createPxdClient = (settings: AppSettings) => {
     return `${baseURL}${path}`;
   };
 
-  const fetchJson = async <T>(path: string, init?: RequestOptions) => {
-    return await requestJson<T>(makeUrl(path), init);
+  const fetchJson = async <T>(path: string, init: RequestOptions = {}) => {
+    const {
+      timeoutMs = DEFAULT_TIMEOUT,
+      taskId,
+      signal: externalSignal,
+      ...requestInit
+    } = init;
+    const requestId = taskId ?? `pxd-request-${++requestSequence}`;
+    const previousController = controllers.get(requestId);
+    if (previousController) {
+      previousController.abort();
+    }
+
+    const controller = new AbortController();
+    controllers.set(requestId, controller);
+    let timedOut = false;
+    const abortFromExternal = () => controller.abort(externalSignal?.reason);
+    if (externalSignal?.aborted) abortFromExternal();
+    else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    const startedAt = Date.now();
+
+    try {
+      const response = await fetch(makeUrl(path), {
+        ...requestInit,
+        signal: controller.signal
+      });
+      if (controller.signal.aborted) {
+        throw controller.signal.reason;
+      }
+      if (!response.ok) {
+        const message = await response.text();
+        const elapsed = Date.now() - startedAt;
+        throw new Error(`Request failed (${response.status}) after ${elapsed}ms (timeout ${timeoutMs}ms): ${message}`);
+      }
+      const data = (await response.json()) as T;
+      if (controller.signal.aborted) {
+        throw controller.signal.reason;
+      }
+      return data;
+    } catch (error) {
+      if (controller.signal.aborted) {
+        if (timedOut) {
+          throw new PxdRequestTimeoutError(timeoutMs, taskId);
+        }
+        throw new PxdRequestCancelledError(taskId);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      externalSignal?.removeEventListener("abort", abortFromExternal);
+      if (controllers.get(requestId) === controller) {
+        controllers.delete(requestId);
+      }
+    }
+  };
+
+  const cancel = (taskId: string) => {
+    const controller = controllers.get(taskId);
+    if (!controller) return false;
+    controller.abort();
+    return true;
+  };
+
+  const cancelAll = () => {
+    const activeControllers = [...controllers.values()];
+    for (const controller of activeControllers) {
+      controller.abort();
+    }
+    return activeControllers.length;
   };
 
   return {
@@ -359,17 +434,18 @@ export const createPxdClient = (settings: AppSettings) => {
         controlNetModules: normalizeOptions(controlNetModules, ["module", "name"])
       };
     },
-    async txt2img(params: Txt2ImgParams): Promise<Txt2ImgResponse> {
+    async txt2img(params: Txt2ImgParams, options: RequestTaskOptions = {}): Promise<Txt2ImgResponse> {
       const payload = buildTxt2ImgPayload(params);
       const timeoutMs = computeDynamicTimeout(params.steps, params.width, params.height, timeoutOptions);
       return await fetchJson<Txt2ImgResponse>("/sdapi/v1/txt2img", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        timeoutMs
+        timeoutMs,
+        ...options
       });
     },
-    async img2img(params: Img2ImgParams): Promise<Txt2ImgResponse> {
+    async img2img(params: Img2ImgParams, options: RequestTaskOptions = {}): Promise<Txt2ImgResponse> {
       const baseImage = dataUrlToBase64(params.baseImage);
       const timeoutMs = computeDynamicTimeout(params.steps, params.width, params.height, timeoutOptions);
       const payload = buildImg2ImgPayload({
@@ -387,7 +463,8 @@ export const createPxdClient = (settings: AppSettings) => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        timeoutMs
+        timeoutMs,
+        ...options
       });
     },
     async fetchProgress(): Promise<ProgressResponse | null> {
@@ -397,9 +474,12 @@ export const createPxdClient = (settings: AppSettings) => {
           timeoutMs: 5_000
         });
       } catch (error) {
+        if (isPxdRequestCancelledError(error)) return null;
         console.warn("Progress polling failed", error);
         return null;
       }
-    }
+    },
+    cancel,
+    cancelAll
   };
 };

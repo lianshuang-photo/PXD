@@ -12,6 +12,8 @@ export interface EditImageParams {
 
 export interface ImageModelClient {
   editImage(params: EditImageParams): Promise<string>;
+  cancel(taskId: string): boolean;
+  cancelAll(): number;
 }
 
 export class ImageModelError extends Error {
@@ -27,6 +29,9 @@ export class ImageModelError extends Error {
     this.status = status;
   }
 }
+
+export const isImageModelCancelledError = (error: unknown): error is ImageModelError =>
+  error instanceof ImageModelError && error.code === "CANCELLED";
 
 interface GeminiPart {
   text?: string;
@@ -336,8 +341,27 @@ const parseImage = async (data: GeminiResponse, signal: AbortSignal, trustedEndp
   );
 };
 
-export const createImageModelClient = (settings: AppSettings): ImageModelClient => ({
-  async editImage(params) {
+export const createImageModelClient = (settings: AppSettings): ImageModelClient => {
+  const controllers = new Map<string, AbortController>();
+  let requestSequence = 0;
+
+  const cancel = (taskId: string) => {
+    const controller = controllers.get(taskId);
+    if (!controller) return false;
+    controller.abort();
+    return true;
+  };
+
+  const cancelAll = () => {
+    const activeControllers = [...controllers.values()];
+    for (const controller of activeControllers) {
+      controller.abort();
+    }
+    return activeControllers.length;
+  };
+
+  return {
+    async editImage(params) {
     ensureConfigured(settings);
     if (!params.prompt.trim()) {
       throw new ImageModelError("请输入图像编辑指令", "CONFIG_PROMPT", "请填写提示词后重试。");
@@ -369,7 +393,13 @@ export const createImageModelClient = (settings: AppSettings): ImageModelClient 
       }
     };
 
+    const requestId = params.taskId ?? `image-model-request-${++requestSequence}`;
+    const previousController = controllers.get(requestId);
+    if (previousController) {
+      previousController.abort();
+    }
     const controller = new AbortController();
+    controllers.set(requestId, controller);
     let timedOut = false;
     const timeoutMs = Number.isFinite(params.timeoutMs) && params.timeoutMs > 0 ? params.timeoutMs : 120_000;
     const abortFromExternal = () => controller.abort(params.signal?.reason);
@@ -387,6 +417,9 @@ export const createImageModelClient = (settings: AppSettings): ImageModelClient 
         body: JSON.stringify(body),
         signal: controller.signal
       });
+      if (controller.signal.aborted) {
+        throw controller.signal.reason;
+      }
       if (!response.ok) {
         const detail = httpErrorDetails(response.status);
         throw new ImageModelError(detail.message, detail.code, detail.solution, response.status);
@@ -401,15 +434,18 @@ export const createImageModelClient = (settings: AppSettings): ImageModelClient 
           "请确认 Endpoint 指向 Gemini generateContent 兼容服务。"
         );
       }
+      if (controller.signal.aborted) {
+        throw controller.signal.reason;
+      }
       return await parseImage(data, controller.signal, settings.geminiEndpoint);
     } catch (error) {
-      if (error instanceof ImageModelError) throw error;
       if (controller.signal.aborted) {
         if (timedOut) {
           throw new ImageModelError(`图像生成超时（${Math.max(1, Math.ceil(timeoutMs / 1000))} 秒）`, "TIMEOUT", "请稍后重试，或在设置中增大最长超时。");
         }
         throw new ImageModelError("图像生成已取消", "CANCELLED", "可重新发起生成任务。");
       }
+      if (error instanceof ImageModelError) throw error;
       throw new ImageModelError(
         "无法连接图像模型服务",
         "NETWORK",
@@ -418,6 +454,12 @@ export const createImageModelClient = (settings: AppSettings): ImageModelClient 
     } finally {
       clearTimeout(timeout);
       params.signal?.removeEventListener("abort", abortFromExternal);
+      if (controllers.get(requestId) === controller) {
+        controllers.delete(requestId);
+      }
     }
-  }
-});
+    },
+    cancel,
+    cancelAll
+  };
+};
