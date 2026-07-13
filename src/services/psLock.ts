@@ -32,17 +32,46 @@ export class PSOperationTimeoutError extends Error {
   }
 }
 
+export class PSCircuitOpenError extends Error {
+  readonly blockingTaskId?: string;
+  readonly taskId?: string;
+
+  constructor(blockingTaskId?: string, taskId?: string) {
+    const blockingSuffix = blockingTaskId ? ` after task ${blockingTaskId} timed out` : "";
+    super(`Photoshop operation circuit is open${blockingSuffix}`);
+    this.name = "PSCircuitOpenError";
+    this.blockingTaskId = blockingTaskId;
+    this.taskId = taskId;
+  }
+}
+
 export const isPSLockControlError = (
   error: unknown
-): error is PSLockCancelledError | PSOperationTimeoutError =>
-  error instanceof PSLockCancelledError || error instanceof PSOperationTimeoutError;
+): error is PSLockCancelledError | PSOperationTimeoutError | PSCircuitOpenError =>
+  error instanceof PSLockCancelledError ||
+  error instanceof PSOperationTimeoutError ||
+  error instanceof PSCircuitOpenError;
 
 const waiters: LockWaiter[] = [];
 let isLocked = false;
+let isCircuitOpen = false;
+let circuitBlockingTaskId: string | undefined;
 let cooldownTimer: ReturnType<typeof setTimeout> | null = null;
 
+const openCircuit = (blockingTaskId?: string) => {
+  if (isCircuitOpen) {
+    return;
+  }
+  isCircuitOpen = true;
+  circuitBlockingTaskId = blockingTaskId;
+  const queued = waiters.splice(0);
+  for (const waiter of queued) {
+    waiter.reject(new PSCircuitOpenError(blockingTaskId, waiter.taskId));
+  }
+};
+
 const dispatchNext = () => {
-  if (isLocked || cooldownTimer) {
+  if (isLocked || isCircuitOpen || cooldownTimer) {
     return;
   }
 
@@ -61,16 +90,22 @@ const dispatchNext = () => {
     isLocked = false;
     cooldownTimer = setTimeout(() => {
       cooldownTimer = null;
+      isCircuitOpen = false;
+      circuitBlockingTaskId = undefined;
       dispatchNext();
     }, RELEASE_COOLDOWN_MS);
   });
 };
 
-export const acquirePSLock = (taskId?: string): Promise<() => void> =>
-  new Promise((resolve, reject) => {
+export const acquirePSLock = (taskId?: string): Promise<() => void> => {
+  if (isCircuitOpen) {
+    return Promise.reject(new PSCircuitOpenError(circuitBlockingTaskId, taskId));
+  }
+  return new Promise((resolve, reject) => {
     waiters.push({ taskId, resolve, reject });
     dispatchNext();
   });
+};
 
 // UXP cannot cancel an active modal operation, so cancellation only removes pending waiters.
 export const clearPSLockQueue = (taskId?: string): number => {
@@ -101,7 +136,9 @@ export const runPSExclusive = async <T>(
   void operationPromise.then(release, release);
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutTimer = setTimeout(() => {
-      reject(new PSOperationTimeoutError(timeoutMs, options.taskId));
+      const error = new PSOperationTimeoutError(timeoutMs, options.taskId);
+      openCircuit(options.taskId);
+      reject(error);
     }, timeoutMs);
   });
 

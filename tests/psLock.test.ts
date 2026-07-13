@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import {
   acquirePSLock,
   clearPSLockQueue,
+  PSCircuitOpenError,
   PSLockCancelledError,
   PSOperationTimeoutError,
   runPSExclusive
@@ -33,28 +34,55 @@ test("runPSExclusive executes queued operations in FIFO order without overlap", 
   expect(events).toEqual(["start-a", "end-a", "start-b", "end-b", "start-c", "end-c"]);
 });
 
-test("a timed-out operation keeps the queue blocked until the underlying work settles", async () => {
+test("a timed-out operation opens the circuit until its underlying work settles", async () => {
   let settleHungOperation: (() => void) | undefined;
   const hungOperation = new Promise<void>((resolve) => {
     settleHungOperation = resolve;
   });
-  let followingStarted = false;
+  let activeOperations = 0;
+  let maximumActiveOperations = 0;
   const timedOut = runPSExclusive(() => hungOperation, { taskId: "hung", timeoutMs: 20 });
   const following = runPSExclusive(() => {
-    followingStarted = true;
+    activeOperations += 1;
+    maximumActiveOperations = Math.max(maximumActiveOperations, activeOperations);
+    activeOperations -= 1;
     return "continued";
   }, { taskId: "next", timeoutMs: 1_000 });
+  const followingAssertion = expect(following).rejects.toMatchObject({
+    name: PSCircuitOpenError.name,
+    blockingTaskId: "hung",
+    taskId: "next"
+  });
 
   await expect(timedOut).rejects.toMatchObject({
     name: PSOperationTimeoutError.name,
     timeoutMs: 20,
     taskId: "hung"
   });
-  await delay(200);
-  expect(followingStarted).toBe(false);
+  await followingAssertion;
+
+  const duringCircuit = runPSExclusive(() => "must not run", {
+    taskId: "during-circuit",
+    timeoutMs: 1_000
+  });
+  await expect(duringCircuit).rejects.toMatchObject({
+    name: PSCircuitOpenError.name,
+    blockingTaskId: "hung",
+    taskId: "during-circuit"
+  });
+  expect(maximumActiveOperations).toBe(0);
 
   settleHungOperation?.();
-  await expect(following).resolves.toBe("continued");
+  await delay(200);
+
+  const recovered = runPSExclusive(() => {
+    activeOperations += 1;
+    maximumActiveOperations = Math.max(maximumActiveOperations, activeOperations);
+    activeOperations -= 1;
+    return "recovered";
+  }, { taskId: "recovered", timeoutMs: 1_000 });
+  await expect(recovered).resolves.toBe("recovered");
+  expect(maximumActiveOperations).toBe(1);
 });
 
 test("clearPSLockQueue only rejects pending entries for the selected task", async () => {

@@ -29,6 +29,7 @@ import { bridge } from "../src/services/uxpBridge";
 import { moveActiveLayerToTop, placeImageIntoDocument } from "../src/services/photoshop";
 import {
   clearPSLockQueue,
+  PSCircuitOpenError,
   PSLockCancelledError,
   PSOperationTimeoutError
 } from "../src/services/psLock";
@@ -95,7 +96,7 @@ test("taskId cancellation reaches queued Photoshop operations", async () => {
   await active;
 });
 
-test("a Photoshop timeout propagates while the unfinished modal keeps later work blocked", async () => {
+test("a Photoshop timeout opens the circuit without releasing the unfinished modal", async () => {
   let releaseTimedOutModal: (() => void) | undefined;
   batchPlay.mockImplementationOnce(async () => {
     await new Promise<void>((resolve) => {
@@ -107,13 +108,18 @@ test("a Photoshop timeout propagates while the unfinished modal keeps later work
   const timedOut = moveActiveLayerToTop({ taskId: "timed-out", layerId: 21, timeoutMs: 20 });
   await vi.waitFor(() => expect(executeAsModal).toHaveBeenCalledTimes(1));
   const following = moveActiveLayerToTop({ taskId: "following", layerId: 22, timeoutMs: 1_000 });
+  const followingAssertion = expect(following).rejects.toBeInstanceOf(PSCircuitOpenError);
 
   await expect(timedOut).rejects.toBeInstanceOf(PSOperationTimeoutError);
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await followingAssertion;
+  await expect(
+    moveActiveLayerToTop({ taskId: "during-circuit", layerId: 23, timeoutMs: 1_000 })
+  ).rejects.toBeInstanceOf(PSCircuitOpenError);
   expect(executeAsModal).toHaveBeenCalledTimes(1);
 
   releaseTimedOutModal?.();
-  await following;
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  await moveActiveLayerToTop({ taskId: "recovered", layerId: 24, timeoutMs: 1_000 });
   expect(executeAsModal).toHaveBeenCalledTimes(2);
 });
 
