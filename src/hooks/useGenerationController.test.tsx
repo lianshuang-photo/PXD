@@ -68,6 +68,8 @@ const makeEngine = (
   provider,
   progressMode: provider === "forge" ? "determinate" : "indeterminate",
   generate: vi.fn().mockResolvedValue({ images: [`${provider}-image`] }),
+  cancel: vi.fn().mockReturnValue(false),
+  cancelAll: vi.fn().mockReturnValue(0),
   ...(provider === "forge"
     ? {
         fetchOptions: vi.fn().mockResolvedValue(emptyOptions),

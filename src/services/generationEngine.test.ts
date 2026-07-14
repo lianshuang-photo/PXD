@@ -78,7 +78,10 @@ describe("createGenerationEngine", () => {
     expect(engine).toMatchObject({ provider: "forge", progressMode: "determinate" });
     expect(clients.createForgeClient).toHaveBeenCalledOnce();
     expect(clients.createGeminiClient).not.toHaveBeenCalled();
-    expect(clients.forgeClient.img2img).toHaveBeenCalledWith(forgeParams);
+    expect(clients.forgeClient.img2img).toHaveBeenCalledWith(forgeParams, {
+      taskId: undefined,
+      signal: undefined
+    });
   });
 
   it("routes a single Gemini task without progress or Forge construction", async () => {

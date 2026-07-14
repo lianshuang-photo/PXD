@@ -26,6 +26,8 @@ export interface GenerationEngine {
   provider: AppSettings["imageProvider"];
   progressMode: EngineProgressMode;
   generate(params: EngineGenerateParams): Promise<EngineResult>;
+  cancel(taskId: string): boolean;
+  cancelAll(): number;
   fetchOptions?: () => Promise<SdOptions>;
   fetchProgress?: () => Promise<ProgressResponse | null>;
 }
@@ -123,7 +125,9 @@ export const createGenerationEngine = (
         } catch (error) {
           throw toEngineError("gemini", error);
         }
-      }
+      },
+      cancel: (taskId) => client.cancel(taskId),
+      cancelAll: () => client.cancelAll()
     };
   }
 
@@ -143,11 +147,16 @@ export const createGenerationEngine = (
             "forge"
           );
         }
-        const result = await client.img2img(params.forgeParams);
+        const result = await client.img2img(params.forgeParams, {
+          taskId: params.taskId,
+          signal: params.signal
+        });
         return { images: result.images ?? [] };
       } catch (error) {
         throw toEngineError("forge", error);
       }
-    }
+    },
+    cancel: (taskId) => client.cancel(taskId),
+    cancelAll: () => client.cancelAll()
   };
 };

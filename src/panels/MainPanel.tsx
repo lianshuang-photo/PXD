@@ -15,6 +15,14 @@ const statusLabelMap: Record<string, string> = {
   error: "生成失败"
 };
 
+const batchStatusLabelMap = {
+  queued: "排队中",
+  running: "生成中",
+  success: "已完成",
+  stopped: "已停止",
+  error: "失败"
+} as const;
+
 const languageOptions = [
   { value: "zh", label: "中文" },
   { value: "en", label: "English" },
@@ -50,6 +58,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
     optionsError,
     refreshOptions,
     runGeneration,
+    stopGeneration,
     batchItems,
     addToBatch,
     removeFromBatch,
@@ -81,6 +90,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
     appendExtraPromptToPositive,
     appendExtraPromptToNegative
   } = controller;
+  const hasRunnableBatchItems = batchItems.some((item) => item.status !== "success");
 
   const [presetFile, setPresetFile] = useState<string>("");
   const [presetName, setPresetName] = useState<string>("");
@@ -351,10 +361,25 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
         >
           {status === "running" ? "生成中" : "开始生成"}
         </button>
+        <button
+          type="button"
+          className="btn btn--secondary"
+          onClick={stopGeneration}
+          disabled={status !== "running"}
+          style={{
+            ...compactTopActionButtonStyle,
+            color: "#fca5a5",
+            borderTopColor: "rgba(239, 68, 68, 0.45)",
+            borderBottomColor: "rgba(239, 68, 68, 0.45)"
+          }}
+        >
+          停止
+        </button>
         <button 
           type="button" 
           className="btn btn--secondary" 
           onClick={addToBatch}
+          disabled={status === "running"}
           style={compactTopActionButtonStyle}
         >
           加入批次
@@ -363,7 +388,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
           type="button"
           className="btn btn--secondary"
           onClick={runBatch}
-          disabled={!batchItems.length || status === "running"}
+          disabled={!hasRunnableBatchItems || status === "running"}
           style={compactTopActionButtonStyle}
         >
           执行批次
@@ -372,7 +397,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
           type="button" 
           className="btn btn--ghost" 
           onClick={refreshOptions} 
-          disabled={optionsLoading}
+          disabled={optionsLoading || status === "running"}
           style={compactTopActionButtonStyle}
         >
           {optionsLoading ? "同步中" : "刷新"}
@@ -851,7 +876,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                   <hr style={{ margin: "1rem 0", border: "none", borderTop: "1px solid var(--border-color)" }} />
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
                     <span style={{ fontSize: "0.875rem", fontWeight: 500 }}>批次队列 ({batchItems.length})</span>
-                    <button type="button" className="btn btn--ghost" onClick={clearBatch} style={{ padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}>
+                    <button type="button" className="btn btn--ghost" onClick={clearBatch} disabled={status === "running"} style={{ padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}>
                       清空
                     </button>
                   </div>
@@ -860,13 +885,14 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                       <li key={item.id} style={{ padding: "0.5rem", border: "1px solid var(--border-color)", borderRadius: "4px", marginBottom: "0.5rem", fontSize: "0.75rem" }}>
                         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.25rem" }}>
                           <span style={{ fontWeight: 500 }}>{item.name}</span>
-                          <button type="button" className="btn btn--ghost" onClick={() => removeFromBatch(item.id)} style={{ padding: "0.125rem 0.5rem", fontSize: "0.75rem" }}>
+                          <button type="button" className="btn btn--ghost" onClick={() => removeFromBatch(item.id)} disabled={status === "running"} style={{ padding: "0.125rem 0.5rem", fontSize: "0.75rem" }}>
                             移除
                           </button>
                         </div>
                         <div style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>
-                          {item.overrideWidth}×{item.overrideHeight} · {item.form.steps}步 · CFG{item.form.cfgScale}
+                          {item.overrideWidth}×{item.overrideHeight} · {item.form.steps}步 · CFG{item.form.cfgScale} · {batchStatusLabelMap[item.status]}
                         </div>
+                        {item.error && <div style={{ color: "#f87171", fontSize: "0.7rem", marginTop: "0.2rem" }}>{item.error}</div>}
                       </li>
                     ))}
                   </ul>
