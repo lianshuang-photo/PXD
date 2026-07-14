@@ -1,12 +1,22 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { AppSettings } from "../context/types";
 import {
-  createPxdClient,
   type ControlNetPayload,
   type Img2ImgParams,
   type SdOptions
 } from "../services/apiClient";
-import { createImageModelClient, ImageModelError } from "../services/imageModelClient";
+import {
+  formatGenerationError,
+  type EngineGenerateParams,
+  type EngineProgressMode
+} from "../services/generationEngine";
+import { useGenerationEngine } from "./useGenerationEngine";
+import { useEngineLifecycle } from "./useEngineLifecycle";
+import {
+  executeGenerationBatch,
+  executeGenerationTask,
+  type GenerationWorkflowTask
+} from "../services/generationWorkflow";
 import {
   closeDocument,
   getSelectionPixels,
@@ -91,17 +101,14 @@ const EMPTY_OPTIONS: SdOptions = {
   controlNetModules: []
 };
 
-const extractLayerId = (info: any): number | null => {
-  const candidate =
-    info?.layerID ??
-    info?.layerId ??
-    info?.targetLayerID ??
-    info?.targetLayerId ??
-    info?.ID ??
-    info?.id ??
-    0;
-  const numeric = Number(candidate);
-  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+const GENERATION_WORKFLOW_ADAPTERS = {
+  placeImage: placeImageIntoSelection,
+  groupLayers: (layerIds: number[], groupName: string | undefined, options: { taskId?: string }) =>
+    groupLayers(layerIds, groupName, options).catch((error) => {
+      ignoreBestEffortPhotoshopError("groupLayers failed", error);
+      return null;
+    }),
+  moveActiveLayerToTop
 };
 
 const DEFAULT_FORM: GenerationForm = {
@@ -130,14 +137,7 @@ const DEFAULT_FORM: GenerationForm = {
 };
 
 const toDataUrl = (base64: string) => `data:image/png;base64,${base64}`;
-const toBase64 = (dataUrl: string) => dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
-
-const formatGenerationError = (error: unknown, fallback: string) => {
-  if (error instanceof ImageModelError) {
-    return `${error.message}；建议：${error.solution}`;
-  }
-  return error instanceof Error ? error.message : fallback;
-};
+const dataUrlToBase64 = (dataUrl: string) => dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
 
 const computeOverrideSize = (width: number, height: number, target: number) => {
   if (width <= target && height <= target) {
@@ -236,6 +236,31 @@ const buildImg2ImgParams = (
   };
 };
 
+const buildEngineGenerateParams = (
+  provider: AppSettings["imageProvider"],
+  settings: AppSettings,
+  form: GenerationForm,
+  selection: SelectionPixels,
+  width: number,
+  height: number,
+  taskId?: string
+): EngineGenerateParams => {
+  const prompt = [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim();
+  return {
+    prompt,
+    baseImageBase64: dataUrlToBase64(selection.dataUrl),
+    timeoutMs: Math.max(
+      5_000,
+      Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)
+    ),
+    taskId,
+    forgeParams:
+      provider === "forge"
+        ? buildImg2ImgParams(form, selection.dataUrl, width, height)
+        : undefined
+  };
+};
+
 export interface GenerationControllerState {
   form: GenerationForm;
   setFormValue: <K extends keyof GenerationForm>(key: K, value: GenerationForm[K]) => void;
@@ -243,6 +268,7 @@ export interface GenerationControllerState {
   setResolution: (value: number) => void;
   status: GenerationStatus;
   progress: number;
+  progressMode: EngineProgressMode;
   error: string | null;
   lastImages: string[];
   options: SdOptions;
@@ -283,8 +309,14 @@ export interface GenerationControllerState {
 }
 
 export const useGenerationController = (settings: AppSettings): GenerationControllerState => {
-  const client = useMemo(() => createPxdClient(settings), [settings]);
-  const imageModelClient = useMemo(() => createImageModelClient(settings), [settings]);
+  const engine = useGenerationEngine(settings);
+  const {
+    token: engineToken,
+    isCurrent: isEngineCurrent,
+    commitIfCurrent,
+    startPolling,
+    stopPolling
+  } = useEngineLifecycle(engine);
   const [form, setForm] = useState<GenerationForm>(DEFAULT_FORM);
   const [status, setStatus] = useState<GenerationStatus>("idle");
   const [progress, setProgress] = useState(0);
@@ -303,9 +335,13 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   const [translationLoading, setTranslationLoading] = useState(false);
   const [sourceLanguage, setSourceLanguage] = useState("zh");
   const [targetLanguage, setTargetLanguage] = useState("en");
-  const pollingRef = useRef<number | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const presetsLoadGateRef = useRef(new LatestLoadGate());
+
+  useLayoutEffect(() => {
+    setProgress(0);
+    setStatus((current) => current === "running" ? "idle" : current);
+  }, [engineToken]);
   const clearToastTimer = useCallback(() => {
     if (toastTimerRef.current) {
       clearTimeout(toastTimerRef.current);
@@ -358,13 +394,6 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   const setTranslationInput = useCallback((value: string) => {
     setTranslationError(null);
     setTranslationInputState(value);
-  }, []);
-
-  const stopPolling = useCallback(() => {
-    if (pollingRef.current) {
-      window.clearInterval(pollingRef.current);
-      pollingRef.current = null;
-    }
   }, []);
 
   const loadPresets = useCallback(async () => {
@@ -482,39 +511,51 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   }, [form.extraPrompt, pushToast]);
 
   const refreshOptions = useCallback(async () => {
-    if (settings.imageProvider === "gemini") {
-      setOptions(EMPTY_OPTIONS);
-      setOptionsError(null);
-      setOptionsLoading(false);
+    const requestToken = engineToken;
+    const fetchOptions = requestToken.engine.fetchOptions;
+    if (!fetchOptions) {
+      commitIfCurrent(requestToken, () => {
+        setOptions(EMPTY_OPTIONS);
+        setOptionsError(null);
+        setOptionsLoading(false);
+      });
       return;
     }
     if (!settings.sdEndpoint) {
-      setOptions(EMPTY_OPTIONS);
-      setOptionsError("请先在设置中配置算力地址");
+      commitIfCurrent(requestToken, () => {
+        setOptions(EMPTY_OPTIONS);
+        setOptionsError("请先在设置中配置算力地址");
+        setOptionsLoading(false);
+      });
       return;
     }
-    setOptionsLoading(true);
-    setOptionsError(null);
+    commitIfCurrent(requestToken, () => {
+      setOptionsLoading(true);
+      setOptionsError(null);
+    });
     try {
-      const fetched = await client.fetchOptions();
-      setOptions(fetched);
-      setForm((prev) => ({
-        ...prev,
-        sampler: prev.sampler || fetched.samplers[0]?.value || "",
-        scheduler: prev.scheduler || fetched.schedulers[0]?.value || "",
-        model: prev.model || fetched.models[0]?.value || "",
-        vae: prev.vae || fetched.vaes[0]?.value || "",
-        controlNetModel: prev.controlNetModel || fetched.controlNetModels[0]?.value || "",
-        controlNetModule: prev.controlNetModule || fetched.controlNetModules[0]?.value || ""
-      }));
+      const fetched = await fetchOptions();
+      commitIfCurrent(requestToken, () => {
+        setOptions(fetched);
+        setForm((prev) => ({
+          ...prev,
+          sampler: prev.sampler || fetched.samplers[0]?.value || "",
+          scheduler: prev.scheduler || fetched.schedulers[0]?.value || "",
+          model: prev.model || fetched.models[0]?.value || "",
+          vae: prev.vae || fetched.vaes[0]?.value || "",
+          controlNetModel: prev.controlNetModel || fetched.controlNetModels[0]?.value || "",
+          controlNetModule: prev.controlNetModule || fetched.controlNetModules[0]?.value || ""
+        }));
+      });
     } catch (err) {
+      if (!isEngineCurrent(requestToken)) return;
       const message = err instanceof Error ? err.message : "选项获取失败";
       setOptionsError(message);
       pushToast("error", message);
     } finally {
-      setOptionsLoading(false);
+      commitIfCurrent(requestToken, () => setOptionsLoading(false));
     }
-  }, [client, settings.imageProvider, settings.sdEndpoint]);
+  }, [commitIfCurrent, engineToken, isEngineCurrent, pushToast, settings.sdEndpoint]);
 
   useEffect(() => {
     refreshOptions().catch((err) => {
@@ -528,19 +569,13 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     });
   }, [loadPresets]);
 
-  useEffect(() => stopPolling, [stopPolling]);
-
-  const pollProgress = useCallback(async () => {
-    stopPolling();
-    pollingRef.current = window.setInterval(async () => {
-      const progressInfo = await client.fetchProgress();
-      if (progressInfo && typeof progressInfo.progress === "number") {
-        setProgress(progressInfo.progress);
-      }
-    }, 1_000);
-  }, [client, stopPolling]);
+  const pollProgress = useCallback(() => {
+    startPolling(engineToken, setProgress);
+  }, [engineToken, startPolling]);
 
   const runGeneration = useCallback(async () => {
+    const requestToken = engineToken;
+    const requestEngine = requestToken.engine;
     const taskId = generateId();
     setStatus("running");
     setError(null);
@@ -553,68 +588,46 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       }
       const target = clampNumber(form.resolution, 128, 2048);
       const { width, height } = computeOverrideSize(selection.width, selection.height, target);
-      let images: string[];
-      if (settings.imageProvider === "gemini") {
-        const prompt = [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim();
-        const timeoutMs = Math.max(
-          5_000,
-          Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)
-        );
-        const image = await imageModelClient.editImage({
-          prompt,
-          baseImageBase64: toBase64(selection.dataUrl),
-          aspectRatio: "Auto",
-          timeoutMs
-        });
-        images = [image];
-      } else {
-        const params = buildImg2ImgParams(form, selection.dataUrl, width, height);
-        await pollProgress();
-        const result = await client.img2img(params);
-        stopPolling();
-        images = result.images ?? [];
-      }
+      const result = await executeGenerationTask(
+        requestEngine,
+        {
+          request: buildEngineGenerateParams(
+            requestEngine.provider,
+            settings,
+            form,
+            selection,
+            width,
+            height,
+            taskId
+          ),
+          feather: Number.isFinite(form.maskFeather) ? form.maskFeather : DEFAULT_FORM.maskFeather,
+          taskId,
+          emptyImagesMessage: "未收到可用的生成图像",
+          isCurrent: () => isEngineCurrent(requestToken),
+          onRequestStart: () => {
+            if (requestEngine.progressMode === "determinate") pollProgress();
+          },
+          onRequestSettled: () => stopPolling(requestToken)
+        },
+        GENERATION_WORKFLOW_ADAPTERS
+      );
+      const { images } = result;
       setProgress(1);
-      if (!images.length) {
-        throw new Error("未收到可用的生成图像");
-      }
-      const placedLayerIds: number[] = [];
-      const feather = Number.isFinite(form.maskFeather) ? form.maskFeather : DEFAULT_FORM.maskFeather;
-      for (let i = 0; i < images.length; i++) {
-        const info = await placeImageIntoSelection(toDataUrl(images[i]), i + 1, {
-          feather,
-          taskId
-        });
-        const id = extractLayerId(info);
-        if (id) {
-          placedLayerIds.push(id);
-        }
-      }
-      let topLayerId = placedLayerIds[placedLayerIds.length - 1];
-      if (placedLayerIds.length > 1) {
-        const groupId = await groupLayers(placedLayerIds, undefined, { taskId }).catch((error) => {
-          ignoreBestEffortPhotoshopError("groupLayers failed", error);
-          return null;
-        });
-        topLayerId = groupId ?? topLayerId;
-      }
-      if (topLayerId) {
-        await moveActiveLayerToTop({ taskId, layerId: topLayerId });
-      }
       setLastImages(images.map(toDataUrl));
       setStatus("success");
       pushToast("success", "生成成功");
     } catch (err) {
-      stopPolling();
+      stopPolling(requestToken);
+      if (!isEngineCurrent(requestToken)) return;
       const message = formatGenerationError(err, "生成失败");
       setStatus("error");
       setError(message);
       pushToast("error", message);
     } finally {
-      stopPolling();
-      setProgress(0);
+      stopPolling(requestToken);
+      commitIfCurrent(requestToken, () => setProgress(0));
     }
-  }, [client, dismissToast, form, imageModelClient, pollProgress, pushToast, settings, stopPolling]);
+  }, [commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pollProgress, pushToast, settings, stopPolling]);
 
   const addToBatch = useCallback(async () => {
     const taskId = generateId();
@@ -696,85 +709,62 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       pushToast("warning", "批次列表为空");
       return;
     }
+    const requestToken = engineToken;
+    const requestEngine = requestToken.engine;
     setStatus("running");
     setError(null);
     try {
-      for (const item of batchItems) {
-        if (item.metadata?.activeDocumentId) {
-          await switchToDocument(item.metadata.activeDocumentId, { taskId: item.id }).catch((error) =>
-            ignoreBestEffortPhotoshopError("switchToDocument failed", error)
-          );
-        }
-        if (item.selection.selectionBounds) {
-          await setSelectionBounds(item.selection.selectionBounds, { taskId: item.id }).catch((error) =>
-            ignoreBestEffortPhotoshopError("setSelectionBounds failed", error)
-          );
-        }
-        let images: string[];
-        if (settings.imageProvider === "gemini") {
-          const prompt = [item.form.positivePrompt, item.form.extraPrompt].filter(Boolean).join("\n").trim();
-          const timeoutMs = Math.max(
-            5_000,
-            Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)
-          );
-          const image = await imageModelClient.editImage({
-            prompt,
-            baseImageBase64: toBase64(item.selection.dataUrl),
-            aspectRatio: "Auto",
-            timeoutMs,
-            taskId: item.id
-          });
-          images = [image];
-        } else {
-          const params = buildImg2ImgParams(item.form, item.selection.dataUrl, item.overrideWidth, item.overrideHeight);
-          await pollProgress();
-          const result = await client.img2img(params);
-          stopPolling();
-          images = result.images ?? [];
-        }
-        if (!images.length) {
-          throw new Error(`批次「${item.name}」未返回图像`);
-        }
-        const placedLayerIds: number[] = [];
-        const feather =
+      const tasks: GenerationWorkflowTask[] = batchItems.map((item) => ({
+        request: buildEngineGenerateParams(
+          requestEngine.provider,
+          settings,
+          item.form,
+          item.selection,
+          item.overrideWidth,
+          item.overrideHeight,
+          item.id
+        ),
+        feather:
           Number.isFinite(item.form?.maskFeather) && item.form.maskFeather >= 0
             ? item.form.maskFeather
-            : DEFAULT_FORM.maskFeather;
-        for (let i = 0; i < images.length; i++) {
-          const info = await placeImageIntoSelection(toDataUrl(images[i]), i + 1, {
-            feather,
-            taskId: item.id
-          });
-          const id = extractLayerId(info);
-          if (id) {
-            placedLayerIds.push(id);
+            : DEFAULT_FORM.maskFeather,
+        taskId: item.id,
+        groupName: item.name,
+        emptyImagesMessage: `批次「${item.name}」未返回图像`,
+        isCurrent: () => isEngineCurrent(requestToken),
+        prepare: async () => {
+          if (item.metadata?.activeDocumentId) {
+            await switchToDocument(item.metadata.activeDocumentId, { taskId: item.id }).catch((error) =>
+              ignoreBestEffortPhotoshopError("switchToDocument failed", error)
+            );
           }
-        }
-        let topLayerId = placedLayerIds[placedLayerIds.length - 1];
-        if (placedLayerIds.length > 1) {
-          const groupId = await groupLayers(placedLayerIds, item.name, { taskId: item.id }).catch((error) => {
-            ignoreBestEffortPhotoshopError("groupLayers failed", error);
-            return null;
-          });
-          topLayerId = groupId ?? topLayerId;
-        }
-        if (topLayerId) {
-          await moveActiveLayerToTop({ taskId: item.id, layerId: topLayerId });
-        }
-      }
+          if (item.selection.selectionBounds) {
+            await setSelectionBounds(item.selection.selectionBounds, { taskId: item.id }).catch((error) =>
+              ignoreBestEffortPhotoshopError("setSelectionBounds failed", error)
+            );
+          }
+        },
+        onRequestStart: () => {
+          if (requestEngine.progressMode === "determinate") pollProgress();
+        },
+        onRequestSettled: () => stopPolling(requestToken)
+      }));
+      await executeGenerationBatch(requestEngine, tasks, GENERATION_WORKFLOW_ADAPTERS);
+      setProgress(1);
       setBatchItems([]);
       setStatus("success");
       pushToast("success", "批次执行完成");
     } catch (error) {
-      stopPolling();
+      stopPolling(requestToken);
+      if (!isEngineCurrent(requestToken)) return;
       const message = formatGenerationError(error, "批次执行失败");
       setStatus("error");
       setError(message);
       pushToast("error", message);
     } finally {
-      stopPolling();
+      stopPolling(requestToken);
     }
-  }, [batchItems, client, imageModelClient, pollProgress, pushToast, settings, stopPolling]);
+  }, [batchItems, engineToken, isEngineCurrent, pollProgress, pushToast, settings, stopPolling]);
 
   const applyPreset = useCallback(
     async (fileName: string) => {
@@ -828,6 +818,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     setResolution,
     status,
     progress,
+    progressMode: engine.progressMode,
     error,
     lastImages,
     options,
