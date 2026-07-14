@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { SelectionPixels } from "./photoshop";
 import {
   REFERENCE_IMAGE_LIMIT,
+  REFERENCE_IMAGE_MAX_BYTES,
   appendReferenceImage,
-  estimateBase64Bytes,
+  getDecodedBase64ByteLength,
   getReferenceAspectWarning,
   moveReferenceImage,
   referenceImagesToBase64,
@@ -12,7 +13,7 @@ import {
 } from "./referenceImages";
 
 const pixels = (suffix: string, width = 400, height = 300): SelectionPixels => ({
-  dataUrl: `data:image/png;base64,REF${suffix}`,
+  dataUrl: `data:image/png;base64,${btoa(`REF${suffix}`)}`,
   width,
   height,
   selectionBounds: { left: 0, top: 0, right: width, bottom: height }
@@ -24,7 +25,7 @@ describe("reference image collection", () => {
     const second = appendReferenceImage(first, pixels("TWO"));
     const reordered = moveReferenceImage(second, second[1].id, "left");
 
-    expect(referenceImagesToBase64(reordered)).toEqual(["REFTWO", "REFONE"]);
+    expect(referenceImagesToBase64(reordered)).toEqual([btoa("REFTWO"), btoa("REFONE")]);
     expect(moveReferenceImage(reordered, reordered[0].id, "left")).toBe(reordered);
     expect(removeReferenceImage(reordered, reordered[0].id)).toEqual([reordered[1]]);
   });
@@ -42,7 +43,7 @@ describe("reference image collection", () => {
     const oversized = pixels("oversized");
     oversized.dataUrl = `data:image/png;base64,${"A".repeat(6 * 1024 * 1024)}`;
 
-    expect(estimateBase64Bytes(oversized.dataUrl)).toBeGreaterThan(4 * 1024 * 1024);
+    expect(getDecodedBase64ByteLength(oversized.dataUrl)).toBeGreaterThan(4 * 1024 * 1024);
     expect(() => appendReferenceImage([], oversized)).toThrow(/体积过大/);
   });
 
@@ -66,5 +67,23 @@ describe("reference image collection", () => {
 
     expect(getReferenceAspectWarning({ width: 800, height: 400 }, references)).toContain("参考图 1");
     expect(getReferenceAspectWarning({ width: 200, height: 800 }, references)).toBeNull();
+  });
+
+  it("validates base64 alphabet, padding, decodability, and byte boundaries", () => {
+    expect(getDecodedBase64ByteLength("TQ==")).toBe(1);
+    expect(getDecodedBase64ByteLength("TWE=")).toBe(2);
+    expect(getDecodedBase64ByteLength("TWFu")).toBe(3);
+    for (const malformed of ["%%%%", "A===", "AAA", "TQ==\n", "text/plain;base64,TQ==", ""]) {
+      expect(getDecodedBase64ByteLength(malformed)).toBeNull();
+    }
+    const invalid = pixels("invalid");
+    invalid.dataUrl = "data:image/png;base64,%%%%";
+    expect(() => appendReferenceImage([], invalid)).toThrow(/无法解码/);
+
+    const encodedLength = Math.ceil(REFERENCE_IMAGE_MAX_BYTES / 3) * 4;
+    const exactLimit = `${"A".repeat(encodedLength - 2)}==`;
+    const overLimit = "A".repeat(encodedLength);
+    expect(getDecodedBase64ByteLength(exactLimit)).toBe(REFERENCE_IMAGE_MAX_BYTES);
+    expect(getDecodedBase64ByteLength(overLimit)).toBe(REFERENCE_IMAGE_MAX_BYTES + 2);
   });
 });

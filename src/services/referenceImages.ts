@@ -26,14 +26,43 @@ export class ReferenceImageError extends Error {
 
 export const dataUrlToBase64 = (value: string) => {
   const separator = value.indexOf(",");
-  return (separator >= 0 ? value.slice(separator + 1) : value).replace(/\s/g, "");
+  if (separator < 0) return value;
+  return /^data:image\/[a-z0-9.+-]+;base64,/i.test(value) ? value.slice(separator + 1) : "";
 };
 
-export const estimateBase64Bytes = (value: string) => {
+const hasStrictBase64Shape = (value: string) => {
+  if (!value || value.length % 4 !== 0) return false;
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  const dataLength = value.length - padding;
+  for (let index = 0; index < dataLength; index += 1) {
+    const code = value.charCodeAt(index);
+    const valid =
+      (code >= 65 && code <= 90) ||
+      (code >= 97 && code <= 122) ||
+      (code >= 48 && code <= 57) ||
+      code === 43 ||
+      code === 47;
+    if (!valid) return false;
+  }
+  for (let index = dataLength; index < value.length; index += 1) {
+    if (value.charCodeAt(index) !== 61) return false;
+  }
+  return true;
+};
+
+export const getDecodedBase64ByteLength = (value: string): number | null => {
   const base64 = dataUrlToBase64(value);
-  if (!base64) return 0;
-  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
-  return Math.max(0, Math.floor(base64.length * 3 / 4) - padding);
+  if (!hasStrictBase64Shape(base64) || typeof atob !== "function") return null;
+  try {
+    const chunkSize = 64 * 1024;
+    let bytes = 0;
+    for (let offset = 0; offset < base64.length; offset += chunkSize) {
+      bytes += atob(base64.slice(offset, offset + chunkSize)).length;
+    }
+    return bytes;
+  } catch {
+    return null;
+  }
 };
 
 const createId = () => {
@@ -53,11 +82,21 @@ export const appendReferenceImage = (
   if (!/^data:image\/[a-z0-9.+-]+;base64,/i.test(pixels.dataUrl)) {
     throw new ReferenceImageError("选区未返回有效图片数据", "REFERENCE_DATA_INVALID");
   }
-  const bytes = estimateBase64Bytes(pixels.dataUrl);
-  if (bytes <= 0 || bytes > REFERENCE_IMAGE_MAX_BYTES) {
+  const bytes = getDecodedBase64ByteLength(pixels.dataUrl);
+  if (bytes === null) {
+    throw new ReferenceImageError("选区返回的图片数据无法解码", "REFERENCE_DATA_INVALID");
+  }
+  if (bytes > REFERENCE_IMAGE_MAX_BYTES) {
     throw new ReferenceImageError("参考图体积过大，请缩小选区后重试", "REFERENCE_IMAGE_TOO_LARGE");
   }
-  const totalBytes = current.reduce((sum, image) => sum + estimateBase64Bytes(image.dataUrl), 0) + bytes;
+  let totalBytes = bytes;
+  for (const image of current) {
+    const imageBytes = getDecodedBase64ByteLength(image.dataUrl);
+    if (imageBytes === null) {
+      throw new ReferenceImageError("已有参考图数据无法解码，请删除后重试", "REFERENCE_DATA_INVALID");
+    }
+    totalBytes += imageBytes;
+  }
   if (totalBytes > REFERENCE_IMAGES_MAX_TOTAL_BYTES) {
     throw new ReferenceImageError("参考图总体积已达上限，请删除部分图片后重试", "REFERENCE_TOTAL_TOO_LARGE");
   }

@@ -77,7 +77,7 @@ describe("createImageModelClient", () => {
 
     await createImageModelClient({ ...settings, geminiAuthMode: "bearer" }).editImage({
       ...editParams,
-      refImagesBase64: ["REF_ONE", "data:image/png;base64,REF_TWO"],
+      refImagesBase64: ["UkVGX09ORQ==", "data:image/png;base64,UkVGX1RXTw=="],
       aspectRatio: "16:9"
     });
 
@@ -89,7 +89,7 @@ describe("createImageModelClient", () => {
     });
     const body = JSON.parse(String(init.body));
     expect(body.contents[0].parts.slice(1).map((part: { inlineData: { data: string } }) => part.inlineData.data))
-      .toEqual(["BASE_IMAGE", "REF_ONE", "REF_TWO"]);
+      .toEqual(["BASE_IMAGE", "UkVGX09ORQ==", "UkVGX1RXTw=="]);
     expect(body.generationConfig.imageConfig).toEqual({ aspectRatio: "16:9" });
   });
 
@@ -99,10 +99,24 @@ describe("createImageModelClient", () => {
 
     await expect(createImageModelClient(settings).editImage({
       ...editParams,
-      refImagesBase64: ["ONE", "TWO", "THREE", "FOUR", "FIVE"]
+      refImagesBase64: ["T05F", "VFdP", "VEhSRUU=", "Rk9VUg==", "RklWRQ=="]
     })).rejects.toMatchObject({ code: "CONFIG_REFERENCE_LIMIT" });
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it.each(["%%%%", "A===", "AAA", "TQ==\n", "text/plain;base64,TQ=="])(
+    "rejects malformed reference base64 %s before making a request",
+    async (malformed) => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(createImageModelClient(settings).editImage({
+        ...editParams,
+        refImagesBase64: [malformed]
+      })).rejects.toMatchObject({ code: "CONFIG_REFERENCE_DATA" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+  );
 
   it("rejects an oversized reference image before making a request", async () => {
     const fetchMock = vi.fn();

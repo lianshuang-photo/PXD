@@ -3,7 +3,7 @@ import {
   REFERENCE_IMAGE_LIMIT,
   REFERENCE_IMAGE_MAX_BYTES,
   REFERENCE_IMAGES_MAX_TOTAL_BYTES,
-  estimateBase64Bytes
+  getDecodedBase64ByteLength
 } from "./referenceImages";
 
 export interface EditImageParams {
@@ -95,15 +95,23 @@ const validateReferenceImages = (images: string[]) => {
       "请删除部分参考图后重试。"
     );
   }
-  const sizes = images.map(estimateBase64Bytes);
-  if (sizes.some((bytes) => bytes <= 0 || bytes > REFERENCE_IMAGE_MAX_BYTES)) {
+  const sizes = images.map(getDecodedBase64ByteLength);
+  if (sizes.some((bytes) => bytes === null)) {
+    throw new ImageModelError(
+      "参考图数据不是有效的 base64",
+      "CONFIG_REFERENCE_DATA",
+      "请重新捕获参考图后重试。"
+    );
+  }
+  const decodedSizes = sizes as number[];
+  if (decodedSizes.some((bytes) => bytes > REFERENCE_IMAGE_MAX_BYTES)) {
     throw new ImageModelError(
       "单张参考图体积过大或数据无效",
       "CONFIG_REFERENCE_SIZE",
       "请重新捕获较小的选区后重试。"
     );
   }
-  const totalBytes = sizes.reduce((sum, bytes) => sum + bytes, 0);
+  const totalBytes = decodedSizes.reduce((sum, bytes) => sum + bytes, 0);
   if (totalBytes > REFERENCE_IMAGES_MAX_TOTAL_BYTES) {
     throw new ImageModelError(
       "参考图总体积过大",
