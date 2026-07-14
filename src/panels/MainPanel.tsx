@@ -3,6 +3,7 @@ import type { AppSettings } from "../context/types";
 import { useGenerationController } from "../hooks/useGenerationController";
 import OverlayPortal from "../components/OverlayPortal";
 import PromptParamControls from "../components/PromptParamControls";
+import CameraViewControl from "../components/CameraViewControl";
 
 interface Props {
   settings: AppSettings;
@@ -68,6 +69,10 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     optionsError,
     refreshOptions,
     runGeneration,
+    cameraView,
+    cameraViewLoading,
+    setCameraView,
+    runCameraViewGeneration,
     stopGeneration,
     history,
     historyLoading,
@@ -567,6 +572,14 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   </div>
                 )}
               </section>
+
+              <CameraViewControl
+                value={cameraView}
+                disabled={cameraViewLoading || settingsLoading}
+                running={status === "running"}
+                onChange={setCameraView}
+                onGenerate={() => void runCameraViewGeneration()}
+              />
 
               {/* 模型与采样 */}
               <hr style={{ margin: "0.2rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
