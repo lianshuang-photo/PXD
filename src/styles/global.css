@@ -11,6 +11,7 @@
   --text-primary: #f5f3f8;
   --text-secondary: rgba(245, 243, 248, 0.66);
   --text-tertiary: rgba(245, 243, 248, 0.44);
+  --error-color: #f87171;
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
@@ -202,6 +203,25 @@ body {
   transition: width 220ms ease;
 }
 
+.generation-progress__indeterminate {
+  width: 36%;
+  height: 100%;
+  background: var(--brand-color);
+  animation: generation-progress-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes generation-progress-pulse {
+  0% {
+    transform: translateX(-110%);
+  }
+  50% {
+    transform: translateX(90%);
+  }
+  100% {
+    transform: translateX(280%);
+  }
+}
+
 .status-chip {
   display: inline-flex;
   align-items: center;
@@ -338,7 +358,7 @@ body {
 
 .form-field__error {
   font-size: 11px;
-  color: #f87171;
+  color: var(--error-color);
 }
 
 .input {

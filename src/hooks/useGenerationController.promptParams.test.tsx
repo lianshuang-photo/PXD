@@ -123,7 +123,7 @@ describe("useGenerationController prompt parameters", () => {
     expect(serviceMocks.img2img).toHaveBeenCalledWith(expect.objectContaining({
       prompt: "base, keep @param:保留:0.60\nextra",
       negativePrompt: "bad, retain"
-    }));
+    }), expect.anything());
 
     await act(async () => harness.controller.savePreset("parameter-preset"));
     expect(serviceMocks.savePresetFile).toHaveBeenCalledWith(
@@ -178,7 +178,7 @@ describe("useGenerationController prompt parameters", () => {
       if (provider === "forge") {
         expect(serviceMocks.img2img).toHaveBeenCalledWith(expect.objectContaining({
           prompt: expectedPrompt
-        }));
+        }), expect.anything());
       } else {
         expect(serviceMocks.editImage).toHaveBeenCalledWith(expect.objectContaining({
           prompt: expectedPrompt
