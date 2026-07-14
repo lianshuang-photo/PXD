@@ -1,38 +1,56 @@
-import { createElement } from "react";
+import { createElement, useCallback, useState, type Dispatch, type SetStateAction } from "react";
 import TestRenderer, { act } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppSettings } from "../context/types";
-import type { SdOptions } from "../services/apiClient";
-import type { GenerationEngine } from "../services/generationEngine";
+import type { GenerationHistoryEntry } from "../services/generationHistory";
 import { DEFAULT_SETTINGS } from "../services/settings";
 
 const boundary = vi.hoisted(() => ({
-  engine: null as unknown as GenerationEngine,
-  getSelectionPixels: vi.fn(),
-  placeImageIntoSelection: vi.fn(),
-  groupLayers: vi.fn(),
-  moveActiveLayerToTop: vi.fn(),
-  listPresetMetas: vi.fn()
+  forgeClient: {
+    fetchOptions: vi.fn(),
+    fetchProgress: vi.fn(),
+    img2img: vi.fn(),
+    cancel: vi.fn().mockReturnValue(false),
+    cancelAll: vi.fn().mockReturnValue(0)
+  },
+  geminiClient: {
+    editImage: vi.fn(),
+    cancel: vi.fn().mockReturnValue(false),
+    cancelAll: vi.fn().mockReturnValue(0)
+  },
+  photoshop: {
+    closeDocument: vi.fn(),
+    getSelectionPixels: vi.fn(),
+    groupLayers: vi.fn(),
+    hasActiveSelection: vi.fn(),
+    moveActiveLayerToTop: vi.fn(),
+    onBatchAddLayer: vi.fn(),
+    placeImageIntoSelection: vi.fn(),
+    setSelectionBounds: vi.fn(),
+    switchToDocument: vi.fn()
+  },
+  storage: {
+    readJsonFile: vi.fn(),
+    writeJsonFile: vi.fn()
+  },
+  thumbnailDecodeFails: false
 }));
 
-vi.mock("./useGenerationEngine", () => ({
-  useGenerationEngine: () => boundary.engine
+vi.mock("../services/apiClient", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/apiClient")>()),
+  createPxdClient: () => boundary.forgeClient
 }));
 
-vi.mock("../services/photoshop", () => ({
-  closeDocument: vi.fn(),
-  getSelectionPixels: boundary.getSelectionPixels,
-  groupLayers: boundary.groupLayers,
-  moveActiveLayerToTop: boundary.moveActiveLayerToTop,
-  onBatchAddLayer: vi.fn().mockResolvedValue(null),
-  placeImageIntoSelection: boundary.placeImageIntoSelection,
-  setSelectionBounds: vi.fn(),
-  switchToDocument: vi.fn()
+vi.mock("../services/imageModelClient", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/imageModelClient")>()),
+  createImageModelClient: () => boundary.geminiClient
 }));
+
+vi.mock("../services/photoshop", () => boundary.photoshop);
 
 vi.mock("../services/presets", () => ({
   deletePresetFile: vi.fn(),
-  listPresetMetas: boundary.listPresetMetas,
+  listPresetMetas: vi.fn().mockResolvedValue([]),
   loadPresetFile: vi.fn(),
   savePresetFile: vi.fn()
 }));
@@ -41,12 +59,17 @@ vi.mock("../services/translator", () => ({
   translateText: vi.fn()
 }));
 
+vi.mock("../services/uxpBridge", () => ({
+  bridge: boundary.storage
+}));
+
 import {
   useGenerationController,
-  type GenerationControllerState
+  type GenerationControllerState,
+  type GenerationForm
 } from "./useGenerationController";
 
-const emptyOptions: SdOptions = {
+const emptyOptions = {
   models: [],
   vaes: [],
   loras: [],
@@ -56,201 +79,379 @@ const emptyOptions: SdOptions = {
   controlNetModules: []
 };
 
-const modelOptions = (value: string): SdOptions => ({
-  ...emptyOptions,
-  models: [{ label: value, value, raw: null }]
+const selection = (suffix: string) => ({
+  dataUrl: `data:image/png;base64,INPUT${suffix}`,
+  width: 640,
+  height: 480,
+  selectionBounds: { left: 10, top: 20, right: 650, bottom: 500 }
 });
 
-const makeEngine = (
-  provider: GenerationEngine["provider"],
-  overrides: Partial<GenerationEngine> = {}
-): GenerationEngine => ({
-  provider,
-  progressMode: provider === "forge" ? "determinate" : "indeterminate",
-  generate: vi.fn().mockResolvedValue({ images: [`${provider}-image`] }),
-  cancel: vi.fn().mockReturnValue(false),
-  cancelAll: vi.fn().mockReturnValue(0),
-  ...(provider === "forge"
-    ? {
-        fetchOptions: vi.fn().mockResolvedValue(emptyOptions),
-        fetchProgress: vi.fn().mockResolvedValue(null)
-      }
-    : {}),
-  ...overrides
+const historyFile = (entries: GenerationHistoryEntry<GenerationForm>[] = []) => ({
+  version: 1,
+  entries
 });
 
-const flushEffects = async () => {
+const customizeForm = (base: GenerationForm, prompt: string, offset: number): GenerationForm => ({
+  ...base,
+  positivePrompt: prompt,
+  negativePrompt: `negative-${offset}`,
+  extraPrompt: `extra-${offset}`,
+  steps: 20 + offset,
+  cfgScale: 7 + offset / 10,
+  sampler: `sampler-${offset}`,
+  scheduler: `scheduler-${offset}`,
+  model: `model-${offset}`,
+  vae: `vae-${offset}`,
+  lora: `lora-${offset}`,
+  loraWeight: 0.5 + offset / 10,
+  controlNetModel: `control-model-${offset}`,
+  controlNetModule: `control-module-${offset}`,
+  controlNetWeight: 0.7 + offset / 10,
+  denoisingStrength: 0.2 + offset / 100,
+  maskFeather: 10 + offset,
+  imageCount: 1,
+  resolution: 768 + offset,
+  seed: 1_000 + offset,
+  clipSkip: offset,
+  restoreFaces: offset % 2 === 0,
+  tiling: offset % 2 === 1
+});
+
+const setCompleteForm = (controller: GenerationControllerState, next: GenerationForm) => {
+  for (const key of Object.keys(next) as Array<keyof GenerationForm>) {
+    controller.setFormValue(key, next[key]);
+  }
+};
+
+const flush = async () => {
   await act(async () => {
+    await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
   });
 };
 
+interface HarnessOptions {
+  initialSettings?: AppSettings;
+  settingsLoading?: boolean;
+  updateImpl?: (next: Pick<AppSettings, "imageProvider">) => Promise<void>;
+}
+
+const renderController = (options: HarnessOptions = {}) => {
+  let controller: GenerationControllerState | null = null;
+  let currentSettings = options.initialSettings ?? DEFAULT_SETTINGS;
+  let setSettings: Dispatch<SetStateAction<AppSettings>> | null = null;
+  const updateImpl = options.updateImpl ?? vi.fn().mockResolvedValue(undefined);
+  const updateSettings = vi.fn(async (next: Pick<AppSettings, "imageProvider">) => {
+    await updateImpl(next);
+    (setSettings as Dispatch<SetStateAction<AppSettings>>)((current) => ({ ...current, ...next }));
+  });
+
+  const Harness = () => {
+    const [settings, setSettingsState] = useState(currentSettings);
+    setSettings = setSettingsState;
+    currentSettings = settings;
+    const patchSettings = useCallback(updateSettings, []);
+    controller = useGenerationController(settings, {
+      settingsLoading: options.settingsLoading,
+      updateSettings: patchSettings
+    });
+    return null;
+  };
+
+  let renderer!: TestRenderer.ReactTestRenderer;
+  act(() => {
+    renderer = TestRenderer.create(createElement(Harness));
+  });
+  return {
+    renderer,
+    updateSettings,
+    getController: () => controller as unknown as GenerationControllerState,
+    getSettings: () => currentSettings,
+    setSettings: (next: SetStateAction<AppSettings>) => {
+      (setSettings as Dispatch<SetStateAction<AppSettings>>)(next);
+    }
+  };
+};
+
+const renderers: TestRenderer.ReactTestRenderer[] = [];
+
 beforeEach(() => {
   vi.clearAllMocks();
-  boundary.listPresetMetas.mockResolvedValue([]);
-  boundary.placeImageIntoSelection.mockResolvedValue({ layerID: 1 });
-  boundary.groupLayers.mockResolvedValue(undefined);
-  boundary.moveActiveLayerToTop.mockResolvedValue(undefined);
+  boundary.thumbnailDecodeFails = false;
+  boundary.forgeClient.fetchOptions.mockResolvedValue(emptyOptions);
+  boundary.forgeClient.fetchProgress.mockResolvedValue(null);
+  boundary.forgeClient.img2img.mockResolvedValue({ images: ["FORGE_RESULT"] });
+  boundary.geminiClient.editImage.mockResolvedValue("GEMINI_RESULT");
+  boundary.photoshop.getSelectionPixels.mockResolvedValue(selection(""));
+  boundary.photoshop.hasActiveSelection.mockResolvedValue(true);
+  boundary.photoshop.placeImageIntoSelection.mockResolvedValue({ layerID: 101 });
+  boundary.photoshop.groupLayers.mockResolvedValue(undefined);
+  boundary.photoshop.moveActiveLayerToTop.mockResolvedValue(undefined);
+  boundary.photoshop.onBatchAddLayer.mockResolvedValue(null);
+  boundary.photoshop.setSelectionBounds.mockResolvedValue(undefined);
+  boundary.photoshop.switchToDocument.mockResolvedValue(undefined);
+  boundary.storage.readJsonFile.mockResolvedValue(historyFile());
+  boundary.storage.writeJsonFile.mockResolvedValue(undefined);
+
+  class FakeImage {
+    naturalWidth = 1024;
+    naturalHeight = 768;
+    width = 1024;
+    height = 768;
+    onload: null | (() => void) = null;
+    onerror: null | (() => void) = null;
+
+    set src(_value: string) {
+      queueMicrotask(() => {
+        if (boundary.thumbnailDecodeFails) this.onerror?.();
+        else this.onload?.();
+      });
+    }
+  }
+  vi.stubGlobal("Image", FakeImage);
+  vi.stubGlobal("document", {
+    createElement: vi.fn().mockReturnValue({
+      width: 0,
+      height: 0,
+      getContext: vi.fn().mockReturnValue({ clearRect: vi.fn(), drawImage: vi.fn() }),
+      toDataURL: vi.fn().mockReturnValue("data:image/jpeg;base64,THUMB")
+    })
+  });
+  vi.stubGlobal("window", {
+    setInterval,
+    clearInterval
+  });
 });
 
 afterEach(() => {
+  for (const renderer of renderers.splice(0)) {
+    act(() => renderer.unmount());
+  }
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
-describe("useGenerationController engine switching", () => {
-  it("clears options loading when a new Forge engine has no endpoint", async () => {
-    let resolveOldOptions: ((options: SdOptions) => void) | null = null;
-    const oldOptions = vi.fn().mockImplementation(() => new Promise<SdOptions>((resolve) => {
-      resolveOldOptions = resolve;
-    }));
-    const forgeWithEndpoint = makeEngine("forge", { fetchOptions: oldOptions });
-    const forgeWithoutEndpoint = makeEngine("forge");
-    let controller: GenerationControllerState | null = null;
-    const Harness = ({ settings }: { settings: AppSettings }) => {
-      controller = useGenerationController(settings);
-      return null;
-    };
+const trackedRender = (options: HarnessOptions = {}) => {
+  const rendered = renderController(options);
+  renderers.push(rendered.renderer);
+  return rendered;
+};
 
-    boundary.engine = forgeWithEndpoint;
-    let renderer: TestRenderer.ReactTestRenderer;
-    act(() => {
-      renderer = TestRenderer.create(createElement(Harness, { settings: DEFAULT_SETTINGS }));
-    });
-    await flushEffects();
-    expect(oldOptions).toHaveBeenCalledOnce();
-    expect((controller as unknown as GenerationControllerState).optionsLoading).toBe(true);
-
-    boundary.engine = forgeWithoutEndpoint;
-    act(() => renderer.update(createElement(Harness, {
-      settings: { ...DEFAULT_SETTINGS, sdEndpoint: "" }
-    })));
-    await flushEffects();
-
-    let current = controller as unknown as GenerationControllerState;
-    expect(current.optionsLoading).toBe(false);
-    expect(current.optionsError).toBe("请先在设置中配置算力地址");
+describe("useGenerationController generation history integration", () => {
+  it("records a single generation and restores its provider and complete form", async () => {
+    const rendered = trackedRender();
+    await flush();
+    const expected = customizeForm(rendered.getController().form, "single prompt", 3);
+    act(() => setCompleteForm(rendered.getController(), expected));
 
     await act(async () => {
-      resolveOldOptions?.(modelOptions("stale-model"));
-      await Promise.resolve();
+      await rendered.getController().runGeneration();
     });
-    current = controller as unknown as GenerationControllerState;
-    expect(current.optionsLoading).toBe(false);
-    expect(current.options.models).toEqual([]);
-    act(() => renderer.unmount());
+
+    expect({ status: rendered.getController().status, error: rendered.getController().error })
+      .toEqual({ status: "success", error: null });
+    const recorded = rendered.getController().history[0];
+    expect(recorded).toMatchObject({
+      provider: "forge",
+      prompt: "single prompt\nextra-3",
+      params: expected,
+      thumbnailDataUrl: "data:image/jpeg;base64,THUMB"
+    });
+    expect({ status: rendered.getController().status, error: rendered.getController().error })
+      .toEqual({ status: "success", error: null });
+    expect(boundary.storage.writeJsonFile).toHaveBeenCalledWith(
+      "generation-history.json",
+      expect.objectContaining({ entries: expect.arrayContaining([expect.objectContaining({ id: recorded.id })]) })
+    );
+
+    act(() => {
+      rendered.setSettings((current) => ({ ...current, imageProvider: "gemini", offlineMode: false }));
+      setCompleteForm(rendered.getController(), customizeForm(expected, "changed", 8));
+    });
+    await act(async () => {
+      await rendered.getController().restoreHistoryConfig(recorded.id);
+    });
+
+    expect(rendered.updateSettings).toHaveBeenCalledWith({ imageProvider: "forge" });
+    expect(rendered.getSettings().imageProvider).toBe("forge");
+    expect(rendered.getController().form).toEqual(expected);
   });
 
-  it("keeps the newest Forge options during a rapid Forge-Gemini-Forge switch", async () => {
-    let resolveOldOptions: ((options: SdOptions) => void) | null = null;
-    const oldOptions = vi.fn().mockImplementation(() => new Promise<SdOptions>((resolve) => {
-      resolveOldOptions = resolve;
-    }));
-    const forgeOne = makeEngine("forge", { fetchOptions: oldOptions });
-    const gemini = makeEngine("gemini");
-    const forgeTwo = makeEngine("forge", {
-      fetchOptions: vi.fn().mockResolvedValue(modelOptions("new-model"))
-    });
-    let controller: GenerationControllerState | null = null;
-    const Harness = ({ settings }: { settings: AppSettings }) => {
-      controller = useGenerationController(settings);
-      return null;
-    };
+  it("records every successful batch task with its own complete parameters", async () => {
+    boundary.photoshop.getSelectionPixels
+      .mockResolvedValueOnce(selection("ONE"))
+      .mockResolvedValueOnce(selection("TWO"));
+    boundary.forgeClient.img2img
+      .mockResolvedValueOnce({ images: ["BATCH_ONE"] })
+      .mockResolvedValueOnce({ images: ["BATCH_TWO"] });
+    const rendered = trackedRender();
+    await flush();
+    const first = customizeForm(rendered.getController().form, "batch one", 1);
+    const second = customizeForm(rendered.getController().form, "batch two", 2);
+    act(() => setCompleteForm(rendered.getController(), first));
+    await act(async () => rendered.getController().addToBatch());
+    act(() => setCompleteForm(rendered.getController(), second));
+    await act(async () => rendered.getController().addToBatch());
 
-    boundary.engine = forgeOne;
-    let renderer: TestRenderer.ReactTestRenderer;
-    act(() => {
-      renderer = TestRenderer.create(createElement(Harness, { settings: DEFAULT_SETTINGS }));
-    });
-    await flushEffects();
-    expect(oldOptions).toHaveBeenCalledOnce();
+    await act(async () => rendered.getController().runBatch());
 
-    const geminiSettings: AppSettings = {
-      ...DEFAULT_SETTINGS,
-      imageProvider: "gemini",
-      offlineMode: false,
-      geminiApiKey: "key"
-    };
-    boundary.engine = gemini;
-    act(() => renderer.update(createElement(Harness, { settings: geminiSettings })));
-    boundary.engine = forgeTwo;
-    act(() => renderer.update(createElement(Harness, {
-      settings: { ...DEFAULT_SETTINGS, sdEndpoint: "http://new-forge.test:7860" }
-    })));
-    await flushEffects();
-
-    await act(async () => {
-      resolveOldOptions?.(modelOptions("stale-model"));
-      await Promise.resolve();
-    });
-
-    const current = controller as unknown as GenerationControllerState;
-    expect(current.options.models.map(({ value }) => value)).toEqual(["new-model"]);
-    expect(current.optionsLoading).toBe(false);
-    act(() => renderer.unmount());
+    expect(rendered.getController().status).toBe("success");
+    expect(rendered.getController().batchItems.map((item) => item.status)).toEqual(["success", "success"]);
+    expect(rendered.getController().history).toHaveLength(2);
+    expect(rendered.getController().history.map(({ params }) => params)).toEqual([second, first]);
+    expect(boundary.storage.writeJsonFile).toHaveBeenCalledTimes(2);
   });
 
-  it("drops late Forge progress, stops polling, and does not place its stale result", async () => {
-    vi.useFakeTimers();
-    let resolveProgress: ((value: { progress: number; eta_relative: number }) => void) | null = null;
-    let resolveGeneration: ((value: { images: string[] }) => void) | null = null;
-    const fetchProgress = vi.fn().mockImplementation(() => new Promise((resolve) => {
-      resolveProgress = resolve;
-    }));
-    const forge = makeEngine("forge", {
-      fetchProgress,
-      generate: vi.fn().mockImplementation(() => new Promise((resolve) => {
-        resolveGeneration = resolve;
-      }))
-    });
-    const gemini = makeEngine("gemini");
-    boundary.getSelectionPixels.mockResolvedValue({
-      dataUrl: "data:image/png;base64,INPUT",
-      width: 512,
-      height: 512,
-      selectionBounds: { left: 0, top: 0, right: 512, bottom: 512 }
-    });
-    let controller: GenerationControllerState | null = null;
-    const Harness = ({ settings }: { settings: AppSettings }) => {
-      controller = useGenerationController(settings);
-      return null;
+  it("validates the current selection before replaying a persisted thumbnail", async () => {
+    const params = customizeForm({} as GenerationForm, "replay", 4);
+    const persisted: GenerationHistoryEntry<GenerationForm> = {
+      id: "replay-entry",
+      ts: 2_000,
+      provider: "forge",
+      prompt: "replay",
+      params,
+      thumbnailDataUrl: "data:image/jpeg;base64,REPLAY"
     };
+    boundary.storage.readJsonFile.mockResolvedValue(historyFile([persisted]));
+    const rendered = trackedRender();
+    await flush();
 
-    boundary.engine = forge;
-    let renderer: TestRenderer.ReactTestRenderer;
-    act(() => {
-      renderer = TestRenderer.create(createElement(Harness, { settings: DEFAULT_SETTINGS }));
+    boundary.photoshop.hasActiveSelection.mockResolvedValueOnce(false);
+    await act(async () => rendered.getController().pasteHistoryResult(persisted.id));
+    expect(boundary.photoshop.placeImageIntoSelection).not.toHaveBeenCalled();
+    expect(rendered.getController().toast).toMatchObject({ type: "warning" });
+
+    boundary.photoshop.hasActiveSelection.mockResolvedValueOnce(true);
+    await act(async () => rendered.getController().pasteHistoryResult(persisted.id));
+    expect(boundary.photoshop.placeImageIntoSelection).toHaveBeenCalledWith(
+      persisted.thumbnailDataUrl,
+      1,
+      { feather: params.maskFeather }
+    );
+    expect(boundary.photoshop.moveActiveLayerToTop).toHaveBeenCalledOnce();
+  });
+
+  it.each(["thumbnail", "write"] as const)(
+    "keeps generation successful when history %s processing fails",
+    async (failure) => {
+      if (failure === "thumbnail") boundary.thumbnailDecodeFails = true;
+      else boundary.storage.writeJsonFile.mockRejectedValueOnce(new Error("disk full"));
+      const rendered = trackedRender();
+      await flush();
+
+      await act(async () => rendered.getController().runGeneration());
+
+      expect({ status: rendered.getController().status, error: rendered.getController().error })
+        .toEqual({ status: "success", error: null });
+      expect(rendered.getController().historyError).toContain(
+        failure === "thumbnail" ? "缩略图创建失败" : "保存失败"
+      );
+      expect(rendered.getController().toast).toMatchObject({ type: "warning" });
+      if (failure === "write") expect(rendered.getController().history).toHaveLength(1);
+    }
+  );
+
+  it.each(["thumbnail", "write"] as const)(
+    "keeps a completed batch successful when history %s processing fails",
+    async (failure) => {
+      const rendered = trackedRender();
+      await flush();
+      act(() => setCompleteForm(
+        rendered.getController(),
+        customizeForm(rendered.getController().form, "batch fallback", 6)
+      ));
+      await act(async () => rendered.getController().addToBatch());
+      if (failure === "thumbnail") boundary.thumbnailDecodeFails = true;
+      else boundary.storage.writeJsonFile.mockRejectedValueOnce(new Error("disk full"));
+
+      await act(async () => rendered.getController().runBatch());
+
+      expect({ status: rendered.getController().status, error: rendered.getController().error })
+        .toEqual({ status: "success", error: null });
+      expect(rendered.getController().batchItems.every((item) => item.status === "success")).toBe(true);
+      expect(rendered.getController().toast).toMatchObject({ type: "warning" });
+    }
+  );
+});
+
+describe("useGenerationController history provider restoration", () => {
+  const persistedEntry = (id: string, provider: AppSettings["imageProvider"], prompt: string, offset: number) => ({
+    id,
+    ts: 3_000 + offset,
+    provider,
+    prompt,
+    params: customizeForm({} as GenerationForm, prompt, offset),
+    thumbnailDataUrl: "data:image/jpeg;base64,HISTORY"
+  });
+
+  it("blocks provider restoration while settings are still loading", async () => {
+    const entry = persistedEntry("loading", "gemini", "loading", 1);
+    boundary.storage.readJsonFile.mockResolvedValue(historyFile([entry]));
+    const rendered = trackedRender({ settingsLoading: true });
+    await flush();
+    const before = rendered.getController().form;
+
+    await act(async () => rendered.getController().restoreHistoryConfig(entry.id));
+
+    expect(rendered.updateSettings).not.toHaveBeenCalled();
+    expect(rendered.getController().form).toBe(before);
+    expect(rendered.getController().toast).toMatchObject({ type: "warning" });
+  });
+
+  it("keeps the current form and provider when the settings patch fails", async () => {
+    const entry = persistedEntry("failure", "gemini", "failure", 2);
+    boundary.storage.readJsonFile.mockResolvedValue(historyFile([entry]));
+    const rendered = trackedRender({
+      updateImpl: vi.fn().mockRejectedValue(new Error("settings disk full"))
     });
-    await flushEffects();
-    let generationPromise: Promise<void>;
+    await flush();
+    const before = rendered.getController().form;
+
+    await act(async () => rendered.getController().restoreHistoryConfig(entry.id));
+
+    expect(rendered.getSettings().imageProvider).toBe("forge");
+    expect(rendered.getController().form).toBe(before);
+    expect(rendered.getController().toast).toMatchObject({
+      type: "error",
+      message: expect.stringContaining("settings disk full")
+    });
+  });
+
+  it("serializes rapid provider restores so the latest request wins", async () => {
+    const gemini = persistedEntry("gemini", "gemini", "gemini form", 3);
+    const forge = persistedEntry("forge", "forge", "forge form", 4);
+    boundary.storage.readJsonFile.mockResolvedValue(historyFile([gemini, forge]));
+    let releaseFirst!: () => void;
+    const firstPatch = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const updateImpl = vi.fn()
+      .mockImplementationOnce(() => firstPatch)
+      .mockResolvedValueOnce(undefined);
+    const rendered = trackedRender({ updateImpl });
+    await flush();
+
+    let firstRestore!: Promise<void>;
     act(() => {
-      generationPromise = (controller as unknown as GenerationControllerState).runGeneration();
+      firstRestore = rendered.getController().restoreHistoryConfig(gemini.id);
+    });
+    await flush();
+    let latestRestore!: Promise<void>;
+    act(() => {
+      latestRestore = rendered.getController().restoreHistoryConfig(forge.id);
     });
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_000);
-    });
-    expect(fetchProgress).toHaveBeenCalledOnce();
-
-    boundary.engine = gemini;
-    act(() => renderer.update(createElement(Harness, {
-      settings: {
-        ...DEFAULT_SETTINGS,
-        imageProvider: "gemini",
-        offlineMode: false,
-        geminiApiKey: "key"
-      }
-    })));
-    await act(async () => {
-      resolveProgress?.({ progress: 0.9, eta_relative: 1 });
-      resolveGeneration?.({ images: ["stale-image"] });
-      await generationPromise!;
-      await vi.advanceTimersByTimeAsync(3_000);
+      releaseFirst();
+      await firstRestore;
+      await latestRestore;
     });
 
-    const current = controller as unknown as GenerationControllerState;
-    expect(current.progress).toBe(0);
-    expect(fetchProgress).toHaveBeenCalledOnce();
-    expect(boundary.placeImageIntoSelection).not.toHaveBeenCalled();
-    act(() => renderer.unmount());
+    expect(updateImpl.mock.calls).toEqual([
+      [{ imageProvider: "gemini" }],
+      [{ imageProvider: "forge" }]
+    ]);
+    expect(rendered.getSettings().imageProvider).toBe("forge");
+    expect(rendered.getController().form).toEqual(forge.params);
   });
 });
