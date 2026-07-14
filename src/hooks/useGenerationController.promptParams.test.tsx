@@ -97,6 +97,17 @@ beforeEach(() => {
   });
   serviceMocks.placeImageIntoSelection.mockResolvedValue({ layerID: 1 });
   serviceMocks.listPresetMetas.mockResolvedValue([]);
+  serviceMocks.savePresetFile.mockResolvedValue({
+    meta: {
+      name: "parameter-preset",
+      fileName: "parameter-preset.json",
+      createdAt: "",
+      kind: "forge",
+      isFactory: false
+    },
+    preset: { kind: "forge", title: "parameter-preset", data: {} },
+    version: 2
+  });
   vi.stubGlobal("window", {
     setInterval: globalThis.setInterval.bind(globalThis),
     clearInterval: globalThis.clearInterval.bind(globalThis)
@@ -129,7 +140,8 @@ describe("useGenerationController prompt parameters", () => {
     expect(serviceMocks.savePresetFile).toHaveBeenCalledWith(
       "parameter-preset",
       expect.objectContaining({
-        form: expect.objectContaining({
+        kind: "forge",
+        data: expect.objectContaining({
           positivePrompt: "base, @param:关闭:0.00, keep @param:保留:0.60"
         })
       })
@@ -191,15 +203,24 @@ describe("useGenerationController prompt parameters", () => {
   it("normalizes prompt markers restored from a preset", async () => {
     const harness = await renderController("forge");
     serviceMocks.loadPresetFile.mockResolvedValueOnce({
-      meta: { name: "raw-params" },
-      data: {
-        form: {
+      meta: {
+        name: "raw-params",
+        fileName: "raw-params.json",
+        createdAt: "",
+        kind: "forge",
+        isFactory: false
+      },
+      preset: {
+        kind: "forge",
+        title: "raw-params",
+        data: {
           ...harness.controller.form,
           positivePrompt: "@param:过强:4",
           negativePrompt: "【过低：-2】",
           extraPrompt: "@param:正常:.4"
         }
-      }
+      },
+      version: 2
     });
 
     await act(async () => harness.controller.applyPreset("raw-params.json"));
