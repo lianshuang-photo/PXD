@@ -6,7 +6,6 @@ export interface AppSettings {
   geminiModel: string;
   geminiAuthMode: "queryKey" | "bearer";
   offlineMode: boolean;
-  outputDirectory: string;
   brandColor: string;
   timeoutMultiplier: number;
   timeoutMinSeconds: number;
