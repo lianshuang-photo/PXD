@@ -444,6 +444,24 @@ body {
   min-width: 66px;
 }
 
+.camera-view__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.camera-view__toggle {
+  min-width: 40px;
+}
+
+.camera-view__body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
 .camera-view__viewport {
   position: relative;
   width: 100%;
