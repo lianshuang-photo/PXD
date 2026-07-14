@@ -656,20 +656,20 @@ export const useGenerationController = (
   }, [commitBatchItems, commitReferenceImages, engineToken, invalidateBatchAdds, invalidateGenerationRequest, invalidateReferenceCapture, settings.imageProvider]);
 
   useLayoutEffect(() => () => {
-    invalidateBatchAdds();
+    batchAddGenerationRef.current += 1;
     invalidateGenerationRequest();
-    invalidateReferenceCapture();
+    referenceCaptureGenerationRef.current += 1;
+    referenceCaptureLoadingRef.current = false;
     referenceImagesRef.current = [];
     batchItemsRef.current = [];
-  }, [invalidateBatchAdds, invalidateGenerationRequest, invalidateReferenceCapture]);
+  }, [invalidateGenerationRequest]);
 
   useEffect(() => () => {
     if (runGateRef.current.stop()) {
       engine.cancelAll();
       stoppedByEngineChangeRef.current = true;
     }
-    invalidateGenerationRequest();
-  }, [engine, invalidateGenerationRequest]);
+  }, [engine]);
   const clearToastTimer = useCallback(() => {
     if (toastTimerRef.current) {
       clearTimeout(toastTimerRef.current);
@@ -1097,10 +1097,8 @@ export const useGenerationController = (
     try {
       const selection = await getSelectionPixels({ taskId });
       if (!isRunCurrent()) return;
-      if (!selection && requestEngine.provider === "gemini") {
-        throw new Error("请先在 Photoshop 中选择一个区域");
-      }
       if (requestEngine.provider === "gemini") {
+        if (!selection) throw new Error("请先在 Photoshop 中选择一个区域");
         session.retainReferenceImages(referenceImagesRef.current);
         setReferenceAspectWarning(getReferenceAspectWarning(selection, requireReferenceImages(session)));
       }
@@ -1169,6 +1167,7 @@ export const useGenerationController = (
       }
       if (!isRunCurrent()) return;
       const { images } = result;
+      session.clearSensitiveData();
       setProgress(1);
       setLastImages(images.map(toDataUrl));
       const historyRecord = await recordHistory({
@@ -1177,6 +1176,7 @@ export const useGenerationController = (
         params: { ...form },
         resultDataUrl: toDataUrl(images[0])
       });
+      if (!isRunCurrent()) return;
       setStatus("success");
       if (historyRecord) pushToast("success", "生成成功");
     } catch (err) {
@@ -1266,15 +1266,15 @@ export const useGenerationController = (
 
   const removeFromBatch = useCallback(
     async (id: string) => {
-      const target = batchItemsRef.current.find((item) => item.id === id);
+      const metadata = batchItemsRef.current.find((item) => item.id === id)?.metadata;
       engine.cancel(id);
       clearPSLockQueue(id);
       commitBatchItems((prev) => prev.filter((item) => item.id !== id));
-      if (target?.metadata?.batchDocumentId && target.metadata.activeDocumentId && target.metadata.newLayerId) {
+      if (metadata?.batchDocumentId && metadata.activeDocumentId && metadata.newLayerId) {
         await closeDocument(
-          target.metadata.batchDocumentId,
-          target.metadata.activeDocumentId,
-          target.metadata.newLayerId,
+          metadata.batchDocumentId,
+          metadata.activeDocumentId,
+          metadata.newLayerId,
           { taskId: id }
         );
       }
@@ -1408,6 +1408,7 @@ export const useGenerationController = (
           params: completedForm,
           resultDataUrl: toDataUrl(result.images[0])
         });
+        if (!isRunCurrent()) return;
         if (!historyRecord) historyRecorded = false;
         setProgress(0);
       }
