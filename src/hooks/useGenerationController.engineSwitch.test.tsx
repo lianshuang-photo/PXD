@@ -10,10 +10,12 @@ const boundary = vi.hoisted(() => ({
   engine: null as unknown as GenerationEngine,
   getSelectionPixels: vi.fn(),
   deleteLayers: vi.fn(),
+  deleteTaskLayers: vi.fn(),
   getActiveDocumentId: vi.fn(),
   placeImageIntoSelection: vi.fn(),
   groupLayers: vi.fn(),
   moveActiveLayerToTop: vi.fn(),
+  renameLayer: vi.fn(),
   listPresetMetas: vi.fn()
 }));
 
@@ -24,10 +26,12 @@ vi.mock("./useGenerationEngine", () => ({
 vi.mock("../services/photoshop", () => ({
   closeDocument: vi.fn(),
   deleteLayers: boundary.deleteLayers,
+  deleteTaskLayers: boundary.deleteTaskLayers,
   getActiveDocumentId: boundary.getActiveDocumentId,
   getSelectionPixels: boundary.getSelectionPixels,
   groupLayers: boundary.groupLayers,
   moveActiveLayerToTop: boundary.moveActiveLayerToTop,
+  renameLayer: boundary.renameLayer,
   onBatchAddLayer: vi.fn().mockResolvedValue(null),
   placeImageIntoSelection: boundary.placeImageIntoSelection,
   setSelectionBounds: vi.fn(),
@@ -95,6 +99,8 @@ beforeEach(() => {
   boundary.listPresetMetas.mockResolvedValue([]);
   boundary.placeImageIntoSelection.mockResolvedValue({ layerID: 1 });
   boundary.deleteLayers.mockResolvedValue(undefined);
+  boundary.deleteTaskLayers.mockResolvedValue(undefined);
+  boundary.renameLayer.mockResolvedValue(undefined);
   boundary.getActiveDocumentId.mockResolvedValue(7);
   boundary.groupLayers.mockResolvedValue(undefined);
   boundary.moveActiveLayerToTop.mockResolvedValue(undefined);

@@ -11,6 +11,7 @@ const task = (overrides: Partial<GenerationTaskSnapshot> = {}): GenerationTaskSn
   progress: 0.42,
   countdown: 18,
   autoReturn: true,
+  cleanupPending: false,
   attempt: 1,
   createdAt: 1,
   ...overrides
@@ -20,6 +21,7 @@ const render = (tasks: GenerationTaskSnapshot[]) => {
   const handlers = {
     onCancel: vi.fn(),
     onRetry: vi.fn(),
+    onCleanup: vi.fn(),
     onReturn: vi.fn(),
     onRemove: vi.fn(),
     onExtend: vi.fn(),
@@ -63,5 +65,14 @@ describe("GenerationTaskCards", () => {
     act(() => button(renderer, "移除")?.props.onClick());
     expect(handlers.onRetry).toHaveBeenCalledWith("task-1");
     expect(handlers.onRemove).toHaveBeenCalledWith("task-1");
+  });
+
+  it("requires cleanup before retrying a dirty task", () => {
+    const { renderer, handlers } = render([
+      task({ status: "error", cleanupPending: true, error: "Photoshop 清理未完成" })
+    ]);
+    expect(button(renderer, "重试")).toBeUndefined();
+    act(() => button(renderer, "清理")?.props.onClick());
+    expect(handlers.onCleanup).toHaveBeenCalledWith("task-1");
   });
 });

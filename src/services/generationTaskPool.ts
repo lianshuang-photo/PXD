@@ -2,6 +2,7 @@ import type { AppSettings } from "../context/types";
 
 export type GenerationTaskStatus =
   | "queued"
+  | "retrying"
   | "running"
   | "returning"
   | "awaiting-return"
@@ -19,6 +20,7 @@ export interface GenerationTaskSnapshot {
   autoReturn: boolean;
   images?: string[];
   error?: string;
+  cleanupPending: boolean;
   attempt: number;
   createdAt: number;
   startedAt?: number;
@@ -59,6 +61,8 @@ interface TaskRecord {
   networkActive: boolean;
   completion: Promise<GenerationTaskSnapshot>;
   resolveCompletion: (snapshot: GenerationTaskSnapshot) => void;
+  retryPromise: Promise<GenerationTaskSnapshot | null> | null;
+  cleanupPromise: Promise<boolean> | null;
 }
 
 export interface GenerationTaskPoolOptions {
@@ -152,6 +156,7 @@ export class GenerationTaskPool {
         progress: 0,
         countdown: Math.max(1, Math.ceil(definition.timeoutSeconds)),
         autoReturn: definition.autoReturn !== false,
+        cleanupPending: false,
         attempt: 0,
         createdAt: this.now()
       },
@@ -159,7 +164,9 @@ export class GenerationTaskPool {
       controller: null,
       networkActive: false,
       completion: completion.promise,
-      resolveCompletion: completion.resolve
+      resolveCompletion: completion.resolve,
+      retryPromise: null,
+      cleanupPromise: null
     };
     this.records.set(definition.id, record);
     this.emit();
@@ -193,7 +200,7 @@ export class GenerationTaskPool {
     };
     record.resolveCompletion({ ...record.snapshot });
     this.emit();
-    await Promise.resolve(record.definition.cleanup?.()).catch(() => undefined);
+    await this.runCleanup(record);
     this.pump();
     return { ...record.snapshot };
   }
@@ -201,25 +208,22 @@ export class GenerationTaskPool {
   async retry(id: string): Promise<GenerationTaskSnapshot | null> {
     const record = this.records.get(id);
     if (!record) return null;
-    if (record.snapshot.images?.length) return await this.returnTask(id);
-    if (!isTerminal(record.snapshot.status)) return { ...record.snapshot };
-    await Promise.resolve(record.definition.cleanup?.()).catch(() => undefined);
-    const completion = createCompletion();
-    record.completion = completion.promise;
-    record.resolveCompletion = completion.resolve;
-    record.snapshot = {
-      ...record.snapshot,
-      status: "queued",
-      progress: 0,
-      countdown: Math.max(1, Math.ceil(record.definition.timeoutSeconds)),
-      images: undefined,
-      error: undefined,
-      startedAt: undefined,
-      deadlineAt: undefined
-    };
-    this.emit();
-    this.pump();
-    return await record.completion;
+    if (record.retryPromise) return await record.retryPromise;
+    if (record.snapshot.cleanupPending || !isTerminal(record.snapshot.status)) return { ...record.snapshot };
+    const retryPromise = this.performRetry(record);
+    record.retryPromise = retryPromise;
+    try {
+      return await retryPromise;
+    } finally {
+      if (record.retryPromise === retryPromise) record.retryPromise = null;
+    }
+  }
+
+  async cleanup(id: string): Promise<GenerationTaskSnapshot | null> {
+    const record = this.records.get(id);
+    if (!record) return null;
+    await this.runCleanup(record);
+    return { ...record.snapshot };
   }
 
   extend(id: string, seconds = 10) {
@@ -249,10 +253,8 @@ export class GenerationTaskPool {
   async returnTask(id: string): Promise<GenerationTaskSnapshot | null> {
     const record = this.records.get(id);
     if (!record || !record.snapshot.images?.length) return record?.snapshot ?? null;
+    if (record.snapshot.cleanupPending) return { ...record.snapshot };
     if (record.snapshot.status === "returning") return record.completion;
-    if (record.snapshot.error) {
-      await Promise.resolve(record.definition.cleanup?.()).catch(() => undefined);
-    }
     const generation = record.generation;
     return await this.attemptReturn(record, generation);
   }
@@ -260,7 +262,9 @@ export class GenerationTaskPool {
   async remove(id: string) {
     const record = this.records.get(id);
     if (!record) return false;
+    if (record.snapshot.cleanupPending && !(await this.runCleanup(record))) return false;
     if (record.snapshot.status !== "success") await this.cancel(id);
+    if (record.snapshot.cleanupPending) return false;
     this.records.delete(id);
     this.emit();
     return true;
@@ -380,7 +384,7 @@ export class GenerationTaskPool {
         error: (record.definition.formatError ?? defaultFormatError)(error)
       };
       if (!deferred) {
-        await Promise.resolve(record.definition.cleanup?.()).catch(() => undefined);
+        await this.runCleanup(record);
       }
     }
     record.resolveCompletion({ ...record.snapshot });
@@ -394,6 +398,63 @@ export class GenerationTaskPool {
     record.controller = null;
     this.activeNetworks = Math.max(0, this.activeNetworks - 1);
     this.pump();
+  }
+
+  private async performRetry(record: TaskRecord): Promise<GenerationTaskSnapshot | null> {
+    const retryGeneration = ++record.generation;
+    record.snapshot = { ...record.snapshot, status: "retrying", error: undefined };
+    this.emit();
+    if (!(await this.runCleanup(record))) return { ...record.snapshot };
+    if (record.generation !== retryGeneration || record.snapshot.status !== "retrying") {
+      return { ...record.snapshot };
+    }
+    const completion = createCompletion();
+    record.completion = completion.promise;
+    record.resolveCompletion = completion.resolve;
+    if (record.snapshot.images?.length) {
+      return await this.attemptReturn(record, retryGeneration);
+    }
+    record.snapshot = {
+      ...record.snapshot,
+      status: "queued",
+      progress: 0,
+      countdown: Math.max(1, Math.ceil(record.definition.timeoutSeconds)),
+      images: undefined,
+      error: undefined,
+      startedAt: undefined,
+      deadlineAt: undefined
+    };
+    this.emit();
+    this.pump();
+    return await record.completion;
+  }
+
+  private async runCleanup(record: TaskRecord): Promise<boolean> {
+    if (record.cleanupPromise) return await record.cleanupPromise;
+    const cleanupPromise = Promise.resolve()
+      .then(() => record.definition.cleanup?.())
+      .then(() => {
+        record.snapshot = { ...record.snapshot, cleanupPending: false };
+        this.emit();
+        return true;
+      })
+      .catch((error) => {
+        const detail = defaultFormatError(error);
+        record.snapshot = {
+          ...record.snapshot,
+          cleanupPending: true,
+          status: "error",
+          error: `Photoshop 清理未完成：${detail}`
+        };
+        this.emit();
+        return false;
+      });
+    record.cleanupPromise = cleanupPromise;
+    try {
+      return await cleanupPromise;
+    } finally {
+      if (record.cleanupPromise === cleanupPromise) record.cleanupPromise = null;
+    }
   }
 
   private async enqueueReturn<T>(operation: () => Promise<T>): Promise<T> {
@@ -449,6 +510,7 @@ export class GenerationTaskPool {
     const removable = Array.from(this.records.values())
       .filter(({ snapshot, networkActive }) =>
         isPrunable(snapshot.status) &&
+        !snapshot.cleanupPending &&
         !networkActive &&
         (snapshot.status === "success" || !snapshot.images?.length)
       )

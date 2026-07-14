@@ -110,6 +110,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     taskConcurrency,
     cancelTask,
     retryTask,
+    cleanupTask,
     returnTask,
     removeTask,
     extendTask,
@@ -433,6 +434,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
         concurrency={taskConcurrency}
         onCancel={cancelTask}
         onRetry={retryTask}
+        onCleanup={cleanupTask}
         onReturn={returnTask}
         onRemove={removeTask}
         onExtend={(id) => extendTask(id, 10)}

@@ -30,11 +30,13 @@ const boundary = vi.hoisted(() => ({
   closeGeneratedDocument: vi.fn(),
   createGeneratedDocument: vi.fn(),
   deleteLayers: vi.fn(),
+  deleteTaskLayers: vi.fn(),
   getActiveDocumentId: vi.fn(),
   placeImageIntoDocument: vi.fn(),
   placeImageIntoSelection: vi.fn(),
   groupLayers: vi.fn(),
   moveActiveLayerToTop: vi.fn(),
+  renameLayer: vi.fn(),
   listPresetMetas: vi.fn(),
   onBatchAddLayer: vi.fn(),
   setSelectionBounds: vi.fn(),
@@ -51,10 +53,12 @@ vi.mock("../services/photoshop", () => ({
   closeGeneratedDocument: boundary.closeGeneratedDocument,
   createGeneratedDocument: boundary.createGeneratedDocument,
   deleteLayers: boundary.deleteLayers,
+  deleteTaskLayers: boundary.deleteTaskLayers,
   getActiveDocumentId: boundary.getActiveDocumentId,
   getSelectionPixels: boundary.getSelectionPixels,
   groupLayers: boundary.groupLayers,
   moveActiveLayerToTop: boundary.moveActiveLayerToTop,
+  renameLayer: boundary.renameLayer,
   onBatchAddLayer: boundary.onBatchAddLayer,
   placeImageIntoDocument: boundary.placeImageIntoDocument,
   placeImageIntoSelection: boundary.placeImageIntoSelection,
@@ -123,11 +127,13 @@ beforeEach(() => {
   boundary.closeGeneratedDocument.mockReset();
   boundary.createGeneratedDocument.mockReset();
   boundary.deleteLayers.mockReset();
+  boundary.deleteTaskLayers.mockReset();
   boundary.getActiveDocumentId.mockReset();
   boundary.placeImageIntoDocument.mockReset();
   boundary.placeImageIntoSelection.mockReset();
   boundary.groupLayers.mockReset();
   boundary.moveActiveLayerToTop.mockReset();
+  boundary.renameLayer.mockReset();
   boundary.listPresetMetas.mockReset();
   boundary.onBatchAddLayer.mockReset();
   boundary.setSelectionBounds.mockReset();
@@ -144,6 +150,7 @@ beforeEach(() => {
     previousDocumentId: 7
   });
   boundary.deleteLayers.mockResolvedValue(undefined);
+  boundary.deleteTaskLayers.mockResolvedValue(undefined);
   boundary.getActiveDocumentId.mockResolvedValue(7);
   boundary.placeImageIntoDocument
     .mockResolvedValueOnce({ layerID: 101 })
@@ -151,6 +158,7 @@ beforeEach(() => {
   boundary.placeImageIntoSelection.mockResolvedValue({ layerID: 201 });
   boundary.groupLayers.mockResolvedValue(301);
   boundary.moveActiveLayerToTop.mockResolvedValue(undefined);
+  boundary.renameLayer.mockResolvedValue(undefined);
   boundary.listPresetMetas.mockResolvedValue([]);
   boundary.onBatchAddLayer.mockResolvedValue(null);
   boundary.setSelectionBounds.mockResolvedValue(undefined);
@@ -202,7 +210,7 @@ describe("useGenerationController Forge completion", () => {
     );
     expect(boundary.groupLayers).toHaveBeenCalledWith(
       [101, 102],
-      undefined,
+      expect.stringMatching(/^PXD 临时任务 /),
       { taskId: expect.any(String), requireGroup: true }
     );
     expect(harness.controller.status).toBe("success");

@@ -25,6 +25,7 @@ import {
   closeGeneratedDocument,
   createGeneratedDocument,
   deleteLayers,
+  deleteTaskLayers,
   getActiveDocumentId,
   getSelectionPixels,
   groupLayers,
@@ -33,6 +34,7 @@ import {
   onBatchAddLayer,
   placeImageIntoDocument,
   placeImageIntoSelection,
+  renameLayer,
   setSelectionBounds,
   switchToDocument,
   type GeneratedDocumentSession,
@@ -422,6 +424,7 @@ export interface GenerationControllerState {
   taskConcurrency: number;
   cancelTask: (id: string) => Promise<GenerationTaskSnapshot | null>;
   retryTask: (id: string) => Promise<GenerationTaskSnapshot | null>;
+  cleanupTask: (id: string) => Promise<GenerationTaskSnapshot | null>;
   returnTask: (id: string) => Promise<GenerationTaskSnapshot | null>;
   removeTask: (id: string) => Promise<boolean>;
   extendTask: (id: string, seconds?: number) => boolean;
@@ -808,6 +811,8 @@ export const useGenerationController = (
   const enqueuePreparedTask = useCallback((prepared: PreparedPoolTask) => {
     let generatedDocument: GeneratedDocumentSession | null = null;
     let returnOriginDocumentId: number | null = null;
+    let returnTargetDocumentId: number | null = null;
+    let pendingCleanup: (() => Promise<void>) | null = null;
     const timeoutSeconds = Math.max(
       5,
       prepared.settings.timeoutMaxSeconds * prepared.settings.timeoutMultiplier
@@ -825,27 +830,59 @@ export const useGenerationController = (
       // The pool owns the extendable deadline; the client timeout remains a final failsafe.
       timeoutMs: 24 * 60 * 60 * 1_000
     };
+    const baseAdapters = {
+      ...GENERATION_WORKFLOW_ADAPTERS,
+      groupLayers: (
+        layerIds: number[],
+        _groupName: string | undefined,
+        options: { taskId?: string }
+      ) => groupLayers(layerIds, `PXD 临时任务 ${prepared.id}`, {
+        ...options,
+        requireGroup: true
+      }),
+      moveActiveLayerToTop: async (options: { layerId: number; taskId?: string }) => {
+        await moveActiveLayerToTop(options);
+        await renameLayer(options.layerId, prepared.groupName || "PXD 生成结果", {
+          taskId: options.taskId
+        });
+      }
+    };
     const adapters = prepared.selection
       ? {
-          ...GENERATION_WORKFLOW_ADAPTERS,
+          ...baseAdapters,
           rollback: async ({ placedLayerIds, groupLayerId }: {
             placedLayerIds: number[];
             groupLayerId: number | null;
           }) => {
             const rollbackIds = groupLayerId ? [groupLayerId] : placedLayerIds;
-            try {
-              if (rollbackIds.length) {
-                await deleteLayers(rollbackIds, { taskId: prepared.id });
+            let layersDeleted = false;
+            const cleanup = async () => {
+              if (returnTargetDocumentId) {
+                await switchToDocument(returnTargetDocumentId, { taskId: prepared.id });
               }
-            } finally {
+              if (!layersDeleted) {
+                if (groupLayerId && rollbackIds.length) {
+                  await deleteLayers(rollbackIds, { taskId: prepared.id });
+                } else {
+                  await deleteTaskLayers(prepared.id, { taskId: prepared.id });
+                }
+                layersDeleted = true;
+              }
               if (returnOriginDocumentId) {
                 await switchToDocument(returnOriginDocumentId, { taskId: prepared.id });
               }
+            };
+            pendingCleanup = cleanup;
+            try {
+              await cleanup();
+              pendingCleanup = null;
+            } catch (error) {
+              throw error;
             }
           }
         }
       : {
-          ...GENERATION_WORKFLOW_ADAPTERS,
+          ...baseAdapters,
           placeImage: async (
             dataUrl: string,
             index: number,
@@ -869,12 +906,17 @@ export const useGenerationController = (
           rollback: async () => {
             if (!generatedDocument) return;
             const session = generatedDocument;
-            await closeGeneratedDocument(
-              session.documentId,
-              session.previousDocumentId,
-              { taskId: prepared.id }
-            );
-            generatedDocument = null;
+            const cleanup = async () => {
+              await closeGeneratedDocument(
+                session.documentId,
+                session.previousDocumentId,
+                { taskId: prepared.id }
+              );
+              generatedDocument = null;
+            };
+            pendingCleanup = cleanup;
+            await cleanup();
+            pendingCleanup = null;
           }
         };
 
@@ -891,6 +933,7 @@ export const useGenerationController = (
       },
       returnImages: async (images, context) => {
         returnOriginDocumentId = await getActiveDocumentId({ taskId: prepared.id });
+        returnTargetDocumentId = returnOriginDocumentId;
         await returnGenerationImages(
           prepared.engine,
           images,
@@ -900,13 +943,18 @@ export const useGenerationController = (
               : DEFAULT_FORM.maskFeather,
             taskId: prepared.id,
             groupName: prepared.groupName,
-            prepare: prepared.prepareReturn,
+            prepare: async () => {
+              await prepared.prepareReturn?.();
+              returnTargetDocumentId = await getActiveDocumentId({ taskId: prepared.id });
+            },
             isCurrent: context.isCurrent
           },
           adapters
         );
         generatedDocument = null;
         returnOriginDocumentId = null;
+        returnTargetDocumentId = null;
+        pendingCleanup = null;
       },
       cancelNetwork: () => {
         prepared.engine.cancel(prepared.id);
@@ -915,18 +963,19 @@ export const useGenerationController = (
         clearPSLockQueue(prepared.id);
       },
       cleanup: async () => {
+        if (pendingCleanup) {
+          const cleanup = pendingCleanup;
+          await cleanup();
+          if (pendingCleanup === cleanup) pendingCleanup = null;
+        }
         if (!generatedDocument) return;
         const session = generatedDocument;
-        try {
-          await closeGeneratedDocument(
-            session.documentId,
-            session.previousDocumentId,
-            { taskId: prepared.id }
-          );
-          generatedDocument = null;
-        } catch (caught) {
-          console.warn("Failed to clean up generated document", caught);
-        }
+        await closeGeneratedDocument(
+          session.documentId,
+          session.previousDocumentId,
+          { taskId: prepared.id }
+        );
+        generatedDocument = null;
       },
       onResult: async (images) => {
         setLastImages(images.map(toDataUrl));
@@ -945,7 +994,7 @@ export const useGenerationController = (
 
   useEffect(() => {
     const activeTask = taskPool.tasks.find(({ status: taskStatus }) =>
-      taskStatus === "queued" || taskStatus === "running" || taskStatus === "returning"
+      taskStatus === "queued" || taskStatus === "retrying" || taskStatus === "running" || taskStatus === "returning"
     );
     if (activeTask) {
       setStatus("running");
@@ -977,6 +1026,8 @@ export const useGenerationController = (
         const taskStatus: BatchItem["status"] =
           task.status === "cancelled"
             ? "stopped"
+            : task.status === "retrying"
+              ? "queued"
             : task.status === "returning"
               ? "running"
               : task.status;
@@ -993,7 +1044,7 @@ export const useGenerationController = (
 
   const stopGeneration = useCallback(() => {
     const activeTasks = taskPool.tasks.filter(({ status: taskStatus }) =>
-      taskStatus === "queued" || taskStatus === "running" || taskStatus === "returning"
+      taskStatus === "queued" || taskStatus === "retrying" || taskStatus === "running" || taskStatus === "returning"
     );
     if (!activeTasks.length) return;
     for (const task of activeTasks) void taskPool.cancelTask(task.id);
@@ -1273,6 +1324,7 @@ export const useGenerationController = (
     taskConcurrency: taskPool.concurrency,
     cancelTask: taskPool.cancelTask,
     retryTask: taskPool.retryTask,
+    cleanupTask: taskPool.cleanupTask,
     returnTask: taskPool.returnTask,
     removeTask: taskPool.removeTask,
     extendTask: taskPool.extendTask,

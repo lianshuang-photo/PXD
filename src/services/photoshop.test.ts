@@ -15,6 +15,7 @@ import {
   closeGeneratedDocument,
   createGeneratedDocument,
   deleteLayers,
+  deleteTaskLayers,
   getActiveDocumentId,
   groupLayers
 } from "./photoshop";
@@ -137,6 +138,51 @@ describe("createGeneratedDocument", () => {
     expect(batchPlay).toHaveBeenCalledWith([
       { _obj: "delete", _target: [{ _ref: "layer", _id: 301 }] },
       { _obj: "delete", _target: [{ _ref: "layer", _id: 302 }] }
+    ], {});
+  });
+
+  it("finds and deletes late placed layers by task marker", async () => {
+    const batchPlay = vi.fn().mockResolvedValue([]);
+    boundary.bridge.photoshop = {
+      app: {
+        batchPlay,
+        activeDocument: {
+          id: 88,
+          layers: [
+            { id: 1, name: "keep" },
+            { id: 2, name: "group", layers: [{ id: 3, name: "PXD 临时任务 late-task" }] }
+          ]
+        }
+      },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+
+    await deleteTaskLayers("late-task");
+    expect(batchPlay).toHaveBeenCalledWith([
+      { _obj: "delete", _target: [{ _ref: "layer", _id: 3 }] }
+    ], {});
+  });
+
+  it("deletes a marked group without also deleting its marked children", async () => {
+    const batchPlay = vi.fn().mockResolvedValue([]);
+    boundary.bridge.photoshop = {
+      app: {
+        batchPlay,
+        activeDocument: {
+          id: 88,
+          layers: [{
+            id: 2,
+            name: "PXD 临时任务 grouped-task",
+            layers: [{ id: 3, name: "PXD 临时任务 grouped-task" }]
+          }]
+        }
+      },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+
+    await deleteTaskLayers("grouped-task");
+    expect(batchPlay).toHaveBeenCalledWith([
+      { _obj: "delete", _target: [{ _ref: "layer", _id: 2 }] }
     ], {});
   });
 });

@@ -5,6 +5,7 @@ interface Props {
   concurrency: number;
   onCancel: (id: string) => void | Promise<unknown>;
   onRetry: (id: string) => void | Promise<unknown>;
+  onCleanup: (id: string) => void | Promise<unknown>;
   onReturn: (id: string) => void | Promise<unknown>;
   onRemove: (id: string) => void | Promise<unknown>;
   onExtend: (id: string) => void;
@@ -13,6 +14,7 @@ interface Props {
 
 const statusLabels: Record<GenerationTaskSnapshot["status"], string> = {
   queued: "排队中",
+  retrying: "准备重试",
   running: "生成中",
   returning: "回传中",
   "awaiting-return": "等待回传",
@@ -27,13 +29,14 @@ const engineLabels: Record<GenerationTaskSnapshot["engine"], string> = {
 };
 
 const isActive = (task: GenerationTaskSnapshot) =>
-  task.status === "queued" || task.status === "running" || task.status === "returning";
+  task.status === "queued" || task.status === "retrying" || task.status === "running" || task.status === "returning";
 
 const GenerationTaskCards = ({
   tasks,
   concurrency,
   onCancel,
   onRetry,
+  onCleanup,
   onReturn,
   onRemove,
   onExtend,
@@ -51,7 +54,7 @@ const GenerationTaskCards = ({
       <div className="generation-tasks__list">
         {tasks.map((task) => {
           const progress = Math.max(0, Math.min(100, Math.round(task.progress * 100)));
-          const canRetry = task.status === "error" || task.status === "cancelled";
+          const canRetry = !task.cleanupPending && (task.status === "error" || task.status === "cancelled");
           const canRemove = task.status === "awaiting-return" || task.status === "success" ||
             task.status === "error" || task.status === "cancelled";
           return (
@@ -83,7 +86,7 @@ const GenerationTaskCards = ({
                 {task.status === "running" && (
                   <button type="button" className="btn btn--ghost" onClick={() => onExtend(task.id)}>+10s</button>
                 )}
-                {task.status === "awaiting-return" && (
+                {task.status === "awaiting-return" && !task.cleanupPending && (
                   <button type="button" className="btn btn--primary" onClick={() => void onReturn(task.id)}>回传</button>
                 )}
                 {isActive(task) && (
@@ -91,6 +94,9 @@ const GenerationTaskCards = ({
                 )}
                 {canRetry && (
                   <button type="button" className="btn btn--secondary" onClick={() => void onRetry(task.id)}>重试</button>
+                )}
+                {task.cleanupPending && (
+                  <button type="button" className="btn btn--secondary" onClick={() => void onCleanup(task.id)}>清理</button>
                 )}
                 {canRemove && (
                   <button type="button" className="btn btn--ghost" onClick={() => void onRemove(task.id)}>移除</button>

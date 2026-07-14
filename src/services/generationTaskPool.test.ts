@@ -138,6 +138,53 @@ describe("GenerationTaskPool", () => {
     });
   });
 
+  it("blocks return retry while cleanup is dirty and re-enables it after explicit cleanup", async () => {
+    const cleanup = vi.fn()
+      .mockRejectedValueOnce(new Error("circuit open"))
+      .mockRejectedValueOnce(new Error("still open"))
+      .mockResolvedValueOnce(undefined);
+    const returnImages = vi.fn()
+      .mockRejectedValueOnce(new Error("place failed"))
+      .mockResolvedValueOnce(undefined);
+    const run = vi.fn().mockResolvedValue(["IMAGE"]);
+    const first = await pool.enqueue(task("dirty", run, { cleanup, returnImages }));
+
+    expect(first.status).toBe("error");
+    expect(pool.getSnapshot().dirty.cleanupPending).toBe(true);
+    expect((await pool.retry("dirty"))?.cleanupPending).toBe(true);
+    expect(returnImages).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(1);
+
+    expect((await pool.cleanup("dirty"))?.cleanupPending).toBe(true);
+    expect((await pool.cleanup("dirty"))?.cleanupPending).toBe(false);
+    expect((await pool.retry("dirty"))?.status).toBe("success");
+    expect(returnImages).toHaveBeenCalledTimes(2);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(pool.activeCount).toBe(0);
+  });
+
+  it("coalesces concurrent retries into one network run and shared settlement", async () => {
+    const retried = deferred<string[]>();
+    const run = vi.fn()
+      .mockRejectedValueOnce(new Error("network failed"))
+      .mockImplementationOnce(() => retried.promise);
+    expect((await pool.enqueue(task("coalesced", run))).status).toBe("error");
+
+    const firstRetry = pool.retry("coalesced");
+    const secondRetry = pool.retry("coalesced");
+    await flush();
+    await flush();
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(pool.activeCount).toBe(1);
+
+    retried.resolve(["RECOVERED"]);
+    const [first, second] = await Promise.all([firstRetry, secondRetry]);
+    expect(first).toMatchObject({ status: "success", attempt: 2 });
+    expect(second).toEqual(first);
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(pool.activeCount).toBe(0);
+  });
+
   it("cancels one task without cancelling or committing stale results from another", async () => {
     const first = deferred<string[]>();
     const second = deferred<string[]>();

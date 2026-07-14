@@ -35,6 +35,7 @@ export const useGenerationTaskPool = (concurrency: number) => {
     enqueueTask: useCallback((definition: GenerationTaskDefinition) => pool.enqueue(definition), [pool]),
     cancelTask: useCallback((id: string) => pool.cancel(id), [pool]),
     retryTask: useCallback((id: string) => pool.retry(id), [pool]),
+    cleanupTask: useCallback((id: string) => pool.cleanup(id), [pool]),
     returnTask: useCallback((id: string) => pool.returnTask(id), [pool]),
     removeTask: useCallback((id: string) => pool.remove(id), [pool]),
     extendTask: useCallback((id: string, seconds = 10) => pool.extend(id, seconds), [pool]),

@@ -21,11 +21,13 @@ const boundary = vi.hoisted(() => ({
   photoshop: {
     closeDocument: vi.fn(),
     deleteLayers: vi.fn(),
+    deleteTaskLayers: vi.fn(),
     getActiveDocumentId: vi.fn(),
     getSelectionPixels: vi.fn(),
     groupLayers: vi.fn(),
     hasActiveSelection: vi.fn(),
     moveActiveLayerToTop: vi.fn(),
+    renameLayer: vi.fn(),
     onBatchAddLayer: vi.fn(),
     placeImageIntoSelection: vi.fn(),
     setSelectionBounds: vi.fn(),
@@ -188,6 +190,8 @@ beforeEach(() => {
   boundary.photoshop.getSelectionPixels.mockResolvedValue(selection(""));
   boundary.photoshop.getActiveDocumentId.mockResolvedValue(7);
   boundary.photoshop.deleteLayers.mockResolvedValue(undefined);
+  boundary.photoshop.deleteTaskLayers.mockResolvedValue(undefined);
+  boundary.photoshop.renameLayer.mockResolvedValue(undefined);
   boundary.photoshop.hasActiveSelection.mockResolvedValue(true);
   boundary.photoshop.placeImageIntoSelection.mockResolvedValue({ layerID: 101 });
   boundary.photoshop.groupLayers.mockResolvedValue(undefined);
