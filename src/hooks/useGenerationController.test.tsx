@@ -9,10 +9,14 @@ const boundary = vi.hoisted(() => ({
   forgeClient: {
     fetchOptions: vi.fn(),
     fetchProgress: vi.fn(),
-    img2img: vi.fn()
+    img2img: vi.fn(),
+    cancel: vi.fn().mockReturnValue(false),
+    cancelAll: vi.fn().mockReturnValue(0)
   },
   geminiClient: {
-    editImage: vi.fn()
+    editImage: vi.fn(),
+    cancel: vi.fn().mockReturnValue(false),
+    cancelAll: vi.fn().mockReturnValue(0)
   },
   photoshop: {
     closeDocument: vi.fn(),
@@ -110,8 +114,7 @@ const customizeForm = (base: GenerationForm, prompt: string, offset: number): Ge
   seed: 1_000 + offset,
   clipSkip: offset,
   restoreFaces: offset % 2 === 0,
-  tiling: offset % 2 === 1,
-  presetShortcut: `preset-${offset}`
+  tiling: offset % 2 === 1
 });
 
 const setCompleteForm = (controller: GenerationControllerState, next: GenerationForm) => {
@@ -294,7 +297,7 @@ describe("useGenerationController generation history integration", () => {
     await act(async () => rendered.getController().runBatch());
 
     expect(rendered.getController().status).toBe("success");
-    expect(rendered.getController().batchItems).toEqual([]);
+    expect(rendered.getController().batchItems.map((item) => item.status)).toEqual(["success", "success"]);
     expect(rendered.getController().history).toHaveLength(2);
     expect(rendered.getController().history.map(({ params }) => params)).toEqual([second, first]);
     expect(boundary.storage.writeJsonFile).toHaveBeenCalledTimes(2);
@@ -366,7 +369,7 @@ describe("useGenerationController generation history integration", () => {
 
       expect({ status: rendered.getController().status, error: rendered.getController().error })
         .toEqual({ status: "success", error: null });
-      expect(rendered.getController().batchItems).toEqual([]);
+      expect(rendered.getController().batchItems.every((item) => item.status === "success")).toBe(true);
       expect(rendered.getController().toast).toMatchObject({ type: "warning" });
     }
   );

@@ -70,7 +70,44 @@ export interface ProgressResponse {
 
 interface RequestOptions extends RequestInit {
   timeoutMs?: number;
+  taskId?: string;
 }
+
+export interface RequestTaskOptions {
+  taskId?: string;
+  signal?: AbortSignal;
+}
+
+export class PxdRequestCancelledError extends Error {
+  readonly code = "CANCELLED";
+  readonly taskId?: string;
+
+  constructor(taskId?: string) {
+    super(taskId ? `Request cancelled for task ${taskId}` : "Request cancelled");
+    this.name = "PxdRequestCancelledError";
+    this.taskId = taskId;
+  }
+}
+
+export class PxdRequestTimeoutError extends Error {
+  readonly code = "TIMEOUT";
+  readonly timeoutMs: number;
+  readonly taskId?: string;
+
+  constructor(timeoutMs: number, taskId?: string) {
+    super(`Request timed out after ${timeoutMs}ms`);
+    this.name = "PxdRequestTimeoutError";
+    this.timeoutMs = timeoutMs;
+    this.taskId = taskId;
+  }
+}
+
+export const isPxdRequestCancelledError = (error: unknown): error is PxdRequestCancelledError =>
+  error instanceof PxdRequestCancelledError;
+
+const rethrowCancellation = (error: unknown) => {
+  if (isPxdRequestCancelledError(error)) throw error;
+};
 
 const DEFAULT_TIMEOUT = 15_000;
 const BASE_RESOLUTION = 512 * 512;
@@ -111,37 +148,6 @@ const computeDynamicTimeout = (steps: number, width: number, height: number, opt
   return Math.round(clampNumber(budget, minMs, maxMs));
 };
 
-const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number): Promise<T> => {
-  let timer: number;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = window.setTimeout(() => {
-      reject(new Error(`Request timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-  });
-  try {
-    const result = await Promise.race([promise, timeout]);
-    return result;
-  } finally {
-    window.clearTimeout(timer);
-  }
-};
-
-const requestJson = async <T>(url: string, init: RequestOptions = {}): Promise<T> => {
-  const { timeoutMs = DEFAULT_TIMEOUT, ...rest } = init;
-  const startedAt = Date.now();
-  try {
-    const response = await withTimeout(fetch(url, rest), timeoutMs);
-    if (!response.ok) {
-      const message = await response.text();
-      const elapsed = Date.now() - startedAt;
-      throw new Error(`Request failed (${response.status}) after ${elapsed}ms (timeout ${timeoutMs}ms): ${message}`);
-    }
-    return (await response.json()) as T;
-  } catch (error) {
-    throw error;
-  }
-};
-
 const sanitizeBaseUrl = (input: string) => input.replace(/\/+$/, "");
 
 const toOption = (label: string, value: string, raw: unknown): SdOption => ({
@@ -165,13 +171,30 @@ const extractLabel = (item: Record<string, unknown>, keys: string[]) => {
   return "";
 };
 
-const normalizeOptions = (collection: unknown, labelKeys: string[], valueKey?: string): SdOption[] => {
+const extractOptionList = (payload: unknown, keys: string[]): unknown[] | null => {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== "object") return null;
+  const objectPayload = payload as Record<string, unknown>;
+  for (const key of keys) {
+    if (Array.isArray(objectPayload[key])) {
+      return objectPayload[key] as unknown[];
+    }
+  }
+  return null;
+};
+
+export const normalizeOptions = (collection: unknown, labelKeys: string[], valueKey?: string): SdOption[] => {
   if (!Array.isArray(collection)) return [];
   return collection
     .map((item) => {
+      if (typeof item === "string") {
+        const value = item.trim();
+        return value ? toOption(value, value, item) : null;
+      }
       if (!item || typeof item !== "object") return null;
       const objectItem = item as Record<string, unknown>;
-      const label = extractLabel(objectItem, labelKeys) || valueKey ? String(objectItem[valueKey ?? labelKeys[0]] ?? "") : "";
+      const base = extractLabel(objectItem, labelKeys);
+      const label = base || (valueKey ? String(objectItem[valueKey] ?? "") : "");
       const value =
         valueKey && typeof objectItem[valueKey] === "string"
           ? (objectItem[valueKey] as string)
@@ -257,6 +280,15 @@ const buildImg2ImgPayload = (params: Img2ImgParams) => {
 
 export const createPxdClient = (settings: AppSettings) => {
   const baseURL = sanitizeBaseUrl(settings.sdEndpoint);
+  const controllers = new Map<string, AbortController>();
+  const abortCauses = new WeakMap<AbortController, "cancelled" | "timeout">();
+  let requestSequence = 0;
+  const abortWithCause = (controller: AbortController, cause: "cancelled" | "timeout") => {
+    if (abortCauses.has(controller) || controller.signal.aborted) return false;
+    abortCauses.set(controller, cause);
+    controller.abort();
+    return true;
+  };
   const toMilliseconds = (seconds: number | undefined, fallbackMs: number) => {
     if (!Number.isFinite(seconds)) return fallbackMs;
     return Math.max(0, Math.round((seconds as number) * 1000));
@@ -276,8 +308,79 @@ export const createPxdClient = (settings: AppSettings) => {
     return `${baseURL}${path}`;
   };
 
-  const fetchJson = async <T>(path: string, init?: RequestOptions) => {
-    return await requestJson<T>(makeUrl(path), init);
+  const fetchJson = async <T>(path: string, init: RequestOptions = {}) => {
+    const {
+      timeoutMs = DEFAULT_TIMEOUT,
+      taskId,
+      signal: externalSignal,
+      ...requestInit
+    } = init;
+    const requestId = taskId ?? `pxd-request-${++requestSequence}`;
+    const previousController = controllers.get(requestId);
+    if (previousController) {
+      abortWithCause(previousController, "cancelled");
+    }
+
+    const controller = new AbortController();
+    controllers.set(requestId, controller);
+    const abortFromExternal = () => abortWithCause(controller, "cancelled");
+    if (externalSignal?.aborted) abortFromExternal();
+    else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
+    const timeout = setTimeout(() => {
+      if (controllers.get(requestId) === controller) {
+        abortWithCause(controller, "timeout");
+      }
+    }, timeoutMs);
+    const startedAt = Date.now();
+
+    try {
+      const response = await fetch(makeUrl(path), {
+        ...requestInit,
+        signal: controller.signal
+      });
+      if (controller.signal.aborted) {
+        throw controller.signal.reason;
+      }
+      if (!response.ok) {
+        const message = await response.text();
+        const elapsed = Date.now() - startedAt;
+        throw new Error(`Request failed (${response.status}) after ${elapsed}ms (timeout ${timeoutMs}ms): ${message}`);
+      }
+      const data = (await response.json()) as T;
+      if (controller.signal.aborted) {
+        throw controller.signal.reason;
+      }
+      return data;
+    } catch (error) {
+      if (controller.signal.aborted) {
+        if (abortCauses.get(controller) === "timeout") {
+          throw new PxdRequestTimeoutError(timeoutMs, taskId);
+        }
+        throw new PxdRequestCancelledError(taskId);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      externalSignal?.removeEventListener("abort", abortFromExternal);
+      if (controllers.get(requestId) === controller) {
+        controllers.delete(requestId);
+      }
+    }
+  };
+
+  const cancel = (taskId: string) => {
+    const controller = controllers.get(taskId);
+    if (!controller) return false;
+    abortWithCause(controller, "cancelled");
+    return true;
+  };
+
+  const cancelAll = () => {
+    const activeControllers = [...controllers.values()];
+    for (const controller of activeControllers) {
+      abortWithCause(controller, "cancelled");
+    }
+    return activeControllers.length;
   };
 
   return {
@@ -293,26 +396,34 @@ export const createPxdClient = (settings: AppSettings) => {
     },
     async fetchOptions(): Promise<SdOptions> {
       const modelsPromise = fetchJson<unknown[]>("/sdapi/v1/sd-models").catch((error) => {
+        rethrowCancellation(error);
         console.warn("Failed to fetch models", error);
         return [];
       });
       const vaePromise = (async () => {
-        const viaModules = await fetchJson<unknown[]>("/sdapi/v1/sd-modules").catch(() => null);
+        const viaModules = await fetchJson<unknown[]>("/sdapi/v1/sd-modules").catch((error) => {
+          rethrowCancellation(error);
+          return null;
+        });
         if (viaModules && Array.isArray(viaModules)) return viaModules;
         return await fetchJson<unknown[]>("/sdapi/v1/sd-vae").catch((error) => {
+          rethrowCancellation(error);
           console.warn("Failed to fetch VAE list", error);
           return [];
         });
       })();
       const loraPromise = fetchJson<unknown[]>("/sdapi/v1/loras").catch((error) => {
+        rethrowCancellation(error);
         console.warn("Failed to fetch loras", error);
         return [];
       });
       const samplerPromise = fetchJson<unknown[]>("/sdapi/v1/samplers").catch((error) => {
+        rethrowCancellation(error);
         console.warn("Failed to fetch samplers", error);
         return [];
       });
       const schedulerPromise = fetchJson<unknown[]>("/sdapi/v1/schedulers").catch((error) => {
+        rethrowCancellation(error);
         console.warn("Failed to fetch schedulers", error);
         return [];
       });
@@ -324,20 +435,22 @@ export const createPxdClient = (settings: AppSettings) => {
           "/controlnet/control_types"
         ];
         for (const endpoint of endpoints) {
-          const result = await fetchJson<unknown>(endpoint).catch(() => null);
-          if (!result) continue;
-          if (Array.isArray(result)) return result;
-          if (result && typeof result === "object") {
-            const values = Object.values(result);
-            if (Array.isArray(values)) return values.flat();
-          }
+          const result = await fetchJson<unknown>(endpoint).catch((error) => {
+            rethrowCancellation(error);
+            return null;
+          });
+          const list = extractOptionList(result, ["model_list", "models"]);
+          if (list) return list;
         }
         return [];
       })();
-      const controlNetModulesPromise = fetchJson<unknown[]>("/controlnet/module_list").catch((error) => {
-        console.warn("Failed to fetch controlnet modules", error);
-        return [];
-      });
+      const controlNetModulesPromise = fetchJson<unknown>("/controlnet/module_list")
+        .then((result) => extractOptionList(result, ["module_list", "modules"]) ?? [])
+        .catch((error) => {
+          rethrowCancellation(error);
+          console.warn("Failed to fetch controlnet modules", error);
+          return [];
+        });
 
       const [models, vaes, loras, samplers, schedulers, controlNetModels, controlNetModules] = await Promise.all([
         modelsPromise,
@@ -359,17 +472,18 @@ export const createPxdClient = (settings: AppSettings) => {
         controlNetModules: normalizeOptions(controlNetModules, ["module", "name"])
       };
     },
-    async txt2img(params: Txt2ImgParams): Promise<Txt2ImgResponse> {
+    async txt2img(params: Txt2ImgParams, options: RequestTaskOptions = {}): Promise<Txt2ImgResponse> {
       const payload = buildTxt2ImgPayload(params);
       const timeoutMs = computeDynamicTimeout(params.steps, params.width, params.height, timeoutOptions);
       return await fetchJson<Txt2ImgResponse>("/sdapi/v1/txt2img", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        timeoutMs
+        timeoutMs,
+        ...options
       });
     },
-    async img2img(params: Img2ImgParams): Promise<Txt2ImgResponse> {
+    async img2img(params: Img2ImgParams, options: RequestTaskOptions = {}): Promise<Txt2ImgResponse> {
       const baseImage = dataUrlToBase64(params.baseImage);
       const timeoutMs = computeDynamicTimeout(params.steps, params.width, params.height, timeoutOptions);
       const payload = buildImg2ImgPayload({
@@ -387,7 +501,8 @@ export const createPxdClient = (settings: AppSettings) => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        timeoutMs
+        timeoutMs,
+        ...options
       });
     },
     async fetchProgress(): Promise<ProgressResponse | null> {
@@ -397,9 +512,12 @@ export const createPxdClient = (settings: AppSettings) => {
           timeoutMs: 5_000
         });
       } catch (error) {
+        if (isPxdRequestCancelledError(error)) return null;
         console.warn("Progress polling failed", error);
         return null;
       }
-    }
+    },
+    cancel,
+    cancelAll
   };
 };
