@@ -127,6 +127,58 @@ describe("preset catalog", () => {
     );
   });
 
+  it("overwrites an external file name in place and keeps save-as separate", async () => {
+    const files = new Map<string, unknown>([["legacy.json", {
+      version: 2,
+      createdAt: "2025-01-01T00:00:00.000Z",
+      kind: "forge",
+      title: "自定义标题",
+      category: "用户预设",
+      data: { steps: 20 }
+    }]]);
+    folder.getEntries.mockImplementation(async () =>
+      Array.from(files.keys(), (name) => ({ isFile: true, name }))
+    );
+    storage.readJsonEntry.mockImplementation(async (_folder, fileName, fallback) =>
+      files.get(fileName) ?? fallback
+    );
+    storage.writeJsonEntry.mockImplementation(async (_folder, fileName, payload) => {
+      files.set(`${fileName}.bak`, payload);
+      files.set(fileName, payload);
+    });
+    const preset: ForgePreset = {
+      kind: "forge",
+      title: "ignored",
+      category: "用户预设",
+      data: { steps: 36 }
+    };
+
+    const overwritten = await savePresetFile("自定义标题", preset, { targetFileName: "legacy.json" });
+    let users = (await listPresetMetas()).filter(({ isFactory }) => !isFactory);
+
+    expect(overwritten.meta).toMatchObject({ name: "自定义标题", fileName: "legacy.json" });
+    expect(users.map(({ name, fileName }) => ({ name, fileName }))).toEqual([
+      { name: "自定义标题", fileName: "legacy.json" }
+    ]);
+    expect(files.has("自定义标题.json")).toBe(false);
+    expect(files.get("legacy.json.bak")).toEqual(files.get("legacy.json"));
+
+    const copy = await savePresetFile("新副本", preset);
+    users = (await listPresetMetas()).filter(({ isFactory }) => !isFactory);
+    expect(copy.meta.fileName).toBe("新副本.json");
+    expect(users.map(({ fileName }) => fileName).sort()).toEqual(["legacy.json", "新副本.json"].sort());
+  });
+
+  it("rejects factory overwrite targets before touching writable storage", async () => {
+    await expect(savePresetFile("不能覆盖", {
+      kind: "forge",
+      title: "不能覆盖",
+      data: {}
+    }, { targetFileName: "factory:../assets/presets/forge/detail-recovery.json" }))
+      .rejects.toThrow("出厂预设为只读");
+    expect(storage.getOrCreateFolder).not.toHaveBeenCalled();
+  });
+
   it("rejects factory deletion before touching writable storage", async () => {
     await expect(deletePresetFile("factory:../assets/presets/test.json"))
       .rejects.toThrow("出厂预设为只读");

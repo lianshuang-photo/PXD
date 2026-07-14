@@ -198,7 +198,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     }
 
     try {
-      await savePreset(targetPreset.name);
+      await savePreset(targetPreset.name, targetPreset.fileName);
       await loadPresets();
       setConfirmOverwrite(false);
       clearConfirmTimer();

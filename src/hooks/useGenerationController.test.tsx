@@ -667,4 +667,33 @@ describe("useGenerationController preset schemas", () => {
     expect(caught).toBeInstanceOf(Error);
     expect(boundary.deletePresetFile).not.toHaveBeenCalled();
   });
+
+  it("preserves the selected user file name when overwriting a custom title", async () => {
+    const userMeta = {
+      name: "自定义标题",
+      fileName: "legacy.json",
+      createdAt: "",
+      kind: "forge" as const,
+      category: "用户预设",
+      isFactory: false
+    };
+    boundary.listPresetMetas.mockResolvedValue([userMeta]);
+    boundary.savePresetFile.mockResolvedValueOnce({
+      meta: userMeta,
+      preset: { kind: "forge", title: userMeta.name, data: {} },
+      version: 2
+    });
+    const rendered = trackedRender();
+    await flush();
+    act(() => rendered.getController().setSelectedPreset(userMeta.fileName));
+
+    await act(async () => rendered.getController().savePreset(userMeta.name, userMeta.fileName));
+
+    expect(boundary.savePresetFile).toHaveBeenCalledWith(
+      userMeta.name,
+      expect.objectContaining({ kind: "forge", title: userMeta.name }),
+      { targetFileName: userMeta.fileName }
+    );
+    expect(rendered.getController().selectedPreset).toBe(userMeta.fileName);
+  });
 });

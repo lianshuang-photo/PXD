@@ -38,6 +38,10 @@ export interface ForgePreset<TData = Record<string, unknown>> extends PresetBase
 
 export type PresetDefinition<TData = Record<string, unknown>> = GeminiPreset | ForgePreset<TData>;
 
+export interface SavePresetOptions {
+  targetFileName?: string;
+}
+
 interface PersistedPresetDocument<TData = Record<string, unknown>> {
   version: number;
   createdAt: string;
@@ -286,12 +290,22 @@ export const loadPresetFile = async <TData = Record<string, unknown>>(
 
 export const savePresetFile = async <TData = Record<string, unknown>>(
   name: string,
-  preset: PresetDefinition<TData>
+  preset: PresetDefinition<TData>,
+  options: SavePresetOptions = {}
 ): Promise<ResolvedPreset<TData>> => {
-  const folder = await ensurePresetFolder();
-  if (!folder) throw new Error("Preset folder is unavailable");
   const sanitized = sanitizeFileName(name).trim().slice(0, 80);
   if (!sanitized) throw new Error("Preset name is required");
+  const hasTargetFileName = options.targetFileName !== undefined;
+  const targetFileName = options.targetFileName?.trim() ?? "";
+  if (targetFileName.toLowerCase().startsWith(FACTORY_PREFIX)) {
+    throw new Error("出厂预设为只读，不能覆盖");
+  }
+  if (hasTargetFileName && (!/^[^/\\\0]+\.json$/i.test(targetFileName) || targetFileName.toLowerCase().endsWith(".json.bak"))) {
+    throw new Error("Preset target file name is invalid");
+  }
+  const fileName = targetFileName || `${sanitized}.json`;
+  const folder = await ensurePresetFolder();
+  if (!folder) throw new Error("Preset folder is unavailable");
   const normalized = normalizePresetDocument<TData>({
     ...preset,
     title: sanitized,
@@ -299,7 +313,6 @@ export const savePresetFile = async <TData = Record<string, unknown>>(
     createdAt: new Date().toISOString()
   });
   if (!normalized) throw new Error("Preset data is invalid");
-  const fileName = `${sanitized}.json`;
   await bridge.writeJsonEntry(folder, fileName, toPersistedDocument(normalized));
   return {
     meta: toMeta(normalized, fileName, false),

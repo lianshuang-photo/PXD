@@ -403,7 +403,7 @@ export interface GenerationControllerState {
   selectedPreset: string | null;
   loadPresets: () => Promise<void>;
   applyPreset: (fileName: string) => Promise<void>;
-  savePreset: (name: string) => Promise<void>;
+  savePreset: (name: string, targetFileName?: string) => Promise<void>;
   deletePreset: (fileName: string) => Promise<void>;
   setSelectedPreset: (name: string | null) => void;
   pushToast: (type: ToastType, message: string) => void;
@@ -1223,9 +1223,15 @@ export const useGenerationController = (
   );
 
   const savePreset = useCallback(
-    async (name: string) => {
+    async (name: string, targetFileName?: string) => {
       presetsLoadGateRef.current.assertReady("预设仍在加载，请稍后重试");
       const sourceMeta = presets.find((preset) => preset.fileName === selectedPreset);
+      const targetMeta = targetFileName
+        ? presets.find((preset) => preset.fileName === targetFileName)
+        : null;
+      if (targetFileName && (targetMeta?.isFactory || targetFileName.toLowerCase().startsWith("factory:"))) {
+        throw new Error("出厂预设为只读，不能覆盖");
+      }
       const normalizedForm = normalizeFormPrompts(form);
       const shared = {
         title: name,
@@ -1243,7 +1249,9 @@ export const useGenerationController = (
             kind: "forge",
             data: normalizedForm
           } satisfies ForgePreset<GenerationForm>;
-      const saved = await savePresetFile(name, preset);
+      const saved = targetFileName
+        ? await savePresetFile(name, preset, { targetFileName })
+        : await savePresetFile(name, preset);
       setSelectedPreset(saved.meta.fileName);
       await loadPresets();
       pushToast("success", `预设「${name}」已保存`);
