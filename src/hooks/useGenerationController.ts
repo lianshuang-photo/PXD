@@ -38,6 +38,7 @@ import {
 import { LatestLoadGate } from "../services/loadGate";
 import { GenerationRunGate } from "../services/generationRunGate";
 import { translateText } from "../services/translator";
+import { normalizePromptParams, sanitizePrompt } from "../services/promptParams";
 
 export type GenerationStatus = "idle" | "running" | "success" | "error";
 export type ToastType = "info" | "success" | "warning" | "error";
@@ -138,6 +139,28 @@ const DEFAULT_FORM: GenerationForm = {
   tiling: false
 };
 
+const PROMPT_FORM_KEYS = new Set<keyof GenerationForm>([
+  "positivePrompt",
+  "negativePrompt",
+  "extraPrompt"
+]);
+
+const normalizePromptFormValue = <K extends keyof GenerationForm>(
+  key: K,
+  value: GenerationForm[K]
+): GenerationForm[K] => (
+  PROMPT_FORM_KEYS.has(key) && typeof value === "string"
+    ? normalizePromptParams(value) as GenerationForm[K]
+    : value
+);
+
+const normalizeFormPrompts = (form: GenerationForm): GenerationForm => ({
+  ...form,
+  positivePrompt: normalizePromptParams(form.positivePrompt),
+  negativePrompt: normalizePromptParams(form.negativePrompt),
+  extraPrompt: normalizePromptParams(form.extraPrompt)
+});
+
 const toDataUrl = (base64: string) => `data:image/png;base64,${base64}`;
 const dataUrlToBase64 = (dataUrl: string) => dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
 
@@ -219,10 +242,12 @@ const buildImg2ImgParams = (
   width: number,
   height: number
 ): Img2ImgParams => {
-  const effectivePrompt = [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim();
+  const effectivePrompt = sanitizePrompt(
+    [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim()
+  );
   return {
-    prompt: effectivePrompt || form.positivePrompt,
-    negativePrompt: form.negativePrompt,
+    prompt: effectivePrompt,
+    negativePrompt: sanitizePrompt(form.negativePrompt),
     steps: clampNumber(form.steps, 1, 150),
     cfgScale: clampNumber(form.cfgScale, 1, 30),
     sampler: form.sampler || undefined,
@@ -252,7 +277,9 @@ const buildEngineGenerateParams = (
   height: number,
   taskId?: string
 ): EngineGenerateParams => {
-  const prompt = [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim();
+  const prompt = sanitizePrompt(
+    [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim()
+  );
   return {
     prompt,
     baseImageBase64: dataUrlToBase64(selection.dataUrl),
@@ -403,7 +430,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     <K extends keyof GenerationForm>(key: K, value: GenerationForm[K]) => {
       setForm((prev) => ({
         ...prev,
-        [key]: value
+        [key]: normalizePromptFormValue(key, value)
       }));
     },
     []
@@ -482,7 +509,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       if (!appended) return prev;
       return {
         ...prev,
-        positivePrompt: value
+        positivePrompt: normalizePromptParams(value)
       };
     });
     pushToast("success", "已添加至正向提示词");
@@ -499,7 +526,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       if (!appended) return prev;
       return {
         ...prev,
-        negativePrompt: value
+        negativePrompt: normalizePromptParams(value)
       };
     });
     pushToast("success", "已添加至反向提示词");
@@ -515,7 +542,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       const { value } = appendPromptValue(prev.positivePrompt, extra);
       return {
         ...prev,
-        positivePrompt: value,
+        positivePrompt: normalizePromptParams(value),
         extraPrompt: ""
       };
     });
@@ -532,7 +559,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       const { value } = appendPromptValue(prev.negativePrompt, extra);
       return {
         ...prev,
-        negativePrompt: value,
+        negativePrompt: normalizePromptParams(value),
         extraPrompt: ""
       };
     });
@@ -912,7 +939,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
           ...file.data.form
         } as GenerationForm & { presetShortcut?: unknown };
         delete merged.presetShortcut;
-        return merged;
+        return normalizeFormPrompts(merged);
       });
       setSelectedPreset(file.meta.name);
       pushToast("success", `已应用预设「${file.meta.name}」`);
@@ -923,7 +950,7 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   const savePreset = useCallback(
     async (name: string) => {
       presetsLoadGateRef.current.assertReady("预设仍在加载，请稍后重试");
-      await savePresetFile<PresetPayload>(name, { form });
+      await savePresetFile<PresetPayload>(name, { form: normalizeFormPrompts(form) });
       setSelectedPreset(name);
       await loadPresets();
       pushToast("success", `预设「${name}」已保存`);
