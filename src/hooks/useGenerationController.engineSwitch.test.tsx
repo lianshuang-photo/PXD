@@ -9,6 +9,8 @@ import { DEFAULT_SETTINGS } from "../services/settings";
 const boundary = vi.hoisted(() => ({
   engine: null as unknown as GenerationEngine,
   getSelectionPixels: vi.fn(),
+  deleteLayers: vi.fn(),
+  getActiveDocumentId: vi.fn(),
   placeImageIntoSelection: vi.fn(),
   groupLayers: vi.fn(),
   moveActiveLayerToTop: vi.fn(),
@@ -21,6 +23,8 @@ vi.mock("./useGenerationEngine", () => ({
 
 vi.mock("../services/photoshop", () => ({
   closeDocument: vi.fn(),
+  deleteLayers: boundary.deleteLayers,
+  getActiveDocumentId: boundary.getActiveDocumentId,
   getSelectionPixels: boundary.getSelectionPixels,
   groupLayers: boundary.groupLayers,
   moveActiveLayerToTop: boundary.moveActiveLayerToTop,
@@ -90,6 +94,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   boundary.listPresetMetas.mockResolvedValue([]);
   boundary.placeImageIntoSelection.mockResolvedValue({ layerID: 1 });
+  boundary.deleteLayers.mockResolvedValue(undefined);
+  boundary.getActiveDocumentId.mockResolvedValue(7);
   boundary.groupLayers.mockResolvedValue(undefined);
   boundary.moveActiveLayerToTop.mockResolvedValue(undefined);
 });

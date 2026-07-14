@@ -57,7 +57,6 @@ interface TaskRecord {
   generation: number;
   controller: AbortController | null;
   networkActive: boolean;
-  timedOutGeneration: number | null;
   completion: Promise<GenerationTaskSnapshot>;
   resolveCompletion: (snapshot: GenerationTaskSnapshot) => void;
 }
@@ -100,6 +99,7 @@ export class GenerationTaskPool {
   private readonly timer: ReturnType<typeof setInterval>;
   private concurrency: number;
   private activeNetworks = 0;
+  private returnQueue: Promise<void> = Promise.resolve();
   private disposed = false;
 
   constructor(options: GenerationTaskPoolOptions = {}) {
@@ -158,7 +158,6 @@ export class GenerationTaskPool {
       generation: 0,
       controller: null,
       networkActive: false,
-      timedOutGeneration: null,
       completion: completion.promise,
       resolveCompletion: completion.resolve
     };
@@ -296,7 +295,6 @@ export class GenerationTaskPool {
     const timeoutMs = Math.max(1_000, Math.round(record.definition.timeoutSeconds * 1_000));
     record.controller = new AbortController();
     record.networkActive = true;
-    record.timedOutGeneration = null;
     this.activeNetworks += 1;
     record.snapshot = {
       ...record.snapshot,
@@ -323,17 +321,20 @@ export class GenerationTaskPool {
       if (!images.length) throw new Error("任务未返回图像");
       record.snapshot = {
         ...record.snapshot,
+        status: "returning",
         progress: 1,
         countdown: 0,
         images: images.slice(),
         error: undefined
       };
+      this.emit();
+      this.releaseNetwork(record);
       try {
         await record.definition.onResult?.(images.slice());
       } catch {
         // History and other consumers are best-effort and must not discard generated images.
       }
-      this.releaseNetwork(record);
+      if (record.generation !== generation) return;
       if (record.snapshot.autoReturn) {
         await this.attemptReturn(record, generation);
       } else {
@@ -343,13 +344,12 @@ export class GenerationTaskPool {
       }
     } catch (error) {
       if (record.generation !== generation) return;
-      const timedOut = record.timedOutGeneration === generation;
       const cancelled = record.definition.isCancelledError?.(error) || record.controller.signal.aborted;
       record.snapshot = {
         ...record.snapshot,
-        status: timedOut ? "error" : cancelled ? "cancelled" : "error",
+        status: cancelled ? "cancelled" : "error",
         countdown: 0,
-        error: timedOut ? "任务等待超时" : cancelled ? undefined : (record.definition.formatError ?? defaultFormatError)(error)
+        error: cancelled ? undefined : (record.definition.formatError ?? defaultFormatError)(error)
       };
       record.resolveCompletion({ ...record.snapshot });
       this.emit();
@@ -363,8 +363,11 @@ export class GenerationTaskPool {
     record.snapshot = { ...record.snapshot, status: "returning", error: undefined };
     this.emit();
     try {
-      await record.definition.returnImages(record.snapshot.images.slice(), {
-        isCurrent: () => record.generation === generation && record.snapshot.status === "returning"
+      await this.enqueueReturn(async () => {
+        if (record.generation !== generation || record.snapshot.status !== "returning") return;
+        await record.definition.returnImages(record.snapshot.images!.slice(), {
+          isCurrent: () => record.generation === generation && record.snapshot.status === "returning"
+        });
       });
       if (record.generation !== generation) return { ...record.snapshot };
       record.snapshot = { ...record.snapshot, status: "success", error: undefined };
@@ -393,6 +396,32 @@ export class GenerationTaskPool {
     this.pump();
   }
 
+  private async enqueueReturn<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.returnQueue.then(operation, operation);
+    this.returnQueue = result.then(() => undefined, () => undefined);
+    return await result;
+  }
+
+  private timeout(record: TaskRecord) {
+    if (record.snapshot.status !== "running") return;
+    record.generation += 1;
+    record.controller?.abort();
+    try {
+      record.definition.cancelNetwork?.();
+    } catch {
+      // Timeout state must not depend on a client cancellation hook.
+    }
+    this.releaseNetwork(record);
+    record.snapshot = {
+      ...record.snapshot,
+      status: "error",
+      countdown: 0,
+      error: "任务等待超时"
+    };
+    record.resolveCompletion({ ...record.snapshot });
+    this.emit();
+  }
+
   private tick() {
     const now = this.now();
     let changed = false;
@@ -410,15 +439,7 @@ export class GenerationTaskPool {
         };
         changed = true;
       }
-      if (remainingMs <= 0 && !record.controller?.signal.aborted) {
-        record.timedOutGeneration = record.generation;
-        record.controller?.abort();
-        try {
-          record.definition.cancelNetwork?.();
-        } catch {
-          // The aborted request will still settle through the normal error path.
-        }
-      }
+      if (remainingMs <= 0) this.timeout(record);
     }
     if (changed) this.emit();
   }

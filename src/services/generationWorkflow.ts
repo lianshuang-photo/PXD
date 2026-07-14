@@ -17,6 +17,12 @@ export interface GenerationWorkflowAdapters {
     options: { taskId?: string }
   ) => Promise<number | null>;
   moveActiveLayerToTop: (options: { layerId: number; taskId?: string }) => Promise<unknown>;
+  rollback?: (state: GenerationRollbackState) => Promise<void>;
+}
+
+export interface GenerationRollbackState {
+  placedLayerIds: number[];
+  groupLayerId: number | null;
 }
 
 export interface GenerationWorkflowTask {
@@ -78,31 +84,37 @@ const placeGeneratedImages = async (
   assertCurrent: () => void
 ): Promise<GenerationWorkflowResult> => {
   const placedLayerIds: number[] = [];
-  for (let index = 0; index < images.length; index += 1) {
+  let groupLayerId: number | null = null;
+  try {
+    for (let index = 0; index < images.length; index += 1) {
+      assertCurrent();
+      const info = await adapters.placeImage(toDataUrl(images[index]), index + 1, {
+        feather: task.feather,
+        taskId: task.taskId
+      });
+      assertCurrent();
+      const layerId = extractLayerId(info);
+      if (layerId) placedLayerIds.push(layerId);
+    }
+    let topLayerId: number | undefined = placedLayerIds[placedLayerIds.length - 1];
+    if (placedLayerIds.length > 1) {
+      assertCurrent();
+      groupLayerId = await adapters.groupLayers(placedLayerIds, task.groupName, {
+        taskId: task.taskId
+      });
+      topLayerId = groupLayerId ?? topLayerId;
+      assertCurrent();
+    }
+    if (topLayerId) {
+      assertCurrent();
+      await adapters.moveActiveLayerToTop({ layerId: topLayerId, taskId: task.taskId });
+    }
     assertCurrent();
-    const info = await adapters.placeImage(toDataUrl(images[index]), index + 1, {
-      feather: task.feather,
-      taskId: task.taskId
-    });
-    assertCurrent();
-    const layerId = extractLayerId(info);
-    if (layerId) placedLayerIds.push(layerId);
+    return { images, placedLayerIds };
+  } catch (error) {
+    await adapters.rollback?.({ placedLayerIds: placedLayerIds.slice(), groupLayerId }).catch(() => undefined);
+    throw error;
   }
-  let topLayerId: number | undefined = placedLayerIds[placedLayerIds.length - 1];
-  if (placedLayerIds.length > 1) {
-    assertCurrent();
-    const groupId = await adapters.groupLayers(placedLayerIds, task.groupName, {
-      taskId: task.taskId
-    });
-    topLayerId = groupId ?? topLayerId;
-    assertCurrent();
-  }
-  if (topLayerId) {
-    assertCurrent();
-    await adapters.moveActiveLayerToTop({ layerId: topLayerId, taskId: task.taskId });
-  }
-  assertCurrent();
-  return { images, placedLayerIds };
 };
 
 export const returnGenerationImages = async (

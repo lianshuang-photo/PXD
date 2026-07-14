@@ -11,7 +11,13 @@ const boundary = vi.hoisted(() => ({
 
 vi.mock("./uxpBridge", () => ({ bridge: boundary.bridge }));
 
-import { closeGeneratedDocument, createGeneratedDocument, groupLayers } from "./photoshop";
+import {
+  closeGeneratedDocument,
+  createGeneratedDocument,
+  deleteLayers,
+  getActiveDocumentId,
+  groupLayers
+} from "./photoshop";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -116,5 +122,21 @@ describe("createGeneratedDocument", () => {
     await expect(groupLayers([101, 102], "Generated", {
       requireGroup: true
     })).rejects.toThrow("Photoshop 未创建预期的图层组");
+  });
+
+  it("reads the active document and deletes only requested rollback layers", async () => {
+    const batchPlay = vi.fn().mockResolvedValue([]);
+    boundary.bridge.photoshop = {
+      app: { batchPlay, activeDocument: { id: 88 } },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+
+    await expect(getActiveDocumentId()).resolves.toBe(88);
+    await deleteLayers([301, 302, 301, 0]);
+
+    expect(batchPlay).toHaveBeenCalledWith([
+      { _obj: "delete", _target: [{ _ref: "layer", _id: 301 }] },
+      { _obj: "delete", _target: [{ _ref: "layer", _id: 302 }] }
+    ], {});
   });
 });

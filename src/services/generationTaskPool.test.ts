@@ -78,6 +78,66 @@ describe("GenerationTaskPool", () => {
     expect(Object.values(pool.getSnapshot()).every(({ status }) => status === "success")).toBe(true);
   });
 
+  it("serializes complete return workflows even when network work finishes together", async () => {
+    const firstReturn = deferred<void>();
+    const events: string[] = [];
+    const firstCompletion = pool.enqueue(task("one", async () => ["ONE"], {
+      returnImages: async () => {
+        events.push("one:start");
+        await firstReturn.promise;
+        events.push("one:end");
+      }
+    }));
+    const secondCompletion = pool.enqueue(task("two", async () => ["TWO"], {
+      returnImages: async () => {
+        events.push("two:start");
+        await Promise.resolve();
+        events.push("two:end");
+      }
+    }));
+    await flush();
+
+    expect(events).toEqual(["one:start"]);
+    firstReturn.resolve();
+    await Promise.all([firstCompletion, secondCompletion]);
+    expect(events).toEqual(["one:start", "one:end", "two:start", "two:end"]);
+  });
+
+  it("releases network capacity before a slow best-effort result callback finishes", async () => {
+    pool.setConcurrency(1);
+    const history = deferred<void>();
+    const next = deferred<string[]>();
+    const started: string[] = [];
+    const firstCompletion = pool.enqueue(task("one", async () => {
+      started.push("one");
+      return ["ONE"];
+    }, { onResult: () => history.promise }));
+    const secondCompletion = pool.enqueue(task("two", async () => {
+      started.push("two");
+      return next.promise;
+    }));
+    await flush();
+
+    expect(started).toEqual(["one", "two"]);
+    expect(pool.activeCount).toBe(1);
+    history.resolve();
+    next.resolve(["TWO"]);
+    await Promise.all([firstCompletion, secondCompletion]);
+  });
+
+  it("keeps a successful task successful when its best-effort result callback fails", async () => {
+    const completion = pool.enqueue(task("history-failure", async () => ["IMAGE"], {
+      onResult: vi.fn().mockRejectedValue(new Error("history failed"))
+    }));
+
+    expect((await completion).status).toBe("success");
+    expect(pool.getSnapshot()["history-failure"]).toMatchObject({
+      status: "success",
+      images: ["IMAGE"],
+      error: undefined
+    });
+  });
+
   it("cancels one task without cancelling or committing stale results from another", async () => {
     const first = deferred<string[]>();
     const second = deferred<string[]>();
@@ -170,13 +230,10 @@ describe("GenerationTaskPool", () => {
     expect(pool.getSnapshot().retry.attempt).toBe(2);
   });
 
-  it("extends a live countdown and times out only the selected task", async () => {
+  it("extends a live countdown and immediately times out a request that ignores abort", async () => {
     const never = deferred<string[]>();
     const cancelNetwork = vi.fn();
-    const completion = pool.enqueue(task("slow", ({ signal }) => {
-      signal.addEventListener("abort", () => never.reject(new Error("aborted")), { once: true });
-      return never.promise;
-    }, {
+    const completion = pool.enqueue(task("slow", () => never.promise, {
       timeoutSeconds: 2,
       cancelNetwork
     }));
@@ -193,6 +250,36 @@ describe("GenerationTaskPool", () => {
     expect((await completion).status).toBe("error");
     expect(pool.getSnapshot().slow.error).toBe("任务等待超时");
     expect(cancelNetwork).toHaveBeenCalledOnce();
+    expect(pool.activeCount).toBe(0);
+    never.resolve(["STALE"]);
+    await flush();
+    expect(pool.getSnapshot().slow.status).toBe("error");
+  });
+
+  it("continues queued work when every network slot times out while ignoring abort", async () => {
+    const hung = [deferred<string[]>(), deferred<string[]>()];
+    const started: string[] = [];
+    const completions = hung.map((request, index) => pool.enqueue(task(`hung-${index}`, async () => {
+      started.push(`hung-${index}`);
+      return request.promise;
+    }, { timeoutSeconds: 1 })));
+    const queued = pool.enqueue(task("queued", async () => {
+      started.push("queued");
+      return ["QUEUED"];
+    }, { timeoutSeconds: 10 }));
+    await flush();
+    expect(started).toEqual(["hung-0", "hung-1"]);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((await queued).status).toBe("success");
+    expect(started).toEqual(["hung-0", "hung-1", "queued"]);
+    expect((await Promise.all(completions)).map(({ status }) => status)).toEqual(["error", "error"]);
+    expect(pool.activeCount).toBe(0);
+
+    hung.forEach((request) => request.resolve(["STALE"]));
+    await flush();
+    expect(pool.getSnapshot()["hung-0"].status).toBe("error");
+    expect(pool.getSnapshot()["hung-1"].status).toBe("error");
   });
 
   it("queues above a changed limit and starts work when capacity increases", async () => {

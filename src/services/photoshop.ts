@@ -693,6 +693,36 @@ export const moveActiveLayerToTop = (
   options: MoveLayerOptions
 ): Promise<void> => runTransaction(() => moveActiveLayerToTopUnlocked(options.layerId), options);
 
+const getActiveDocumentIdUnlocked = async () => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const documentId = Number(photoshop.app.activeDocument?.id);
+  return Number.isFinite(documentId) && documentId > 0 ? documentId : null;
+};
+
+export const getActiveDocumentId = (
+  options: PhotoshopOperationOptions = {}
+): Promise<number | null> => runTransaction(getActiveDocumentIdUnlocked, options);
+
+const deleteLayersUnlocked = async (layerIds: number[]) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const ids = uniqueLayerIds(layerIds);
+  if (!ids.length) return;
+  await executeAsModalUnlocked(photoshop, async () => {
+    await photoshop.app.batchPlay(
+      ids.map((layerId) => ({
+        _obj: "delete",
+        _target: [{ _ref: "layer", _id: layerId }]
+      })),
+      {}
+    );
+  }, { commandName: "回滚 PXD 生成图层" });
+};
+
+export const deleteLayers = (
+  layerIds: number[],
+  options: PhotoshopOperationOptions = {}
+): Promise<void> => runTransaction(() => deleteLayersUnlocked(layerIds), options);
+
 const closeDocumentUnlocked = async (docId: number, activeDocId: number, newLayerId: number) => {
   const jsx = `
         try {

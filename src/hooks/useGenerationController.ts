@@ -24,6 +24,8 @@ import {
   closeDocument,
   closeGeneratedDocument,
   createGeneratedDocument,
+  deleteLayers,
+  getActiveDocumentId,
   getSelectionPixels,
   groupLayers,
   hasActiveSelection,
@@ -136,10 +138,7 @@ const EMPTY_OPTIONS: SdOptions = {
 const GENERATION_WORKFLOW_ADAPTERS = {
   placeImage: placeImageIntoSelection,
   groupLayers: (layerIds: number[], groupName: string | undefined, options: { taskId?: string }) =>
-    groupLayers(layerIds, groupName, options).catch((error) => {
-      ignoreBestEffortPhotoshopError("groupLayers failed", error);
-      return null;
-    }),
+    groupLayers(layerIds, groupName, { ...options, requireGroup: true }),
   moveActiveLayerToTop
 };
 
@@ -808,6 +807,7 @@ export const useGenerationController = (
 
   const enqueuePreparedTask = useCallback((prepared: PreparedPoolTask) => {
     let generatedDocument: GeneratedDocumentSession | null = null;
+    let returnOriginDocumentId: number | null = null;
     const timeoutSeconds = Math.max(
       5,
       prepared.settings.timeoutMaxSeconds * prepared.settings.timeoutMultiplier
@@ -826,7 +826,24 @@ export const useGenerationController = (
       timeoutMs: 24 * 60 * 60 * 1_000
     };
     const adapters = prepared.selection
-      ? GENERATION_WORKFLOW_ADAPTERS
+      ? {
+          ...GENERATION_WORKFLOW_ADAPTERS,
+          rollback: async ({ placedLayerIds, groupLayerId }: {
+            placedLayerIds: number[];
+            groupLayerId: number | null;
+          }) => {
+            const rollbackIds = groupLayerId ? [groupLayerId] : placedLayerIds;
+            try {
+              if (rollbackIds.length) {
+                await deleteLayers(rollbackIds, { taskId: prepared.id });
+              }
+            } finally {
+              if (returnOriginDocumentId) {
+                await switchToDocument(returnOriginDocumentId, { taskId: prepared.id });
+              }
+            }
+          }
+        }
       : {
           ...GENERATION_WORKFLOW_ADAPTERS,
           placeImage: async (
@@ -848,6 +865,16 @@ export const useGenerationController = (
               generatedDocument.documentId,
               { taskId: options.taskId }
             );
+          },
+          rollback: async () => {
+            if (!generatedDocument) return;
+            const session = generatedDocument;
+            await closeGeneratedDocument(
+              session.documentId,
+              session.previousDocumentId,
+              { taskId: prepared.id }
+            );
+            generatedDocument = null;
           }
         };
 
@@ -863,6 +890,7 @@ export const useGenerationController = (
         return result.images;
       },
       returnImages: async (images, context) => {
+        returnOriginDocumentId = await getActiveDocumentId({ taskId: prepared.id });
         await returnGenerationImages(
           prepared.engine,
           images,
@@ -878,6 +906,7 @@ export const useGenerationController = (
           adapters
         );
         generatedDocument = null;
+        returnOriginDocumentId = null;
       },
       cancelNetwork: () => {
         prepared.engine.cancel(prepared.id);
@@ -888,13 +917,13 @@ export const useGenerationController = (
       cleanup: async () => {
         if (!generatedDocument) return;
         const session = generatedDocument;
-        generatedDocument = null;
         try {
           await closeGeneratedDocument(
             session.documentId,
             session.previousDocumentId,
             { taskId: prepared.id }
           );
+          generatedDocument = null;
         } catch (caught) {
           console.warn("Failed to clean up generated document", caught);
         }
