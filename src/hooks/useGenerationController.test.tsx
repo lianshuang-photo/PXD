@@ -20,6 +20,7 @@ const boundary = vi.hoisted(() => ({
   },
   photoshop: {
     closeDocument: vi.fn(),
+    deleteLayers: vi.fn(),
     getSelectionPixels: vi.fn(),
     groupLayers: vi.fn(),
     hasActiveSelection: vi.fn(),
@@ -68,6 +69,7 @@ import {
   type GenerationControllerState,
   type GenerationForm
 } from "./useGenerationController";
+import { createDefaultPosterDraft } from "../services/posterWizard";
 
 const emptyOptions = {
   models: [],
@@ -184,6 +186,7 @@ beforeEach(() => {
   boundary.forgeClient.img2img.mockResolvedValue({ images: ["FORGE_RESULT"] });
   boundary.geminiClient.editImage.mockResolvedValue("GEMINI_RESULT");
   boundary.photoshop.getSelectionPixels.mockResolvedValue(selection(""));
+  boundary.photoshop.deleteLayers.mockResolvedValue(undefined);
   boundary.photoshop.hasActiveSelection.mockResolvedValue(true);
   boundary.photoshop.placeImageIntoSelection.mockResolvedValue({ layerID: 101 });
   boundary.photoshop.groupLayers.mockResolvedValue(undefined);
@@ -237,6 +240,111 @@ const trackedRender = (options: HarnessOptions = {}) => {
   renderers.push(rendered.renderer);
   return rendered;
 };
+
+const completePosterDraft = () => ({
+  ...createDefaultPosterDraft(),
+  subject: "夏日咖啡新品",
+  title: "SUMMER DROP",
+  subtitle: "七月限定风味",
+  details: "明黄与深绿"
+});
+
+describe("useGenerationController poster wizard", () => {
+  const geminiSettings = {
+    ...DEFAULT_SETTINGS,
+    imageProvider: "gemini" as const,
+    offlineMode: false
+  };
+
+  it("generates with separate preservation instructions, records history, and retains layer ids", async () => {
+    boundary.photoshop.placeImageIntoSelection.mockResolvedValueOnce({ layerID: 404 });
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+
+    let succeeded = false;
+    await act(async () => {
+      succeeded = await rendered.getController().runPosterWizard(completePosterDraft());
+    });
+
+    expect(succeeded).toBe(true);
+    expect(boundary.geminiClient.editImage).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: expect.stringContaining("SUMMER DROP"),
+      systemPrompt: expect.stringContaining("Preserve the source subject exactly"),
+      aspectRatio: "4:5",
+      baseImageBase64: "INPUT"
+    }));
+    const request = boundary.geminiClient.editImage.mock.calls[0][0];
+    expect(request.prompt).not.toContain("Preserve the source subject exactly");
+    expect(boundary.photoshop.placeImageIntoSelection).toHaveBeenCalledWith(
+      "data:image/png;base64,GEMINI_RESULT",
+      1,
+      expect.objectContaining({ taskId: expect.any(String) })
+    );
+    expect(rendered.getController().posterLastResult?.placedLayerIds).toEqual([404]);
+    expect(rendered.getController().history[0]).toMatchObject({
+      provider: "gemini",
+      prompt: expect.stringContaining("SUMMER DROP")
+    });
+    expect(rendered.getController().posterRunning).toBe(false);
+  });
+
+  it("ignores a late model result after cancellation", async () => {
+    let resolveImage!: (value: string) => void;
+    boundary.geminiClient.editImage.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveImage = resolve;
+    }));
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+
+    let generation!: Promise<boolean>;
+    act(() => {
+      generation = rendered.getController().runPosterWizard(completePosterDraft());
+    });
+    await flush();
+    act(() => rendered.getController().stopGeneration());
+    resolveImage("LATE_POSTER");
+    await act(async () => {
+      await generation;
+    });
+
+    expect(boundary.photoshop.placeImageIntoSelection).not.toHaveBeenCalled();
+    expect(rendered.getController().posterRunning).toBe(false);
+    expect(rendered.getController().posterLastResult).toBeNull();
+  });
+
+  it("keeps failures actionable and does not expose undo state", async () => {
+    boundary.geminiClient.editImage.mockRejectedValueOnce(new Error("model offline"));
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+
+    await act(async () => {
+      await rendered.getController().runPosterWizard(completePosterDraft());
+    });
+
+    expect(rendered.getController().status).toBe("error");
+    expect(rendered.getController().error).toContain("model offline");
+    expect(rendered.getController().posterLastResult).toBeNull();
+    expect(boundary.photoshop.placeImageIntoSelection).not.toHaveBeenCalled();
+  });
+
+  it("deletes exactly the generated layers and retains undo state when Photoshop fails", async () => {
+    boundary.photoshop.placeImageIntoSelection.mockResolvedValueOnce({ layerID: 515 });
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    await act(async () => {
+      await rendered.getController().runPosterWizard(completePosterDraft());
+    });
+    const taskId = rendered.getController().posterLastResult?.taskId;
+
+    boundary.photoshop.deleteLayers.mockRejectedValueOnce(new Error("locked"));
+    await act(async () => rendered.getController().undoPosterGeneration());
+    expect(rendered.getController().posterLastResult?.placedLayerIds).toEqual([515]);
+
+    await act(async () => rendered.getController().undoPosterGeneration());
+    expect(boundary.photoshop.deleteLayers).toHaveBeenLastCalledWith([515], { taskId });
+    expect(rendered.getController().posterLastResult).toBeNull();
+  });
+});
 
 describe("useGenerationController generation history integration", () => {
   it("records a single generation and restores its provider and complete form", async () => {

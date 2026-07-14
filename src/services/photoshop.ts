@@ -330,6 +330,26 @@ export const groupLayers = (
   options: GroupLayersOptions = {}
 ): Promise<number | null> => runTransaction(() => groupLayersUnlocked(layerIds, groupName, options), options);
 
+const deleteLayersUnlocked = async (layerIds: number[]): Promise<void> => {
+  const ids = uniqueLayerIds(layerIds);
+  if (!ids.length) return;
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  await executeAsModalUnlocked(photoshop, async () => {
+    await photoshop.app.batchPlay(
+      ids.map((id) => ({
+        _obj: "delete",
+        _target: [{ _ref: "layer", _id: id }]
+      })),
+      { synchronousExecution: true }
+    );
+  }, { commandName: "撤销 PXD 海报生成" });
+};
+
+export const deleteLayers = (
+  layerIds: number[],
+  options: PhotoshopOperationOptions = {}
+): Promise<void> => runTransaction(() => deleteLayersUnlocked(layerIds), options);
+
 const hasActiveSelectionUnlocked = async (): Promise<boolean> => {
   try {
     const photoshop = ensureModule(getPhotoshop, "Photoshop");

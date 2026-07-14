@@ -24,6 +24,7 @@ import {
   closeDocument,
   closeGeneratedDocument,
   createGeneratedDocument,
+  deleteLayers,
   getSelectionPixels,
   groupLayers,
   hasActiveSelection,
@@ -50,6 +51,10 @@ import { translateText } from "../services/translator";
 import { useGenerationHistory } from "./useGenerationHistory";
 import type { GenerationHistoryEntry } from "../services/generationHistory";
 import { normalizePromptParams, sanitizePrompt } from "../services/promptParams";
+import {
+  executePosterWorkflow,
+  type PosterWizardDraft
+} from "../services/posterWizard";
 
 export type GenerationStatus = "idle" | "running" | "success" | "error";
 export type ToastType = "info" | "success" | "warning" | "error";
@@ -385,6 +390,10 @@ export interface GenerationControllerState {
   refreshOptions: () => Promise<void>;
   runGeneration: () => Promise<void>;
   stopGeneration: () => void;
+  posterRunning: boolean;
+  posterLastResult: PosterGenerationResult | null;
+  runPosterWizard: (draft: PosterWizardDraft) => Promise<boolean>;
+  undoPosterGeneration: () => Promise<void>;
   history: GenerationHistoryEntry<GenerationForm>[];
   historyLoading: boolean;
   historyError: string | null;
@@ -422,6 +431,11 @@ export interface GenerationControllerState {
   appendExtraPromptToNegative: () => void;
 }
 
+export interface PosterGenerationResult {
+  taskId: string;
+  placedLayerIds: number[];
+}
+
 export interface GenerationControllerSettingsActions {
   settingsLoading?: boolean;
   updateSettings?: (next: Pick<AppSettings, "imageProvider">) => Promise<void>;
@@ -446,6 +460,8 @@ export const useGenerationController = (
   const [progressText, setProgressText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastImages, setLastImages] = useState<string[]>([]);
+  const [posterRunning, setPosterRunning] = useState(false);
+  const [posterLastResult, setPosterLastResult] = useState<PosterGenerationResult | null>(null);
   const [options, setOptions] = useState<SdOptions>(EMPTY_OPTIONS);
   const [optionsLoading, setOptionsLoading] = useState(false);
   const [optionsError, setOptionsError] = useState<string | null>(null);
@@ -472,6 +488,7 @@ export const useGenerationController = (
 
   useLayoutEffect(() => {
     setProgress(0);
+    setPosterRunning(false);
     setStatus((current) => current === "running" ? "idle" : current);
   }, [engineToken]);
 
@@ -825,12 +842,112 @@ export const useGenerationController = (
       );
     }
     setStatus("idle");
+    setPosterRunning(false);
     setProgress(0);
     setProgressPreview(null);
     setProgressText(null);
     setError(null);
     pushToast("info", "已停止");
   }, [engine, engineToken, pushToast, stopPolling]);
+
+  const runPosterWizard = useCallback(async (draft: PosterWizardDraft): Promise<boolean> => {
+    if (runGateRef.current.current) return false;
+    const requestToken = engineToken;
+    const requestEngine = requestToken.engine;
+    if (requestEngine.provider !== "gemini") {
+      const message = "海报排版向导仅支持 Gemini 图像引擎；建议：请先在设置中将图像引擎切换为 Gemini。";
+      setError(message);
+      pushToast("warning", message);
+      return false;
+    }
+    const taskId = generateId();
+    const { token: runToken } = runGateRef.current.begin("poster", taskId);
+    const isRunCurrent = () => isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken);
+    setPosterRunning(true);
+    setPosterLastResult(null);
+    setStatus("running");
+    setError(null);
+    setProgress(0);
+    setProgressPreview(null);
+    setProgressText(null);
+    dismissToast();
+    try {
+      const selection = await getSelectionPixels({ taskId });
+      if (!isRunCurrent()) return false;
+      if (!selection) {
+        throw new Error("请先在 Photoshop 中选择需要保留的主体区域");
+      }
+      const result = await executePosterWorkflow({
+        engine: requestEngine,
+        draft,
+        baseImageBase64: dataUrlToBase64(selection.dataUrl),
+        timeoutMs: Math.max(
+          5_000,
+          Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)
+        ),
+        feather: Number.isFinite(form.maskFeather) ? form.maskFeather : DEFAULT_FORM.maskFeather,
+        taskId,
+        adapters: GENERATION_WORKFLOW_ADAPTERS,
+        isCurrent: isRunCurrent,
+        onRequestStart: () => {
+          if (requestEngine.progressMode === "determinate") pollProgress();
+        },
+        onRequestSettled: () => stopPolling(requestToken)
+      });
+      if (!isRunCurrent()) return false;
+      setLastImages(result.images.map(toDataUrl));
+      setPosterLastResult({ taskId, placedLayerIds: result.placedLayerIds });
+      setProgress(1);
+      const historyRecord = await recordHistory({
+        provider: "gemini",
+        prompt: result.prompt.userPrompt,
+        params: { ...form },
+        resultDataUrl: toDataUrl(result.images[0])
+      });
+      if (!isRunCurrent()) return false;
+      setStatus("success");
+      if (historyRecord) pushToast("success", "海报已生成并贴入 Photoshop");
+      return true;
+    } catch (caught) {
+      stopPolling(requestToken);
+      if (!isRunCurrent()) return false;
+      if (isGenerationCancelledError(caught)) {
+        setStatus("idle");
+        setError(null);
+        pushToast("info", "已停止");
+        return false;
+      }
+      const message = formatGenerationError(caught, "海报生成失败");
+      setStatus("error");
+      setError(message);
+      pushToast("error", message);
+      return false;
+    } finally {
+      stopPolling(requestToken);
+      if (runGateRef.current.isCurrent(runToken)) {
+        runGateRef.current.complete(runToken);
+        setPosterRunning(false);
+      }
+      commitIfCurrent(requestToken, () => {
+        setProgress(0);
+        setProgressPreview(null);
+        setProgressText(null);
+      });
+    }
+  }, [commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pollProgress, pushToast, recordHistory, settings.timeoutMaxSeconds, settings.timeoutMultiplier, stopPolling]);
+
+  const undoPosterGeneration = useCallback(async () => {
+    const result = posterLastResult;
+    if (!result || posterRunning) return;
+    try {
+      await deleteLayers(result.placedLayerIds, { taskId: result.taskId });
+      setPosterLastResult(null);
+      pushToast("success", "已移除上一次海报生成图层");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "海报图层移除失败";
+      pushToast("error", `撤销海报生成失败：${message}`);
+    }
+  }, [posterLastResult, posterRunning, pushToast]);
 
   const runGeneration = useCallback(async () => {
     if (runGateRef.current.current) return;
@@ -1227,6 +1344,10 @@ export const useGenerationController = (
     refreshOptions,
     runGeneration,
     stopGeneration,
+    posterRunning,
+    posterLastResult,
+    runPosterWizard,
+    undoPosterGeneration,
     history,
     historyLoading,
     historyError,

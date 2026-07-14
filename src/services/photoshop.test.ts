@@ -11,7 +11,7 @@ const boundary = vi.hoisted(() => ({
 
 vi.mock("./uxpBridge", () => ({ bridge: boundary.bridge }));
 
-import { closeGeneratedDocument, createGeneratedDocument, groupLayers } from "./photoshop";
+import { closeGeneratedDocument, createGeneratedDocument, deleteLayers, groupLayers } from "./photoshop";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -116,5 +116,36 @@ describe("createGeneratedDocument", () => {
     await expect(groupLayers([101, 102], "Generated", {
       requireGroup: true
     })).rejects.toThrow("Photoshop 未创建预期的图层组");
+  });
+});
+
+describe("deleteLayers", () => {
+  it("deletes each unique valid generated layer in one modal transaction", async () => {
+    const batchPlay = vi.fn().mockResolvedValue([]);
+    const executeAsModal = vi.fn().mockImplementation(async (callback) => await callback());
+    boundary.bridge.photoshop = {
+      app: { batchPlay, activeDocument: { id: 1 } },
+      core: { executeAsModal }
+    };
+
+    await deleteLayers([42, 42, -1, Number.NaN, 77]);
+
+    expect(batchPlay).toHaveBeenCalledWith([
+      { _obj: "delete", _target: [{ _ref: "layer", _id: 42 }] },
+      { _obj: "delete", _target: [{ _ref: "layer", _id: 77 }] }
+    ], { synchronousExecution: true });
+    expect(executeAsModal).toHaveBeenCalledWith(expect.any(Function), {
+      commandName: "撤销 PXD 海报生成"
+    });
+  });
+
+  it("surfaces Photoshop deletion failures", async () => {
+    const failure = new Error("layer is locked");
+    boundary.bridge.photoshop = {
+      app: { batchPlay: vi.fn().mockRejectedValue(failure), activeDocument: { id: 1 } },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+
+    await expect(deleteLayers([42])).rejects.toBe(failure);
   });
 });

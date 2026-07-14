@@ -1,0 +1,26 @@
+[
+  { "id": "theme-launch", "label": "新品发布", "type": "theme", "prompt": "Frame the poster as a premium new-product launch with a clear reveal moment and confident commercial energy." },
+  { "id": "theme-event", "label": "活动宣传", "type": "theme", "prompt": "Frame the poster as an event campaign with an immediate call to attention and an energetic sense of occasion." },
+  { "id": "theme-cultural", "label": "文化展览", "type": "theme", "prompt": "Frame the poster as a cultural exhibition with curatorial restraint, visual symbolism, and an editorial point of view." },
+  { "id": "theme-editorial", "label": "品牌故事", "type": "theme", "prompt": "Frame the poster as a brand story with a memorable visual thesis and a sophisticated editorial tone." },
+
+  { "id": "copy-headline", "label": "标题主导", "type": "copy", "prompt": "Use a dominant headline, a clearly subordinate subtitle, and minimal supporting copy with strong reading order." },
+  { "id": "copy-balanced", "label": "图文均衡", "type": "copy", "prompt": "Balance the headline and subject at comparable visual weight while keeping the subtitle easy to scan." },
+  { "id": "copy-minimal", "label": "极简文案", "type": "copy", "prompt": "Use restrained typography, generous breathing room, and only the supplied headline and subtitle." },
+  { "id": "copy-information", "label": "信息密集", "type": "copy", "prompt": "Organize the supplied copy as a compact information system with disciplined hierarchy and alignment." },
+
+  { "id": "style-swiss", "label": "瑞士现代", "type": "style", "prompt": "Use Swiss modernist art direction: precise grid, functional typography, high contrast, and disciplined negative space." },
+  { "id": "style-editorial", "label": "时尚编辑", "type": "style", "prompt": "Use fashion-editorial art direction with refined type scale, asymmetric tension, and premium magazine polish." },
+  { "id": "style-retro", "label": "复古印刷", "type": "style", "prompt": "Use a refined retro-print language with tactile halftone character, bold display type, and controlled color registration." },
+  { "id": "style-digital", "label": "数字未来", "type": "style", "prompt": "Use a contemporary digital-future language with crisp geometry, luminous accents, and technical typographic details." },
+
+  { "id": "composition-center", "label": "中心聚焦", "type": "composition", "prompt": "Center the preserved subject as the primary focal point and build a stable typographic frame around it." },
+  { "id": "composition-split", "label": "分栏对照", "type": "composition", "prompt": "Use a decisive split composition, separating the preserved subject and the main copy into coordinated zones." },
+  { "id": "composition-diagonal", "label": "动态对角", "type": "composition", "prompt": "Use an energetic diagonal flow that leads from headline to preserved subject without reducing legibility." },
+  { "id": "composition-negative", "label": "大留白", "type": "composition", "prompt": "Use generous negative space and place the preserved subject off-center with a calm, deliberate visual rhythm." },
+
+  { "id": "format-4x5", "label": "竖版 4:5", "type": "format", "prompt": "Compose for a 4:5 vertical poster with safe margins and mobile-friendly headline scale." },
+  { "id": "format-3x4", "label": "竖版 3:4", "type": "format", "prompt": "Compose for a classic 3:4 vertical poster with balanced top and bottom information zones." },
+  { "id": "format-square", "label": "方形 1:1", "type": "format", "prompt": "Compose for a 1:1 square campaign poster with compact hierarchy and strong thumbnail recognition." },
+  { "id": "format-wide", "label": "横版 16:9", "type": "format", "prompt": "Compose for a 16:9 horizontal campaign poster with a clear left-to-right reading path." }
+]
