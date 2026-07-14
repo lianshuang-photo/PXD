@@ -171,13 +171,30 @@ const extractLabel = (item: Record<string, unknown>, keys: string[]) => {
   return "";
 };
 
-const normalizeOptions = (collection: unknown, labelKeys: string[], valueKey?: string): SdOption[] => {
+const extractOptionList = (payload: unknown, keys: string[]): unknown[] | null => {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== "object") return null;
+  const objectPayload = payload as Record<string, unknown>;
+  for (const key of keys) {
+    if (Array.isArray(objectPayload[key])) {
+      return objectPayload[key] as unknown[];
+    }
+  }
+  return null;
+};
+
+export const normalizeOptions = (collection: unknown, labelKeys: string[], valueKey?: string): SdOption[] => {
   if (!Array.isArray(collection)) return [];
   return collection
     .map((item) => {
+      if (typeof item === "string") {
+        const value = item.trim();
+        return value ? toOption(value, value, item) : null;
+      }
       if (!item || typeof item !== "object") return null;
       const objectItem = item as Record<string, unknown>;
-      const label = extractLabel(objectItem, labelKeys) || valueKey ? String(objectItem[valueKey ?? labelKeys[0]] ?? "") : "";
+      const base = extractLabel(objectItem, labelKeys);
+      const label = base || (valueKey ? String(objectItem[valueKey] ?? "") : "");
       const value =
         valueKey && typeof objectItem[valueKey] === "string"
           ? (objectItem[valueKey] as string)
@@ -422,20 +439,18 @@ export const createPxdClient = (settings: AppSettings) => {
             rethrowCancellation(error);
             return null;
           });
-          if (!result) continue;
-          if (Array.isArray(result)) return result;
-          if (result && typeof result === "object") {
-            const values = Object.values(result);
-            if (Array.isArray(values)) return values.flat();
-          }
+          const list = extractOptionList(result, ["model_list", "models"]);
+          if (list) return list;
         }
         return [];
       })();
-      const controlNetModulesPromise = fetchJson<unknown[]>("/controlnet/module_list").catch((error) => {
-        rethrowCancellation(error);
-        console.warn("Failed to fetch controlnet modules", error);
-        return [];
-      });
+      const controlNetModulesPromise = fetchJson<unknown>("/controlnet/module_list")
+        .then((result) => extractOptionList(result, ["module_list", "modules"]) ?? [])
+        .catch((error) => {
+          rethrowCancellation(error);
+          console.warn("Failed to fetch controlnet modules", error);
+          return [];
+        });
 
       const [models, vaes, loras, samplers, schedulers, controlNetModels, controlNetModules] = await Promise.all([
         modelsPromise,

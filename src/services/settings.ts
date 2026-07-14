@@ -20,7 +20,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   geminiModel: "gemini-2.5-flash-image",
   geminiAuthMode: "queryKey",
   offlineMode: true,
-  outputDirectory: "",
   brandColor: "#b794f6",
   timeoutMultiplier: 1,
   timeoutMinSeconds: 20,
@@ -34,7 +33,8 @@ export const loadSettings = async (): Promise<AppSettings> => {
     ...DEFAULT_SETTINGS,
     ...loaded,
     ...storedPrefs
-  };
+  } as AppSettings & { outputDirectory?: unknown };
+  delete result.outputDirectory;
   const minSeconds = Number.isFinite(result.timeoutMinSeconds)
     ? Math.max(5, Math.min(result.timeoutMinSeconds, result.timeoutMaxSeconds || DEFAULT_SETTINGS.timeoutMaxSeconds))
     : DEFAULT_SETTINGS.timeoutMinSeconds;

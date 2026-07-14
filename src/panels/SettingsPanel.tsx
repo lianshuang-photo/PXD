@@ -164,6 +164,16 @@ const SettingsPanel = ({ settings, onUpdate, onRefresh, saving, loading }: Props
                 <option value="bearer">Bearer Token（中转服务）</option>
               </select>
             </label>
+
+            <label className="form-field form-field--row">
+              <span className="form-field__label">离线模式</span>
+              <input
+                type="checkbox"
+                checked={form.offlineMode}
+                onChange={(event) => setForm((prev) => ({ ...prev, offlineMode: event.target.checked }))}
+              />
+              <span className="form-field__hint">开启后禁止向 Gemini 服务上传图片。</span>
+            </label>
           </>
         )}
 
@@ -182,16 +192,6 @@ const SettingsPanel = ({ settings, onUpdate, onRefresh, saving, loading }: Props
           </small>
         </label>
         )}
-
-        <label className="form-field form-field--row">
-          <span className="form-field__label">离线模式</span>
-          <input
-            type="checkbox"
-            checked={form.offlineMode}
-            onChange={(event) => setForm((prev) => ({ ...prev, offlineMode: event.target.checked }))}
-          />
-          <span className="form-field__hint">开启后禁用远程请求，仅使用本地算力。</span>
-        </label>
 
         <div style={{ display: "flex", gap: "0.12rem", marginBottom: "0.12rem" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", flex: 1, minWidth: 0 }}>
@@ -261,19 +261,6 @@ const SettingsPanel = ({ settings, onUpdate, onRefresh, saving, loading }: Props
             />
           </div>
         </div>
-
-        <label className="form-field">
-          <span className="form-field__label">输出目录</span>
-          <input
-            className="input"
-            type="text"
-            value={form.outputDirectory}
-            onChange={(event) =>
-              setForm((prev) => ({ ...prev, outputDirectory: event.target.value }))
-            }
-            placeholder="留空则使用 Photoshop 文档目录"
-          />
-        </label>
 
         <label className="form-field">
           <span className="form-field__label">品牌色</span>
