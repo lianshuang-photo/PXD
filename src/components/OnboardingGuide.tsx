@@ -119,13 +119,19 @@ const OnboardingGuide = ({
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onPause();
     };
-    window.addEventListener("resize", handleViewportChange);
-    window.addEventListener("scroll", handleViewportChange, true);
-    document.addEventListener("keydown", handleKeyDown);
+    const canListenToWindow = typeof window !== "undefined" && typeof window.addEventListener === "function";
+    const canListenToDocument = typeof document !== "undefined" && typeof document.addEventListener === "function";
+    if (canListenToWindow) {
+      window.addEventListener("resize", handleViewportChange);
+      window.addEventListener("scroll", handleViewportChange, true);
+    }
+    if (canListenToDocument) document.addEventListener("keydown", handleKeyDown);
     return () => {
-      window.removeEventListener("resize", handleViewportChange);
-      window.removeEventListener("scroll", handleViewportChange, true);
-      document.removeEventListener("keydown", handleKeyDown);
+      if (canListenToWindow) {
+        window.removeEventListener("resize", handleViewportChange);
+        window.removeEventListener("scroll", handleViewportChange, true);
+      }
+      if (canListenToDocument) document.removeEventListener("keydown", handleKeyDown);
     };
   }, [locate, onPause, open]);
 
