@@ -28,6 +28,7 @@ import {
   switchToDocument,
   type SelectionPixels
 } from "../services/photoshop";
+import { clearPSLockQueue, isPSLockControlError } from "../services/psLock";
 import {
   deletePresetFile,
   listPresetMetas,
@@ -69,7 +70,6 @@ export interface GenerationForm {
   clipSkip: number;
   restoreFaces: boolean;
   tiling: boolean;
-  presetShortcut: string;
 }
 
 export interface BatchItem {
@@ -103,8 +103,11 @@ const EMPTY_OPTIONS: SdOptions = {
 
 const GENERATION_WORKFLOW_ADAPTERS = {
   placeImage: placeImageIntoSelection,
-  groupLayers: (layerIds: number[], groupName?: string) =>
-    groupLayers(layerIds, groupName).catch((error) => console.warn("groupLayers failed", error)),
+  groupLayers: (layerIds: number[], groupName: string | undefined, options: { taskId?: string }) =>
+    groupLayers(layerIds, groupName, options).catch((error) => {
+      ignoreBestEffortPhotoshopError("groupLayers failed", error);
+      return null;
+    }),
   moveActiveLayerToTop
 };
 
@@ -130,8 +133,7 @@ const DEFAULT_FORM: GenerationForm = {
   seed: -1,
   clipSkip: 0,
   restoreFaces: false,
-  tiling: false,
-  presetShortcut: ""
+  tiling: false
 };
 
 const toDataUrl = (base64: string) => `data:image/png;base64,${base64}`;
@@ -177,6 +179,13 @@ const generateId = () => {
     return crypto.randomUUID();
   }
   return `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+};
+
+const ignoreBestEffortPhotoshopError = (label: string, error: unknown) => {
+  if (isPSLockControlError(error)) {
+    throw error;
+  }
+  console.warn(label, error);
 };
 
 const clampNumber = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -257,7 +266,6 @@ export interface GenerationControllerState {
   setFormValue: <K extends keyof GenerationForm>(key: K, value: GenerationForm[K]) => void;
   resetForm: () => void;
   setResolution: (value: number) => void;
-  setPresetShortcut: (value: string) => void;
   status: GenerationStatus;
   progress: number;
   progressMode: EngineProgressMode;
@@ -379,13 +387,6 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   const setResolution = useCallback(
     (value: number) => {
       setFormValue("resolution", value);
-    },
-    [setFormValue]
-  );
-
-  const setPresetShortcut = useCallback(
-    (value: string) => {
-      setFormValue("presetShortcut", value);
     },
     [setFormValue]
   );
@@ -575,12 +576,13 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   const runGeneration = useCallback(async () => {
     const requestToken = engineToken;
     const requestEngine = requestToken.engine;
+    const taskId = generateId();
     setStatus("running");
     setError(null);
     setProgress(0);
     dismissToast();
     try {
-      const selection = await getSelectionPixels();
+      const selection = await getSelectionPixels({ taskId });
       if (!selection) {
         throw new Error("请先在 Photoshop 中选择一个区域");
       }
@@ -595,9 +597,11 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
             form,
             selection,
             width,
-            height
+            height,
+            taskId
           ),
           feather: Number.isFinite(form.maskFeather) ? form.maskFeather : DEFAULT_FORM.maskFeather,
+          taskId,
           emptyImagesMessage: "未收到可用的生成图像",
           isCurrent: () => isEngineCurrent(requestToken),
           onRequestStart: () => {
@@ -626,8 +630,9 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
   }, [commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pollProgress, pushToast, settings, stopPolling]);
 
   const addToBatch = useCallback(async () => {
+    const taskId = generateId();
     try {
-      const selection = await getSelectionPixels();
+      const selection = await getSelectionPixels({ taskId });
       if (!selection) {
         pushToast("warning", "没有检测到有效选区");
         return;
@@ -636,12 +641,12 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       const { width, height } = computeOverrideSize(selection.width, selection.height, target);
       let docInfo: [number, number, number] | null = null;
       try {
-        docInfo = await onBatchAddLayer();
+        docInfo = await onBatchAddLayer({ taskId });
       } catch (error) {
-        console.warn("onBatchAddLayer failed", error);
+        ignoreBestEffortPhotoshopError("onBatchAddLayer failed", error);
       }
       const item: BatchItem = {
-        id: generateId(),
+        id: taskId,
         name: createBatchItemName(form, batchItems.length),
         createdAt: new Date().toISOString(),
         form: { ...form },
@@ -667,26 +672,32 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
 
   const removeFromBatch = useCallback(
     async (id: string) => {
-      setBatchItems((prev) => {
-        const target = prev.find((item) => item.id === id);
-        if (target?.metadata?.batchDocumentId && target.metadata.activeDocumentId && target.metadata.newLayerId) {
-          closeDocument(target.metadata.batchDocumentId, target.metadata.activeDocumentId, target.metadata.newLayerId).catch(
-            (error) => console.warn("closeDocument failed", error)
-          );
-        }
-        return prev.filter((item) => item.id !== id);
-      });
+      const target = batchItems.find((item) => item.id === id);
+      clearPSLockQueue(id);
+      setBatchItems((prev) => prev.filter((item) => item.id !== id));
+      if (target?.metadata?.batchDocumentId && target.metadata.activeDocumentId && target.metadata.newLayerId) {
+        await closeDocument(
+          target.metadata.batchDocumentId,
+          target.metadata.activeDocumentId,
+          target.metadata.newLayerId,
+          { taskId: id }
+        );
+      }
     },
-    []
+    [batchItems]
   );
 
   const clearBatch = useCallback(async () => {
     const items = batchItems.slice();
     setBatchItems([]);
     for (const item of items) {
+      clearPSLockQueue(item.id);
       if (item.metadata?.batchDocumentId && item.metadata.activeDocumentId && item.metadata.newLayerId) {
-        await closeDocument(item.metadata.batchDocumentId, item.metadata.activeDocumentId, item.metadata.newLayerId).catch(
-          (error) => console.warn("closeDocument failed", error)
+        await closeDocument(
+          item.metadata.batchDocumentId,
+          item.metadata.activeDocumentId,
+          item.metadata.newLayerId,
+          { taskId: item.id }
         );
       }
     }
@@ -717,18 +728,19 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
           Number.isFinite(item.form?.maskFeather) && item.form.maskFeather >= 0
             ? item.form.maskFeather
             : DEFAULT_FORM.maskFeather,
+        taskId: item.id,
         groupName: item.name,
         emptyImagesMessage: `批次「${item.name}」未返回图像`,
         isCurrent: () => isEngineCurrent(requestToken),
         prepare: async () => {
           if (item.metadata?.activeDocumentId) {
-            await switchToDocument(item.metadata.activeDocumentId).catch((error) =>
-              console.warn("switchToDocument failed", error)
+            await switchToDocument(item.metadata.activeDocumentId, { taskId: item.id }).catch((error) =>
+              ignoreBestEffortPhotoshopError("switchToDocument failed", error)
             );
           }
           if (item.selection.selectionBounds) {
-            await setSelectionBounds(item.selection.selectionBounds).catch((error) =>
-              console.warn("setSelectionBounds failed", error)
+            await setSelectionBounds(item.selection.selectionBounds, { taskId: item.id }).catch((error) =>
+              ignoreBestEffortPhotoshopError("setSelectionBounds failed", error)
             );
           }
         },
@@ -760,11 +772,15 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
       if (!file?.data?.form) {
         throw new Error("预设文件格式不正确");
       }
-      setForm((prev) => ({
-        ...prev,
-        ...DEFAULT_FORM,
-        ...file.data.form
-      }));
+      setForm((prev) => {
+        const merged = {
+          ...prev,
+          ...DEFAULT_FORM,
+          ...file.data.form
+        } as GenerationForm & { presetShortcut?: unknown };
+        delete merged.presetShortcut;
+        return merged;
+      });
       setSelectedPreset(file.meta.name);
       pushToast("success", `已应用预设「${file.meta.name}」`);
     },
@@ -800,7 +816,6 @@ export const useGenerationController = (settings: AppSettings): GenerationContro
     setFormValue,
     resetForm,
     setResolution,
-    setPresetShortcut,
     status,
     progress,
     progressMode: engine.progressMode,

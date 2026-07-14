@@ -58,7 +58,7 @@ const makeHarness = (provider: AppSettings["imageProvider"], outputs: string[][]
   let nextLayerId = 100;
   const adapters: GenerationWorkflowAdapters = {
     placeImage: vi.fn().mockImplementation(async () => ({ layerID: nextLayerId++ })),
-    groupLayers: vi.fn().mockResolvedValue(undefined),
+    groupLayers: vi.fn().mockResolvedValue(null),
     moveActiveLayerToTop: vi.fn().mockResolvedValue(undefined)
   };
   return { engine, adapters, img2img, editImage };
@@ -96,7 +96,9 @@ describe("generation workflow", () => {
         { feather: 12 }
       );
       if (provider === "forge") {
-        expect(harness.adapters.groupLayers).toHaveBeenCalledWith([100, 101], "single");
+        expect(harness.adapters.groupLayers).toHaveBeenCalledWith([100, 101], "single", {
+          taskId: undefined
+        });
       } else {
         expect(harness.adapters.groupLayers).not.toHaveBeenCalled();
       }

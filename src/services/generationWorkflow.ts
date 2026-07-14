@@ -9,15 +9,20 @@ export interface GenerationWorkflowAdapters {
   placeImage: (
     dataUrl: string,
     index: number,
-    options: { feather: number }
+    options: { feather: number; taskId?: string }
   ) => Promise<unknown>;
-  groupLayers: (layerIds: number[], groupName?: string) => Promise<unknown>;
-  moveActiveLayerToTop: () => Promise<unknown>;
+  groupLayers: (
+    layerIds: number[],
+    groupName: string | undefined,
+    options: { taskId?: string }
+  ) => Promise<number | null>;
+  moveActiveLayerToTop: (options: { layerId: number; taskId?: string }) => Promise<unknown>;
 }
 
 export interface GenerationWorkflowTask {
   request: EngineGenerateParams;
   feather: number;
+  taskId?: string;
   groupName?: string;
   emptyImagesMessage: string;
   prepare?: () => Promise<void>;
@@ -86,19 +91,26 @@ export const executeGenerationTask = async (
   for (let index = 0; index < result.images.length; index += 1) {
     assertCurrent();
     const info = await adapters.placeImage(toDataUrl(result.images[index]), index + 1, {
-      feather: task.feather
+      feather: task.feather,
+      taskId: task.taskId
     });
     assertCurrent();
     const layerId = extractLayerId(info);
     if (layerId) placedLayerIds.push(layerId);
   }
+  let topLayerId: number | undefined = placedLayerIds[placedLayerIds.length - 1];
   if (placedLayerIds.length > 1) {
     assertCurrent();
-    await adapters.groupLayers(placedLayerIds, task.groupName);
+    const groupId = await adapters.groupLayers(placedLayerIds, task.groupName, {
+      taskId: task.taskId
+    });
+    topLayerId = groupId ?? topLayerId;
     assertCurrent();
   }
-  assertCurrent();
-  await adapters.moveActiveLayerToTop();
+  if (topLayerId) {
+    assertCurrent();
+    await adapters.moveActiveLayerToTop({ layerId: topLayerId, taskId: task.taskId });
+  }
   assertCurrent();
   return { ...result, placedLayerIds };
 };
