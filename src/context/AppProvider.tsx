@@ -13,6 +13,9 @@ export const AppProvider = ({ children }: Props) => {
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const loadGateRef = useRef(new LatestLoadGate());
+  const settingsRef = useRef(DEFAULT_SETTINGS);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingSavesRef = useRef(0);
 
   const refreshSettings = useCallback(async () => {
     const gate = loadGateRef.current;
@@ -23,6 +26,7 @@ export const AppProvider = ({ children }: Props) => {
       if (!gate.isCurrent(generation)) {
         return;
       }
+      settingsRef.current = next;
       setSettings(next);
       applyBrandColor(next.brandColor);
     } finally {
@@ -44,16 +48,25 @@ export const AppProvider = ({ children }: Props) => {
 
   const updateSettings = useCallback(async (next: Partial<AppSettings>) => {
     loadGateRef.current.assertReady("设置仍在加载，请稍后重试");
+    pendingSavesRef.current += 1;
     setSaving(true);
+    const save = saveQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const merged: AppSettings = { ...settingsRef.current, ...next };
+        await saveSettings(merged);
+        settingsRef.current = merged;
+        setSettings(merged);
+        applyBrandColor(merged.brandColor);
+      });
+    saveQueueRef.current = save;
     try {
-      const merged: AppSettings = { ...settings, ...next };
-      await saveSettings(merged);
-      setSettings(merged);
-      applyBrandColor(merged.brandColor);
+      await save;
     } finally {
-      setSaving(false);
+      pendingSavesRef.current -= 1;
+      if (pendingSavesRef.current === 0) setSaving(false);
     }
-  }, [settings]);
+  }, []);
 
   const value = useMemo(
     () => ({

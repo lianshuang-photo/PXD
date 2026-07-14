@@ -314,6 +314,76 @@ describe("createImageModelClient", () => {
     await expect(pending).rejects.toMatchObject({ code: "CANCELLED" });
   });
 
+  it("cancels a request by task ID and removes it after rejection", async () => {
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createImageModelClient(settings);
+    const pending = client.editImage({ ...editParams, taskId: "gemini-one" });
+    const assertion = expect(pending).rejects.toMatchObject({ code: "CANCELLED" });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+
+    expect(client.cancel("gemini-one")).toBe(true);
+    await assertion;
+    expect(client.cancel("gemini-one")).toBe(false);
+  });
+
+  it("cancels every active image model request", async () => {
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createImageModelClient(settings);
+    const first = client.editImage({ ...editParams, taskId: "gemini-first" });
+    const second = client.editImage({ ...editParams, taskId: "gemini-second" });
+    const firstAssertion = expect(first).rejects.toMatchObject({ code: "CANCELLED" });
+    const secondAssertion = expect(second).rejects.toMatchObject({ code: "CANCELLED" });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    expect(client.cancelAll()).toBe(2);
+    await Promise.all([firstAssertion, secondAssertion]);
+    expect(client.cancelAll()).toBe(0);
+  });
+
+  it("does not leave a completed image model request registered", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(inlineResponse()));
+    const client = createImageModelClient(settings);
+
+    await expect(client.editImage({ ...editParams, taskId: "gemini-complete" })).resolves.toBe("OUTPUT_BASE64");
+    expect(client.cancel("gemini-complete")).toBe(false);
+  });
+
+  it("keeps replacement cancellation while parsing past the original timeout", async () => {
+    vi.useFakeTimers();
+    let finishParsing: (() => void) | undefined;
+    const json = vi.fn(() => new Promise((resolve) => {
+      finishParsing = () => resolve({
+        candidates: [{ content: { parts: [{ inlineData: { data: "LATE_IMAGE" } }] } }]
+      });
+    }));
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json } as unknown as Response)
+      .mockImplementationOnce((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createImageModelClient(settings);
+    const pending = client.editImage({ ...editParams, taskId: "gemini-parsing", timeoutMs: 50 });
+    const result = pending.catch((error) => error);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(json).toHaveBeenCalledOnce();
+
+    const replacement = client.editImage({ ...editParams, taskId: "gemini-parsing", timeoutMs: 500 });
+    const replacementResult = replacement.catch((error) => error);
+    await vi.advanceTimersByTimeAsync(50);
+    finishParsing?.();
+    expect(await result).toMatchObject({ code: "CANCELLED" });
+    expect(client.cancel("gemini-parsing")).toBe(true);
+    expect(await replacementResult).toMatchObject({ code: "CANCELLED" });
+  });
+
   it("reports missing browser configuration before sending a request", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);

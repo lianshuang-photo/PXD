@@ -2,9 +2,12 @@ import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react"
 import type { AppSettings } from "../context/types";
 import { useGenerationController } from "../hooks/useGenerationController";
 import OverlayPortal from "../components/OverlayPortal";
+import PromptParamControls from "../components/PromptParamControls";
 
 interface Props {
   settings: AppSettings;
+  settingsLoading: boolean;
+  onUpdateSettings: (next: Partial<AppSettings>) => Promise<void>;
   onOpenSettings: () => void;
 }
 
@@ -15,6 +18,14 @@ const statusLabelMap: Record<string, string> = {
   error: "生成失败"
 };
 
+const batchStatusLabelMap = {
+  queued: "排队中",
+  running: "生成中",
+  success: "已完成",
+  stopped: "已停止",
+  error: "失败"
+} as const;
+
 const languageOptions = [
   { value: "zh", label: "中文" },
   { value: "en", label: "English" },
@@ -24,25 +35,30 @@ const languageOptions = [
 
 const resolutionPresets = [768, 1024, 1536, 2048];
 
-const formatDateTime = (value: string) => {
+const formatDateTime = (value: string | number) => {
   try {
     const date = new Date(value);
-    return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
+    if (Number.isNaN(date.getTime())) return String(value);
+    const pad = (part: number) => String(part).padStart(2, "0");
+    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
   } catch {
-    return value;
+    return String(value);
   }
 };
 
-const MainPanel = ({ settings, onOpenSettings }: Props) => {
-  const controller = useGenerationController(settings);
+const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings }: Props) => {
+  const controller = useGenerationController(settings, {
+    settingsLoading,
+    updateSettings: onUpdateSettings
+  });
   const {
     form,
     setFormValue,
     resetForm,
     setResolution,
-    setPresetShortcut,
     status,
     progress,
+    progressMode,
     progressPreview,
     progressText,
     error,
@@ -52,6 +68,12 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
     optionsError,
     refreshOptions,
     runGeneration,
+    stopGeneration,
+    history,
+    historyLoading,
+    historyError,
+    restoreHistoryConfig,
+    pasteHistoryResult,
     batchItems,
     addToBatch,
     removeFromBatch,
@@ -83,6 +105,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
     appendExtraPromptToPositive,
     appendExtraPromptToNegative
   } = controller;
+  const hasRunnableBatchItems = batchItems.some((item) => item.status !== "success");
 
   const [presetFile, setPresetFile] = useState<string>("");
   const [presetName, setPresetName] = useState<string>("");
@@ -353,10 +376,25 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
         >
           {status === "running" ? "生成中" : "开始生成"}
         </button>
+        <button
+          type="button"
+          className="btn btn--secondary"
+          onClick={stopGeneration}
+          disabled={status !== "running"}
+          style={{
+            ...compactTopActionButtonStyle,
+            color: "#fca5a5",
+            borderTopColor: "rgba(239, 68, 68, 0.45)",
+            borderBottomColor: "rgba(239, 68, 68, 0.45)"
+          }}
+        >
+          停止
+        </button>
         <button 
           type="button" 
           className="btn btn--secondary" 
           onClick={addToBatch}
+          disabled={status === "running"}
           style={compactTopActionButtonStyle}
         >
           加入批次
@@ -365,7 +403,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
           type="button"
           className="btn btn--secondary"
           onClick={runBatch}
-          disabled={!batchItems.length || status === "running"}
+          disabled={!hasRunnableBatchItems || status === "running"}
           style={compactTopActionButtonStyle}
         >
           执行批次
@@ -374,7 +412,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
           type="button" 
           className="btn btn--ghost" 
           onClick={refreshOptions} 
-          disabled={optionsLoading}
+          disabled={optionsLoading || status === "running"}
           style={compactTopActionButtonStyle}
         >
           {optionsLoading ? "同步中" : "刷新"}
@@ -390,9 +428,13 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
           <div className="generation-progress__details">
             <div className="generation-progress__row">
               <div className="generation-progress__track">
-                <div className="generation-progress__fill" style={{ width: `${progressPercent}%` }} />
+                {progressMode === "indeterminate" ? (
+                  <div className="generation-progress__indeterminate" />
+                ) : (
+                  <div className="generation-progress__fill" style={{ width: `${progressPercent}%` }} />
+                )}
               </div>
-              <span>{progressPercent}%</span>
+              <span>{progressMode === "indeterminate" ? "处理中" : `${progressPercent}%`}</span>
             </div>
             {progressText && <span className="generation-progress__text">{progressText}</span>}
           </div>
@@ -473,7 +515,59 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                   </button>
                 </div>
               </div>
-              
+
+              <hr style={{ margin: "0.2rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
+              <section aria-label="生成历史">
+                <div className="generation-history__header">
+                  <span style={compactLabelStyle}>生成历史</span>
+                  <span className="generation-history__count">{history.length}/50</span>
+                </div>
+                {historyError && <div className="generation-history__error">{historyError}</div>}
+                {historyLoading ? (
+                  <div className="generation-history__empty">正在加载…</div>
+                ) : history.length === 0 ? (
+                  <div className="generation-history__empty">暂无生成记录</div>
+                ) : (
+                  <div className="generation-history__stream">
+                    {history.map((entry) => (
+                      <div className="generation-history__item" key={entry.id}>
+                        <img
+                          className="generation-history__thumbnail"
+                          src={entry.thumbnailDataUrl}
+                          alt={entry.prompt || "生成结果"}
+                        />
+                        <div className="generation-history__content">
+                          <div className="generation-history__prompt" title={entry.prompt}>
+                            {entry.prompt || "未命名生成"}
+                          </div>
+                          <div className="generation-history__meta">
+                            <span>{entry.provider === "forge" ? "Forge" : "Gemini"}</span>
+                            <span>{formatDateTime(entry.ts)}</span>
+                          </div>
+                          <div className="generation-history__actions">
+                            <button
+                              type="button"
+                              className="btn btn--ghost"
+                              onClick={() => void restoreHistoryConfig(entry.id)}
+                            >
+                              回填配置
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn--ghost"
+                              disabled={status === "running"}
+                              onClick={() => void pasteHistoryResult(entry.id)}
+                            >
+                              再次贴回
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+
               {/* 模型与采样 */}
               <hr style={{ margin: "0.2rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
               <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", marginBottom: "0.12rem" }}>
@@ -722,6 +816,11 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                 placeholder="正向提示词"
                 style={{ marginBottom: "0.35rem" }}
               />
+              <PromptParamControls
+                prompt={form.positivePrompt}
+                label="正向提示词"
+                onChange={(value) => setFormValue("positivePrompt", value)}
+              />
               <textarea
                 className="input input--multiline"
                 value={form.negativePrompt}
@@ -742,6 +841,11 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                 rows={2}
                 placeholder="反向提示词"
                 style={{ marginBottom: "0.35rem" }}
+              />
+              <PromptParamControls
+                prompt={form.negativePrompt}
+                label="反向提示词"
+                onChange={(value) => setFormValue("negativePrompt", value)}
               />
               <div style={{ display: "flex", gap: "0.35rem", marginBottom: "0.35rem" }}>
                 <textarea
@@ -774,10 +878,15 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                   </button>
                 </div>
               </div>
+              <PromptParamControls
+                prompt={form.extraPrompt}
+                label="追加提示词"
+                onChange={(value) => setFormValue("extraPrompt", value)}
+              />
               
               {/* 翻译 */}
               <hr style={{ margin: "0.5rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
-              <div style={{ fontSize: "0.7rem", fontWeight: 500, marginBottom: "0.25rem", color: "var(--color-text-secondary)" }}>翻译助手（这个懒得找api也没啥用，如果你向下滑看到了就当没看见吧～）</div>
+              <div style={{ fontSize: "0.7rem", fontWeight: 500, marginBottom: "0.25rem", color: "var(--text-secondary)" }}>翻译助手（这个懒得找api也没啥用，如果你向下滑看到了就当没看见吧～）</div>
               <div style={{ display: "flex", gap: "0.35rem", marginBottom: "0.35rem" }}>
                 <select
                   className="input"
@@ -850,30 +959,31 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
                 placeholder="翻译结果"
                 style={{ marginBottom: "0.5rem" }}
               />
-              {translationError && <div style={{ color: "var(--color-error)", fontSize: "0.875rem", marginTop: "-0.35rem", marginBottom: "0.5rem" }}>{translationError}</div>}
+              {translationError && <div style={{ color: "var(--error-color)", fontSize: "0.875rem", marginTop: "-0.35rem", marginBottom: "0.5rem" }}>{translationError}</div>}
               
               {/* 批次队列 */}
               {batchItems.length > 0 && (
                 <>
-                  <hr style={{ margin: "1rem 0", border: "none", borderTop: "1px solid var(--color-border, #e0e0e0)" }} />
+                  <hr style={{ margin: "1rem 0", border: "none", borderTop: "1px solid var(--border-color)" }} />
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
                     <span style={{ fontSize: "0.875rem", fontWeight: 500 }}>批次队列 ({batchItems.length})</span>
-                    <button type="button" className="btn btn--ghost" onClick={clearBatch} style={{ padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}>
+                    <button type="button" className="btn btn--ghost" onClick={clearBatch} disabled={status === "running"} style={{ padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}>
                       清空
                     </button>
                   </div>
                   <ul style={{ listStyle: "none", padding: 0, margin: "0 0 1rem 0" }}>
                     {batchItems.map((item) => (
-                      <li key={item.id} style={{ padding: "0.5rem", border: "1px solid var(--color-border, #e0e0e0)", borderRadius: "4px", marginBottom: "0.5rem", fontSize: "0.75rem" }}>
+                      <li key={item.id} style={{ padding: "0.5rem", border: "1px solid var(--border-color)", borderRadius: "4px", marginBottom: "0.5rem", fontSize: "0.75rem" }}>
                         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.25rem" }}>
                           <span style={{ fontWeight: 500 }}>{item.name}</span>
-                          <button type="button" className="btn btn--ghost" onClick={() => removeFromBatch(item.id)} style={{ padding: "0.125rem 0.5rem", fontSize: "0.75rem" }}>
+                          <button type="button" className="btn btn--ghost" onClick={() => removeFromBatch(item.id)} disabled={status === "running"} style={{ padding: "0.125rem 0.5rem", fontSize: "0.75rem" }}>
                             移除
                           </button>
                         </div>
-                        <div style={{ color: "var(--color-text-secondary)", fontSize: "0.7rem" }}>
-                          {item.overrideWidth}×{item.overrideHeight} · {item.form.steps}步 · CFG{item.form.cfgScale}
+                        <div style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>
+                          {item.overrideWidth}×{item.overrideHeight} · {item.form.steps}步 · CFG{item.form.cfgScale} · {batchStatusLabelMap[item.status]}
                         </div>
+                        {item.error && <div style={{ color: "#f87171", fontSize: "0.7rem", marginTop: "0.2rem" }}>{item.error}</div>}
                       </li>
                     ))}
                   </ul>
@@ -883,7 +993,7 @@ const MainPanel = ({ settings, onOpenSettings }: Props) => {
               {/* 最近输出 */}
               {lastImages.length > 0 && (
                 <>
-                  <hr style={{ margin: "1rem 0", border: "none", borderTop: "1px solid var(--color-border, #e0e0e0)" }} />
+                  <hr style={{ margin: "1rem 0", border: "none", borderTop: "1px solid var(--border-color)" }} />
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(100px, 1fr))", gap: "0.5rem" }}>
                     {lastImages.map((src, index) => (
                       <img key={`${src}-${index}`} src={src} alt={`result-${index}`} style={{ width: "100%", borderRadius: "4px" }} />

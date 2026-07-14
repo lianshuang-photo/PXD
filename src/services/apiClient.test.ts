@@ -1,136 +1,242 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createPxdClient, type Img2ImgParams } from "./apiClient";
 import { DEFAULT_SETTINGS } from "./settings";
-
-const jsonResponse = (payload: unknown, status = 200) =>
-  new Response(JSON.stringify(payload), {
-    status,
-    headers: { "Content-Type": "application/json" }
-  });
+import {
+  createPxdClient,
+  normalizeOptions,
+  PxdRequestCancelledError,
+  PxdRequestTimeoutError,
+  type Img2ImgParams
+} from "./apiClient";
 
 const settings = {
   ...DEFAULT_SETTINGS,
-  sdEndpoint: "http://forge.test:7860/"
+  sdEndpoint: "http://127.0.0.1:7860",
+  timeoutMinSeconds: 5,
+  timeoutMaxSeconds: 5,
+  timeoutMultiplier: 1
 };
 
-const baseParams = {
-  prompt: "portrait",
-  negativePrompt: "blur",
-  steps: 20,
+const params: Img2ImgParams = {
+  prompt: "edit",
+  steps: 1,
   cfgScale: 7,
   batchSize: 1,
-  width: 512,
-  height: 512,
-  loras: [{ name: "detail-xl", weight: 0.65 }]
+  width: 64,
+  height: 64,
+  denoisingStrength: 0.4,
+  baseImage: "data:image/png;base64,BASE"
 };
+
+const createAbortingFetch = () => vi.fn((_url: string, init: RequestInit) =>
+  new Promise<Response>((_resolve, reject) => {
+    const rejectAbort = () => reject(new DOMException("aborted", "AbortError"));
+    if (init.signal?.aborted) rejectAbort();
+    else init.signal?.addEventListener("abort", rejectAbort, { once: true });
+  })
+);
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
-describe("createPxdClient Forge protocols", () => {
-  it("normalizes ControlNet string lists and falls back across Forge endpoints", async () => {
-    const fetchMock = vi.fn().mockImplementation(async (urlValue: string) => {
-      const url = new URL(urlValue);
-      const path = `${url.pathname}${url.search}`;
-      const responses: Record<string, Response> = {
-        "/sdapi/v1/sd-models": jsonResponse([{ title: "Model Title", model_name: "model-id" }]),
-        "/sdapi/v1/sd-modules": jsonResponse([]),
-        "/sdapi/v1/loras": jsonResponse([{ name: "detail-xl", alias: "Detail XL" }]),
-        "/sdapi/v1/samplers": jsonResponse([{ name: "Euler" }]),
-        "/sdapi/v1/schedulers": jsonResponse([{ label: "Karras", name: "karras" }]),
-        "/controlnet/model_list": jsonResponse({ message: "missing" }, 404),
-        "/sdapi/v1/controlnet/model_list": jsonResponse({
-          model_list: ["control_v11p_sd15_canny"]
-        }),
-        "/controlnet/module_list?alias_names=true": jsonResponse({
-          module_list: ["canny", "depth_midas"]
-        })
-      };
-      return responses[path] ?? jsonResponse({ message: `unexpected ${path}` }, 404);
-    });
+describe("createPxdClient cancellation", () => {
+  it("cancels a Forge request by task ID and exposes a recognizable error", async () => {
+    const fetchMock = createAbortingFetch();
     vi.stubGlobal("fetch", fetchMock);
+    const client = createPxdClient(settings);
 
-    const options = await createPxdClient(settings).fetchOptions();
+    const pending = client.img2img(params, { taskId: "forge-one" });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
 
-    expect(options.models).toMatchObject([{ label: "Model Title", value: "model-id" }]);
-    expect(options.loras).toMatchObject([{ label: "detail-xl", value: "detail-xl" }]);
-    expect(options.controlNetModels).toMatchObject([
-      { label: "control_v11p_sd15_canny", value: "control_v11p_sd15_canny" }
-    ]);
-    expect(options.controlNetModules.map(({ value }) => value)).toEqual(["canny", "depth_midas"]);
-    expect(fetchMock.mock.calls.map(([url]) => String(url))).toContain(
-      "http://forge.test:7860/sdapi/v1/controlnet/model_list"
-    );
+    expect(client.cancel("forge-one")).toBe(true);
+    await expect(pending).rejects.toMatchObject({
+      name: PxdRequestCancelledError.name,
+      code: "CANCELLED",
+      taskId: "forge-one"
+    });
+    expect(client.cancel("forge-one")).toBe(false);
   });
 
-  it("sends LoRA and both ControlNet protocol shapes through img2img", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ images: ["OUTPUT"] }));
+  it("cancels every active Forge request", async () => {
+    const fetchMock = createAbortingFetch();
     vi.stubGlobal("fetch", fetchMock);
-    const params: Img2ImgParams = {
-      ...baseParams,
-      baseImage: "data:image/png;base64,BASE",
-      denoisingStrength: 0.4,
-      controlNet: {
-        model: "control-canny",
-        module: "canny",
-        weight: 0.8,
-        image: "data:image/png;base64,CONTROL"
-      }
-    };
+    const client = createPxdClient(settings);
+    const first = client.img2img(params, { taskId: "first" });
+    const second = client.img2img(params, { taskId: "second" });
+    const firstAssertion = expect(first).rejects.toBeInstanceOf(PxdRequestCancelledError);
+    const secondAssertion = expect(second).rejects.toBeInstanceOf(PxdRequestCancelledError);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 
-    await createPxdClient(settings).img2img(params);
-
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("http://forge.test:7860/sdapi/v1/img2img");
-    const body = JSON.parse(String(init.body));
-    expect(body.prompt).toBe("portrait <lora:detail-xl:0.65>");
-    expect(body.init_images).toEqual(["BASE"]);
-    expect(body.controlnet_units[0]).toMatchObject({
-      model: "control-canny",
-      module: "canny",
-      weight: 0.8,
-      image: "CONTROL"
-    });
-    expect(body.alwayson_scripts.ControlNet.args).toEqual(body.controlnet_units);
+    expect(client.cancelAll()).toBe(2);
+    await Promise.all([firstAssertion, secondAssertion]);
+    expect(client.cancelAll()).toBe(0);
   });
 
-  it("routes text-only generation to txt2img with the shared Forge payload", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ images: ["OUTPUT"] }));
+  it("aborts the underlying fetch when the dynamic timeout expires", async () => {
+    vi.useFakeTimers();
+    const fetchMock = createAbortingFetch();
     vi.stubGlobal("fetch", fetchMock);
+    const client = createPxdClient(settings);
 
-    await createPxdClient(settings).txt2img({
-      ...baseParams,
-      width: 768,
-      height: 768
+    const pending = client.img2img(params, { taskId: "slow" });
+    const assertion = expect(pending).rejects.toMatchObject({
+      name: PxdRequestTimeoutError.name,
+      code: "TIMEOUT",
+      timeoutMs: 12_500,
+      taskId: "slow"
     });
-
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("http://forge.test:7860/sdapi/v1/txt2img");
-    const body = JSON.parse(String(init.body));
-    expect(body).toMatchObject({ width: 768, height: 768, batch_size: 1 });
-    expect(body.prompt).toContain("<lora:detail-xl:0.65>");
-    expect(body).not.toHaveProperty("init_images");
+    await vi.advanceTimersByTimeAsync(12_500);
+    await assertion;
+    const init = fetchMock.mock.calls[0][1];
+    expect(init.signal?.aborted).toBe(true);
   });
 
-  it("requests and preserves the Forge live progress preview", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
-      progress: 0.42,
-      eta_relative: 3,
-      current_image: "PREVIEW",
-      textinfo: "Sampling"
+  it("does not leave a completed request registered", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ images: ["done"] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    })));
+    const client = createPxdClient(settings);
+
+    await expect(client.img2img(params, { taskId: "complete" })).resolves.toMatchObject({ images: ["done"] });
+    expect(client.cancel("complete")).toBe(false);
+  });
+
+  it("honors cancellation while a successful Forge response is still parsing", async () => {
+    vi.useFakeTimers();
+    let finishParsing: (() => void) | undefined;
+    const json = vi.fn(() => new Promise<{ images: string[] }>((resolve) => {
+      finishParsing = () => resolve({ images: ["late"] });
     }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json } as unknown as Response));
+    const client = createPxdClient(settings);
+    const pending = client.img2img(params, { taskId: "parsing" });
+    const result = pending.catch((error) => error);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(json).toHaveBeenCalledOnce();
+
+    expect(client.cancel("parsing")).toBe(true);
+    await vi.advanceTimersByTimeAsync(12_500);
+    finishParsing?.();
+    expect(await result).toBeInstanceOf(PxdRequestCancelledError);
+  });
+
+  it("stops option fallbacks immediately when all requests are cancelled", async () => {
+    const fetchMock = createAbortingFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createPxdClient(settings);
+    const pending = client.fetchOptions();
+    const assertion = expect(pending).rejects.toBeInstanceOf(PxdRequestCancelledError);
+    await vi.waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(7));
+
+    expect(client.cancelAll()).toBeGreaterThanOrEqual(7);
+    await assertion;
+    const requestedPaths = fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname);
+    expect(requestedPaths).not.toContain("/sdapi/v1/sd-vae");
+    expect(requestedPaths).not.toContain("/controlnet/models");
+  });
+
+  it("does not let an older request remove a replacement with the same task ID", async () => {
+    const fetchMock = createAbortingFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createPxdClient(settings);
+    const first = client.img2img(params, { taskId: "reused" });
+    const firstAssertion = expect(first).rejects.toBeInstanceOf(PxdRequestCancelledError);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+
+    const replacement = client.img2img(params, { taskId: "reused" });
+    const replacementAssertion = expect(replacement).rejects.toBeInstanceOf(PxdRequestCancelledError);
+    await firstAssertion;
+    expect(client.cancel("reused")).toBe(true);
+    await replacementAssertion;
+  });
+});
+
+describe("normalizeOptions", () => {
+  it("keeps the readable title while using the backend model key as value", () => {
+    const result = normalizeOptions(
+      [{ title: "Readable checkpoint title", model_name: "checkpoint-id" }],
+      ["title", "model_name", "name"],
+      "model_name"
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      label: "Readable checkpoint title",
+      value: "checkpoint-id"
+    });
+  });
+
+  it("does not drop entries that have a title but omit the preferred value key", () => {
+    const source = [
+      { title: "Title only" },
+      { model_name: "model-key-only" },
+      { title: "Title and key", model_name: "model-key" }
+    ];
+
+    const result = normalizeOptions(source, ["title", "model_name", "name"], "model_name");
+
+    expect(result).toHaveLength(source.length);
+    expect(result.map(({ label, value }) => ({ label, value }))).toEqual([
+      { label: "Title only", value: "Title only" },
+      { label: "model-key-only", value: "model-key-only" },
+      { label: "Title and key", value: "model-key" }
+    ]);
+  });
+
+  it("normalizes string options without dropping entries", () => {
+    const result = normalizeOptions(["canny", " depth ", ""], ["module", "name"]);
+
+    expect(result.map(({ label, value }) => ({ label, value }))).toEqual([
+      { label: "canny", value: "canny" },
+      { label: "depth", value: "depth" }
+    ]);
+  });
+});
+
+describe("fetchOptions", () => {
+  it("reads official ControlNet wrapper responses and ignores module_detail", async () => {
+    vi.stubGlobal("window", {
+      setTimeout: globalThis.setTimeout.bind(globalThis),
+      clearTimeout: globalThis.clearTimeout.bind(globalThis)
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname;
+      const payloadByPath: Record<string, unknown> = {
+        "/sdapi/v1/sd-models": [{ title: "Readable model", model_name: "model-key" }],
+        "/sdapi/v1/sd-modules": [],
+        "/sdapi/v1/loras": [],
+        "/sdapi/v1/samplers": [],
+        "/sdapi/v1/schedulers": [],
+        "/controlnet/model_list": { model_list: ["control-a", "control-b"] },
+        "/controlnet/module_list": {
+          module_list: ["canny", "depth"],
+          module_detail: { canny: { sliders: [] } }
+        }
+      };
+      return new Response(JSON.stringify(payloadByPath[path] ?? []), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
     vi.stubGlobal("fetch", fetchMock);
 
-    const progress = await createPxdClient(settings).fetchProgress();
+    const options = await createPxdClient(DEFAULT_SETTINGS).fetchOptions();
 
-    expect(fetchMock.mock.calls[0][0]).toBe(
-      "http://forge.test:7860/sdapi/v1/progress?skip_current_image=false"
-    );
-    expect(progress).toMatchObject({
-      progress: 0.42,
-      current_image: "PREVIEW",
-      textinfo: "Sampling"
-    });
+    expect(options.models.map(({ label, value }) => ({ label, value }))).toEqual([
+      { label: "Readable model", value: "model-key" }
+    ]);
+    expect(options.controlNetModels.map(({ label, value }) => ({ label, value }))).toEqual([
+      { label: "control-a", value: "control-a" },
+      { label: "control-b", value: "control-b" }
+    ]);
+    expect(options.controlNetModules.map(({ label, value }) => ({ label, value }))).toEqual([
+      { label: "canny", value: "canny" },
+      { label: "depth", value: "depth" }
+    ]);
+    const requestedPaths = fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname);
+    expect(requestedPaths).not.toContain("/controlnet/models");
   });
 });

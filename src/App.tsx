@@ -25,7 +25,14 @@ const App = () => {
         );
       case "main":
       default:
-        return <MainPanel settings={settings} onOpenSettings={() => setActiveView("settings")} />;
+        return (
+          <MainPanel
+            settings={settings}
+            settingsLoading={loading}
+            onUpdateSettings={update}
+            onOpenSettings={() => setActiveView("settings")}
+          />
+        );
     }
   };
 

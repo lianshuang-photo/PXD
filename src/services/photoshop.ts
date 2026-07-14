@@ -1,4 +1,5 @@
 import { bridge } from "./uxpBridge";
+import { runPSExclusive } from "./psLock";
 
 export interface SelectionBounds {
   left: number;
@@ -14,6 +15,19 @@ export interface SelectionPixels {
   selectionBounds: SelectionBounds;
 }
 
+export interface PhotoshopOperationOptions {
+  taskId?: string;
+  timeoutMs?: number;
+}
+
+export interface PlaceImageOptions extends PhotoshopOperationOptions {
+  feather?: number;
+}
+
+export interface MoveLayerOptions extends PhotoshopOperationOptions {
+  layerId: number;
+}
+
 const DEFAULT_MODAL_OPTIONS = { commandName: "PXDUI" };
 
 const getPhotoshop = () => bridge.photoshop;
@@ -26,6 +40,20 @@ const ensureModule = <T>(moduleGetter: () => T | undefined, name: string): T => 
   }
   return mod;
 };
+
+const executeAsModalUnlocked = <T>(
+  photoshop: any,
+  operation: () => Promise<T>,
+  options: Record<string, unknown>
+): Promise<T> => photoshop.core.executeAsModal(operation, options);
+
+const runTransaction = <T>(
+  operation: () => Promise<T>,
+  options: PhotoshopOperationOptions = {}
+): Promise<T> => runPSExclusive(operation, {
+  taskId: options.taskId,
+  timeoutMs: options.timeoutMs
+});
 
 const toBounds = (bounds: any): SelectionBounds => ({
   left: Math.round(Number(bounds.left)),
@@ -61,7 +89,7 @@ const MASK_MAX_CONTRACT = 120;
 const MASK_MAX_FEATHER = 1200;
 const DEFAULT_GROUP_NAME = "PXD生成结果";
 
-const runJsxCode = async (jsx: string) => {
+const runJsxCodeUnlocked = async (jsx: string) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
   const folder = await bridge.getDataFolder();
   if (!folder) return null;
@@ -151,7 +179,7 @@ const resizeActiveLayerToBounds = async (bounds: SelectionBounds) => {
         }
     `;
   try {
-    await runJsxCode(jsx);
+    await runJsxCodeUnlocked(jsx);
   } catch (error) {
     console.warn("resizeActiveLayerToBounds failed", error);
   }
@@ -160,7 +188,7 @@ const resizeActiveLayerToBounds = async (bounds: SelectionBounds) => {
 const tryCreateMaskFromSelection = async (hasSelection: boolean) => {
   try {
     const photoshop = ensureModule(getPhotoshop, "Photoshop");
-    await photoshop.core.executeAsModal(async () => {
+    await executeAsModalUnlocked(photoshop, async () => {
       await photoshop.app.batchPlay(
         [
           {
@@ -206,7 +234,7 @@ const adjustSelectionForMask = async (bounds: SelectionBounds, featherOverride?:
         }
     `;
   try {
-    await runJsxCode(jsx);
+    await runJsxCodeUnlocked(jsx);
   } catch (error) {
     console.warn("adjustSelectionForMask failed", error);
   }
@@ -221,14 +249,14 @@ const uniqueLayerIds = (layerIds: number[]) =>
     )
   );
 
-export interface GroupLayersOptions {
+export interface GroupLayersOptions extends PhotoshopOperationOptions {
   requireGroup?: boolean;
 }
 
-export const groupLayers = async (
+const groupLayersUnlocked = async (
   layerIds: number[],
-  groupName = DEFAULT_GROUP_NAME,
-  options: GroupLayersOptions = {}
+  groupName: string,
+  options: { requireGroup?: boolean } = {}
 ): Promise<number | null> => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
   const ids = uniqueLayerIds(layerIds);
@@ -262,13 +290,13 @@ export const groupLayers = async (
         }
     `;
   try {
-    await runJsxCode(jsx);
+    await runJsxCodeUnlocked(jsx);
   } catch (error) {
     if (options.requireGroup) throw error;
     console.warn("groupLayers failed", error);
   }
   try {
-    const info = await photoshop.core.executeAsModal(async () => {
+    const info = await executeAsModalUnlocked(photoshop, async () => {
       const result = await photoshop.app.batchPlay(
         [
           {
@@ -296,7 +324,13 @@ export const groupLayers = async (
   }
 };
 
-export const hasActiveSelection = async (): Promise<boolean> => {
+export const groupLayers = (
+  layerIds: number[],
+  groupName = DEFAULT_GROUP_NAME,
+  options: GroupLayersOptions = {}
+): Promise<number | null> => runTransaction(() => groupLayersUnlocked(layerIds, groupName, options), options);
+
+const hasActiveSelectionUnlocked = async (): Promise<boolean> => {
   try {
     const photoshop = ensureModule(getPhotoshop, "Photoshop");
     const doc = photoshop.app.activeDocument;
@@ -306,7 +340,11 @@ export const hasActiveSelection = async (): Promise<boolean> => {
   }
 };
 
-export const getSelectionPixels = async (): Promise<SelectionPixels | null> => {
+export const hasActiveSelection = (
+  options: PhotoshopOperationOptions = {}
+): Promise<boolean> => runTransaction(hasActiveSelectionUnlocked, options);
+
+const getSelectionPixelsUnlocked = async (): Promise<SelectionPixels | null> => {
   try {
     const photoshop = ensureModule(getPhotoshop, "Photoshop");
     const doc = photoshop.app.activeDocument;
@@ -314,7 +352,8 @@ export const getSelectionPixels = async (): Promise<SelectionPixels | null> => {
       return null;
     }
     const bounds = toBounds(doc.selection.bounds);
-    return await photoshop.core.executeAsModal(
+    return await executeAsModalUnlocked(
+      photoshop,
       async () => {
         const options = {
           documentID: doc.id,
@@ -346,9 +385,13 @@ export const getSelectionPixels = async (): Promise<SelectionPixels | null> => {
   }
 };
 
-export const setSelectionBounds = async (bounds: SelectionBounds) => {
+export const getSelectionPixels = (
+  options: PhotoshopOperationOptions = {}
+): Promise<SelectionPixels | null> => runTransaction(getSelectionPixelsUnlocked, options);
+
+const setSelectionBoundsUnlocked = async (bounds: SelectionBounds) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  await photoshop.core.executeAsModal(async () => {
+  await executeAsModalUnlocked(photoshop, async () => {
     await photoshop.app.batchPlay(
       [
         {
@@ -362,10 +405,15 @@ export const setSelectionBounds = async (bounds: SelectionBounds) => {
   }, DEFAULT_MODAL_OPTIONS);
 };
 
-export const placeImageIntoSelection = async (
+export const setSelectionBounds = (
+  bounds: SelectionBounds,
+  options: PhotoshopOperationOptions = {}
+): Promise<void> => runTransaction(() => setSelectionBoundsUnlocked(bounds), options);
+
+const placeImageIntoSelectionUnlocked = async (
   dataUrl: string,
   index = 1,
-  options?: { feather?: number }
+  options: PlaceImageOptions = {}
 ) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
   const base64 = dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
@@ -381,7 +429,8 @@ export const placeImageIntoSelection = async (
 
   const token = await createTempTokenFromBase64(base64, `img-${index}.png`);
 
-  await photoshop.core.executeAsModal(
+  await executeAsModalUnlocked(
+    photoshop,
     async () => {
       const steps: any[] = [
         {
@@ -414,7 +463,7 @@ export const placeImageIntoSelection = async (
     { commandName: "import image file" }
   );
 
-  const info = await photoshop.core.executeAsModal(async () => {
+  const info = await executeAsModalUnlocked(photoshop, async () => {
     const result = await photoshop.app.batchPlay(
       [
         {
@@ -427,12 +476,12 @@ export const placeImageIntoSelection = async (
     return result[0];
   }, DEFAULT_MODAL_OPTIONS);
   if (cachedBounds) {
-    await setSelectionBounds(cachedBounds).catch((error) => console.warn("restore selection failed", error));
+    await setSelectionBoundsUnlocked(cachedBounds).catch((error) => console.warn("restore selection failed", error));
     await resizeActiveLayerToBounds(cachedBounds);
-    await setSelectionBounds(cachedBounds).catch((error) => console.warn("restore selection failed", error));
+    await setSelectionBoundsUnlocked(cachedBounds).catch((error) => console.warn("restore selection failed", error));
     await adjustSelectionForMask(cachedBounds, userFeather);
     await tryCreateMaskFromSelection(true);
-    await setSelectionBounds(cachedBounds).catch((error) => console.warn("restore selection failed", error));
+    await setSelectionBoundsUnlocked(cachedBounds).catch((error) => console.warn("restore selection failed", error));
   } else {
     await tryCreateMaskFromSelection(false);
   }
@@ -444,7 +493,7 @@ export interface GeneratedDocumentSession {
   previousDocumentId: number | null;
 }
 
-export const createGeneratedDocument = async (
+const createGeneratedDocumentUnlocked = async (
   width: number,
   height: number,
   name = "PXD 文生图"
@@ -461,7 +510,7 @@ export const createGeneratedDocument = async (
   } catch {
     // Text-to-image also supports starting with no open Photoshop document.
   }
-  const documentId = await photoshop.core.executeAsModal(async () => {
+  const documentId = await executeAsModalUnlocked(photoshop, async () => {
     if (typeof photoshop.app.createDocument === "function") {
       try {
         const document = await photoshop.app.createDocument({
@@ -510,14 +559,14 @@ export const createGeneratedDocument = async (
   return { documentId, previousDocumentId };
 };
 
-export const closeGeneratedDocument = async (
+const closeGeneratedDocumentUnlocked = async (
   documentId: number,
   restoreDocumentId: number | null
 ): Promise<void> => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
   let cleanupError: unknown;
   try {
-    await photoshop.core.executeAsModal(async () => {
+    await executeAsModalUnlocked(photoshop, async () => {
       await photoshop.app.batchPlay(
         [
           {
@@ -534,7 +583,7 @@ export const closeGeneratedDocument = async (
   }
   if (restoreDocumentId) {
     try {
-      await photoshop.core.executeAsModal(async () => {
+      await executeAsModalUnlocked(photoshop, async () => {
         await photoshop.app.batchPlay(
           [{ _obj: "select", _target: [{ _ref: "document", _id: restoreDocumentId }] }],
           { synchronousExecution: true }
@@ -547,13 +596,36 @@ export const closeGeneratedDocument = async (
   if (cleanupError) throw cleanupError;
 };
 
-export const placeImageIntoDocument = async (dataUrl: string, index = 1, docId?: number) => {
+
+export const createGeneratedDocument = (
+  width: number,
+  height: number,
+  name = "PXD 文生图",
+  options: PhotoshopOperationOptions = {}
+): Promise<GeneratedDocumentSession> =>
+  runTransaction(() => createGeneratedDocumentUnlocked(width, height, name), options);
+
+export const closeGeneratedDocument = (
+  documentId: number,
+  restoreDocumentId: number | null,
+  options: PhotoshopOperationOptions = {}
+): Promise<void> =>
+  runTransaction(() => closeGeneratedDocumentUnlocked(documentId, restoreDocumentId), options);
+
+export const placeImageIntoSelection = (
+  dataUrl: string,
+  index = 1,
+  options: PlaceImageOptions = {}
+) => runTransaction(() => placeImageIntoSelectionUnlocked(dataUrl, index, options), options);
+
+const placeImageIntoDocumentUnlocked = async (dataUrl: string, index = 1, docId?: number) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
   const doc = photoshop.app.activeDocument;
   const base64 = dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
   const token = await createTempTokenFromBase64(base64, `imgdoc-${index}.png`);
 
-  await photoshop.core.executeAsModal(
+  await executeAsModalUnlocked(
+    photoshop,
     async () => {
       const steps: any[] = [
         {
@@ -579,7 +651,7 @@ export const placeImageIntoDocument = async (dataUrl: string, index = 1, docId?:
     { commandName: "import image file" }
   );
 
-  const info = await photoshop.core.executeAsModal(async () => {
+  const info = await executeAsModalUnlocked(photoshop, async () => {
     const result = await photoshop.app.batchPlay(
       [
         {
@@ -594,14 +666,21 @@ export const placeImageIntoDocument = async (dataUrl: string, index = 1, docId?:
   return info;
 };
 
-export const moveActiveLayerToTop = async () => {
+export const placeImageIntoDocument = (
+  dataUrl: string,
+  index = 1,
+  docId?: number,
+  options: PhotoshopOperationOptions = {}
+) => runTransaction(() => placeImageIntoDocumentUnlocked(dataUrl, index, docId), options);
+
+const moveActiveLayerToTopUnlocked = async (layerId: number) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  await photoshop.core.executeAsModal(async () => {
+  await executeAsModalUnlocked(photoshop, async () => {
     await photoshop.app.batchPlay(
       [
         {
           _obj: "move",
-          _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }],
+          _target: [{ _ref: "layer", _id: layerId }],
           to: { _ref: "layer", _enum: "ordinal", _value: "front" }
         }
       ],
@@ -610,7 +689,11 @@ export const moveActiveLayerToTop = async () => {
   }, DEFAULT_MODAL_OPTIONS);
 };
 
-export const closeDocument = async (docId: number, activeDocId: number, newLayerId: number) => {
+export const moveActiveLayerToTop = (
+  options: MoveLayerOptions
+): Promise<void> => runTransaction(() => moveActiveLayerToTopUnlocked(options.layerId), options);
+
+const closeDocumentUnlocked = async (docId: number, activeDocId: number, newLayerId: number) => {
   const jsx = `
         try {
             var descSelectDoc = new ActionDescriptor();
@@ -645,11 +728,18 @@ export const closeDocument = async (docId: number, activeDocId: number, newLayer
             executeAction(charIDToTypeID("Dlt "), descDeleteLayer, DialogModes.NO);
         } catch (error) {}
     `;
-  await runJsxCode(jsx);
+  await runJsxCodeUnlocked(jsx);
 };
 
-export const onBatchAddLayer = async (): Promise<[number, number, number] | null> => {
-  const result = await runJsxCode(`
+export const closeDocument = (
+  docId: number,
+  activeDocId: number,
+  newLayerId: number,
+  options: PhotoshopOperationOptions = {}
+): Promise<void> => runTransaction(() => closeDocumentUnlocked(docId, activeDocId, newLayerId), options);
+
+const onBatchAddLayerUnlocked = async (): Promise<[number, number, number] | null> => {
+  const result = await runJsxCodeUnlocked(`
         try {
             var activeDoc = app.activeDocument;
             var activeDocId = activeDoc.id;
@@ -705,9 +795,13 @@ export const onBatchAddLayer = async (): Promise<[number, number, number] | null
   return [activeDocId, createDocId, newLayerId];
 };
 
-export const switchToDocument = async (docId: number) => {
+export const onBatchAddLayer = (
+  options: PhotoshopOperationOptions = {}
+): Promise<[number, number, number] | null> => runTransaction(onBatchAddLayerUnlocked, options);
+
+const switchToDocumentUnlocked = async (docId: number) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  await photoshop.core.executeAsModal(async () => {
+  await executeAsModalUnlocked(photoshop, async () => {
     await photoshop.app.batchPlay(
       [
         {
@@ -719,3 +813,8 @@ export const switchToDocument = async (docId: number) => {
     );
   }, DEFAULT_MODAL_OPTIONS);
 };
+
+export const switchToDocument = (
+  docId: number,
+  options: PhotoshopOperationOptions = {}
+): Promise<void> => runTransaction(() => switchToDocumentUnlocked(docId), options);
