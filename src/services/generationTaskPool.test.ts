@@ -185,6 +185,49 @@ describe("GenerationTaskPool", () => {
     expect(pool.activeCount).toBe(0);
   });
 
+  it("keeps a cancelled task dirty when a late rollback fails", async () => {
+    const returnStarted = deferred<void>();
+    const releaseReturn = deferred<void>();
+    const cleanupRegistered = deferred<void>();
+    const finishReturn = deferred<void>();
+    const cleanup = vi.fn()
+      .mockRejectedValueOnce(new Error("rollback still locked"))
+      .mockResolvedValue(undefined);
+    const completion = pool.enqueue(task("late-rollback", async () => ["IMAGE"], {
+      cleanup,
+      returnImages: async (_images, context) => {
+        returnStarted.resolve();
+        await releaseReturn.promise;
+        context.markCleanupPending();
+        cleanupRegistered.resolve();
+        await finishReturn.promise;
+        throw new Error("late rollback failed");
+      }
+    }));
+    await returnStarted.promise;
+
+    const cancellation = pool.cancel("late-rollback");
+    releaseReturn.resolve();
+    await cleanupRegistered.promise;
+    const removal = pool.remove("late-rollback");
+    await flush();
+    expect(cleanup).not.toHaveBeenCalled();
+    finishReturn.resolve();
+    await cancellation;
+    expect((await completion).status).toBe("cancelled");
+    expect(pool.getSnapshot()["late-rollback"]).toMatchObject({
+      status: "error",
+      cleanupPending: true,
+      error: expect.stringContaining("rollback still locked")
+    });
+
+    await expect(removal).resolves.toBe(false);
+    expect(pool.getSnapshot()["late-rollback"].cleanupPending).toBe(true);
+    expect((await pool.cleanup("late-rollback"))?.cleanupPending).toBe(false);
+    await expect(pool.remove("late-rollback")).resolves.toBe(true);
+    expect(pool.getSnapshot()["late-rollback"]).toBeUndefined();
+  });
+
   it("cancels one task without cancelling or committing stale results from another", async () => {
     const first = deferred<string[]>();
     const second = deferred<string[]>();

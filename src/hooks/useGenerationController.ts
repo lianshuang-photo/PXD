@@ -813,6 +813,11 @@ export const useGenerationController = (
     let returnOriginDocumentId: number | null = null;
     let returnTargetDocumentId: number | null = null;
     let pendingCleanup: (() => Promise<void>) | null = null;
+    let markCleanupPending: (() => void) | null = null;
+    const registerCleanup = (cleanup: () => Promise<void>) => {
+      pendingCleanup = cleanup;
+      markCleanupPending?.();
+    };
     const timeoutSeconds = Math.max(
       5,
       prepared.settings.timeoutMaxSeconds * prepared.settings.timeoutMultiplier
@@ -872,7 +877,7 @@ export const useGenerationController = (
                 await switchToDocument(returnOriginDocumentId, { taskId: prepared.id });
               }
             };
-            pendingCleanup = cleanup;
+            registerCleanup(cleanup);
             try {
               await cleanup();
               pendingCleanup = null;
@@ -914,7 +919,7 @@ export const useGenerationController = (
               );
               generatedDocument = null;
             };
-            pendingCleanup = cleanup;
+            registerCleanup(cleanup);
             await cleanup();
             pendingCleanup = null;
           }
@@ -932,6 +937,7 @@ export const useGenerationController = (
         return result.images;
       },
       returnImages: async (images, context) => {
+        markCleanupPending = context.markCleanupPending;
         returnOriginDocumentId = await getActiveDocumentId({ taskId: prepared.id });
         returnTargetDocumentId = returnOriginDocumentId;
         await returnGenerationImages(
@@ -955,6 +961,7 @@ export const useGenerationController = (
         returnOriginDocumentId = null;
         returnTargetDocumentId = null;
         pendingCleanup = null;
+        markCleanupPending = null;
       },
       cancelNetwork: () => {
         prepared.engine.cancel(prepared.id);

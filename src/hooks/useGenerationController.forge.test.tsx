@@ -89,10 +89,12 @@ const selection = {
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((candidateResolve) => {
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((candidateResolve, candidateReject) => {
     resolve = candidateResolve;
+    reject = candidateReject;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 };
 
 const flushEffects = async () => {
@@ -463,6 +465,57 @@ describe("useGenerationController Forge completion", () => {
     });
     expect(harness.controller.generationTasks[0].status).toBe("success");
     expect(boundary.placeImageIntoSelection).toHaveBeenCalledTimes(4);
+    act(() => harness.renderer.unmount());
+  });
+
+  it("keeps late failed rollback cleanup reachable after cancellation", async () => {
+    boundary.getSelectionPixels.mockResolvedValue(selection);
+    boundary.client.img2img.mockResolvedValue({ images: ["ONE"] });
+    const move = deferred<void>();
+    const cancelCleanup = deferred<void>();
+    boundary.moveActiveLayerToTop.mockImplementationOnce(() => move.promise);
+    boundary.deleteTaskLayers
+      .mockReset()
+      .mockRejectedValueOnce(new Error("late rollback failed"))
+      .mockImplementationOnce(() => cancelCleanup.promise)
+      .mockResolvedValue(undefined);
+    const harness = mountController();
+    await flushEffects();
+
+    let generation!: Promise<void>;
+    act(() => {
+      generation = harness.controller.runGeneration();
+    });
+    await vi.waitFor(() => expect(boundary.moveActiveLayerToTop).toHaveBeenCalledOnce());
+    const taskId = harness.controller.generationTasks[0].id;
+
+    let cancellation!: Promise<unknown>;
+    act(() => {
+      cancellation = harness.controller.cancelTask(taskId);
+      move.resolve(undefined);
+    });
+    await vi.waitFor(() => expect(boundary.deleteTaskLayers).toHaveBeenCalledTimes(2));
+    expect(harness.controller.generationTasks[0].cleanupPending).toBe(true);
+
+    cancelCleanup.reject(new Error("cleanup circuit open"));
+    await act(async () => {
+      await Promise.all([generation, cancellation]);
+    });
+    expect(harness.controller.generationTasks[0]).toMatchObject({
+      status: "error",
+      cleanupPending: true,
+      error: expect.stringContaining("cleanup circuit open")
+    });
+
+    await act(async () => {
+      await expect(harness.controller.removeTask(taskId)).resolves.toBe(false);
+    });
+    expect(harness.controller.generationTasks[0].cleanupPending).toBe(true);
+    await act(async () => {
+      await harness.controller.cleanupTask(taskId);
+      await expect(harness.controller.removeTask(taskId)).resolves.toBe(true);
+    });
+    expect(harness.controller.generationTasks).toHaveLength(0);
     act(() => harness.renderer.unmount());
   });
 });

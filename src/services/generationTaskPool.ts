@@ -34,6 +34,7 @@ export interface GenerationTaskRunContext {
 
 export interface GenerationTaskReturnContext {
   isCurrent: () => boolean;
+  markCleanupPending: () => void;
 }
 
 export interface GenerationTaskDefinition {
@@ -63,6 +64,8 @@ interface TaskRecord {
   resolveCompletion: (snapshot: GenerationTaskSnapshot) => void;
   retryPromise: Promise<GenerationTaskSnapshot | null> | null;
   cleanupPromise: Promise<boolean> | null;
+  returnPromise: Promise<GenerationTaskSnapshot> | null;
+  cancelPromise: Promise<GenerationTaskSnapshot> | null;
 }
 
 export interface GenerationTaskPoolOptions {
@@ -166,7 +169,9 @@ export class GenerationTaskPool {
       completion: completion.promise,
       resolveCompletion: completion.resolve,
       retryPromise: null,
-      cleanupPromise: null
+      cleanupPromise: null,
+      returnPromise: null,
+      cancelPromise: null
     };
     this.records.set(definition.id, record);
     this.emit();
@@ -176,9 +181,30 @@ export class GenerationTaskPool {
 
   async cancel(id: string): Promise<GenerationTaskSnapshot | null> {
     const record = this.records.get(id);
-    if (!record || record.snapshot.status === "cancelled" || record.snapshot.status === "success") {
+    if (!record) return null;
+    if (record.cancelPromise) return await record.cancelPromise;
+    if (record.snapshot.status === "cancelled" || record.snapshot.status === "success") {
       return record?.snapshot ?? null;
     }
+    let settleCancel!: (snapshot: GenerationTaskSnapshot) => void;
+    const cancelPromise = new Promise<GenerationTaskSnapshot>((resolve) => {
+      settleCancel = resolve;
+    });
+    record.cancelPromise = cancelPromise;
+    try {
+      const result = await this.performCancel(record);
+      settleCancel(result);
+      return result;
+    } catch (error) {
+      settleCancel({ ...record.snapshot });
+      throw error;
+    } finally {
+      if (record.cancelPromise === cancelPromise) record.cancelPromise = null;
+    }
+  }
+
+  private async performCancel(record: TaskRecord): Promise<GenerationTaskSnapshot> {
+    const activeReturn = record.returnPromise;
     record.generation += 1;
     record.controller?.abort();
     try {
@@ -200,6 +226,7 @@ export class GenerationTaskPool {
     };
     record.resolveCompletion({ ...record.snapshot });
     this.emit();
+    if (activeReturn) await activeReturn;
     await this.runCleanup(record);
     this.pump();
     return { ...record.snapshot };
@@ -220,7 +247,11 @@ export class GenerationTaskPool {
   }
 
   async cleanup(id: string): Promise<GenerationTaskSnapshot | null> {
-    const record = this.records.get(id);
+    let record = this.records.get(id);
+    if (!record) return null;
+    if (record.cancelPromise) await record.cancelPromise;
+    else if (record.returnPromise) await record.returnPromise;
+    record = this.records.get(id);
     if (!record) return null;
     await this.runCleanup(record);
     return { ...record.snapshot };
@@ -251,18 +282,31 @@ export class GenerationTaskPool {
   }
 
   async returnTask(id: string): Promise<GenerationTaskSnapshot | null> {
-    const record = this.records.get(id);
+    let record = this.records.get(id);
     if (!record || !record.snapshot.images?.length) return record?.snapshot ?? null;
     if (record.snapshot.cleanupPending) return { ...record.snapshot };
-    if (record.snapshot.status === "returning") return record.completion;
+    if (record.returnPromise) {
+      if (record.snapshot.status === "returning") return await record.returnPromise;
+      await record.returnPromise;
+      record = this.records.get(id);
+      if (!record || !record.snapshot.images?.length) return record?.snapshot ?? null;
+      if (record.snapshot.cleanupPending) return { ...record.snapshot };
+    }
     const generation = record.generation;
     return await this.attemptReturn(record, generation);
   }
 
   async remove(id: string) {
-    const record = this.records.get(id);
+    let record = this.records.get(id);
     if (!record) return false;
-    if (record.snapshot.cleanupPending && !(await this.runCleanup(record))) return false;
+    if (record.cancelPromise) await record.cancelPromise;
+    else if (record.returnPromise) {
+      if (record.snapshot.status === "success") await record.returnPromise;
+      else await this.cancel(id);
+    }
+    record = this.records.get(id);
+    if (!record) return false;
+    if (record.snapshot.cleanupPending) return false;
     if (record.snapshot.status !== "success") await this.cancel(id);
     if (record.snapshot.cleanupPending) return false;
     this.records.delete(id);
@@ -363,6 +407,25 @@ export class GenerationTaskPool {
   }
 
   private async attemptReturn(record: TaskRecord, generation: number): Promise<GenerationTaskSnapshot> {
+    if (record.returnPromise) return await record.returnPromise;
+    let settleReturn!: (snapshot: GenerationTaskSnapshot) => void;
+    const returnPromise = new Promise<GenerationTaskSnapshot>((resolve) => {
+      settleReturn = resolve;
+    });
+    record.returnPromise = returnPromise;
+    try {
+      const result = await this.performReturn(record, generation);
+      settleReturn(result);
+      return result;
+    } catch (error) {
+      settleReturn({ ...record.snapshot });
+      throw error;
+    } finally {
+      if (record.returnPromise === returnPromise) record.returnPromise = null;
+    }
+  }
+
+  private async performReturn(record: TaskRecord, generation: number): Promise<GenerationTaskSnapshot> {
     if (record.generation !== generation || !record.snapshot.images?.length) return { ...record.snapshot };
     record.snapshot = { ...record.snapshot, status: "returning", error: undefined };
     this.emit();
@@ -370,7 +433,12 @@ export class GenerationTaskPool {
       await this.enqueueReturn(async () => {
         if (record.generation !== generation || record.snapshot.status !== "returning") return;
         await record.definition.returnImages(record.snapshot.images!.slice(), {
-          isCurrent: () => record.generation === generation && record.snapshot.status === "returning"
+          isCurrent: () => record.generation === generation && record.snapshot.status === "returning",
+          markCleanupPending: () => {
+            if (record.snapshot.cleanupPending) return;
+            record.snapshot = { ...record.snapshot, cleanupPending: true };
+            this.emit();
+          }
         });
       });
       if (record.generation !== generation) return { ...record.snapshot };
