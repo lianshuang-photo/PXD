@@ -32,6 +32,7 @@ describe("TiledUpscaleDialog", () => {
       <TiledUpscaleDialog
         provider="gemini"
         running={false}
+        stopping={false}
         progress={null}
         sourceSize={{ width: 1800, height: 1200 }}
         onInspect={onInspect}
@@ -59,6 +60,7 @@ describe("TiledUpscaleDialog", () => {
     const props = {
       provider: "forge" as const,
       running: false,
+      stopping: false,
       progress: null,
       sourceSize: { width: 1024, height: 1024 },
       onInspect: vi.fn().mockResolvedValue(true),
@@ -91,5 +93,40 @@ describe("TiledUpscaleDialog", () => {
     act(() => button("停止").click());
     expect(props.onStop).toHaveBeenCalledOnce();
     expect(document.querySelector('[aria-valuenow="25"]')).not.toBeNull();
+
+    act(() => root.render(<TiledUpscaleDialog {...props} running={true} stopping={true} />));
+    expect(button("停止中").disabled).toBe(true);
+  });
+
+  it("rejects a 1024px 4x tile over the memory budget and accepts 512px", async () => {
+    act(() => root.render(
+      <TiledUpscaleDialog
+        provider="gemini"
+        running={false}
+        stopping={false}
+        progress={null}
+        sourceSize={{ width: 1800, height: 1200 }}
+        onInspect={vi.fn().mockResolvedValue(true)}
+        onRun={vi.fn().mockResolvedValue(true)}
+        onStop={vi.fn()}
+        onClose={vi.fn()}
+      />
+    ));
+    await act(async () => Promise.resolve());
+    const [scale, tileSize] = Array.from(document.querySelectorAll("select"));
+
+    act(() => {
+      scale.value = "4";
+      scale.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("96 MiB");
+    expect(button("开始分块放大").disabled).toBe(true);
+
+    act(() => {
+      tileSize.value = "512";
+      tileSize.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(button("开始分块放大").disabled).toBe(false);
   });
 });

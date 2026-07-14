@@ -345,6 +345,51 @@ describe("useGenerationController tiled upscale", () => {
     expect(rendered.getController().status).toBe("idle");
   });
 
+  it("blocks a new run until the stopped tiled workflow has finished rolling back", async () => {
+    let resolveImage!: (value: string) => void;
+    boundary.geminiClient.editImage.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveImage = resolve;
+    }));
+    const rendered = trackedRender({
+      initialSettings: { ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }
+    });
+    await flush();
+
+    let oldRun!: Promise<boolean>;
+    act(() => {
+      oldRun = rendered.getController().runTiledUpscale(tiledConfig);
+    });
+    await vi.waitFor(() => expect(boundary.geminiClient.editImage).toHaveBeenCalledOnce());
+    act(() => rendered.getController().stopGeneration());
+
+    expect(rendered.getController().tiledUpscaleStopping).toBe(true);
+    expect(rendered.getController().tiledUpscaleRunning).toBe(true);
+    await act(async () => {
+      await rendered.getController().runGeneration();
+    });
+    expect(boundary.photoshop.getSelectionPixels).not.toHaveBeenCalled();
+    let blockedResult!: boolean;
+    await act(async () => {
+      blockedResult = await rendered.getController().runTiledUpscale(tiledConfig);
+    });
+    expect(blockedResult).toBe(false);
+    expect(boundary.photoshop.createGeneratedDocument).toHaveBeenCalledOnce();
+    expect(boundary.photoshop.getSelectionMetadata).toHaveBeenCalledOnce();
+
+    resolveImage("LATE");
+    await act(async () => {
+      await oldRun;
+    });
+    expect(boundary.photoshop.closeGeneratedDocument).toHaveBeenCalledOnce();
+    expect(rendered.getController().tiledUpscaleStopping).toBe(false);
+    expect(rendered.getController().status).toBe("idle");
+
+    await act(async () => {
+      expect(await rendered.getController().runTiledUpscale(tiledConfig)).toBe(true);
+    });
+    expect(boundary.photoshop.createGeneratedDocument).toHaveBeenCalledTimes(2);
+  });
+
   it("surfaces output recovery failure even after cancellation invalidates the run", async () => {
     let resolveImage!: (value: string) => void;
     boundary.geminiClient.editImage.mockImplementationOnce(() => new Promise((resolve) => {

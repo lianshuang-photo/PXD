@@ -10,6 +10,7 @@ import OverlayPortal from "./OverlayPortal";
 interface Props {
   provider: AppSettings["imageProvider"];
   running: boolean;
+  stopping: boolean;
   progress: TiledUpscaleProgress | null;
   sourceSize: { width: number; height: number } | null;
   onInspect: () => Promise<boolean>;
@@ -23,6 +24,7 @@ const COLORS = ["#22c55e", "#38bdf8", "#f59e0b", "#f472b6", "#a78bfa", "#fb7185"
 const TiledUpscaleDialog = ({
   provider,
   running,
+  stopping,
   progress,
   sourceSize,
   onInspect,
@@ -147,13 +149,15 @@ const TiledUpscaleDialog = ({
           {running && (
             <div className="tiled-upscale__progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
               <span style={{ width: `${percent}%` }} />
-              <strong>{progress ? `${progress.completed}/${progress.total}` : "准备中"}</strong>
+              <strong>{stopping ? "停止中" : progress ? `${progress.completed}/${progress.total}` : "准备中"}</strong>
             </div>
           )}
           <footer className="tiled-upscale__footer">
             <button type="button" className="btn btn--ghost" onClick={onClose} disabled={running}>取消</button>
             {running ? (
-              <button type="button" className="btn btn--secondary tiled-upscale__stop" onClick={onStop}>停止</button>
+              <button type="button" className="btn btn--secondary tiled-upscale__stop" onClick={onStop} disabled={stopping}>
+                {stopping ? "停止中" : "停止"}
+              </button>
             ) : (
               <button type="button" className="btn btn--primary" disabled={!preview.plan} onClick={() => onRun(config)}>开始分块放大</button>
             )}

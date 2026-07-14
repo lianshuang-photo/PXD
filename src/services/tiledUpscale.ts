@@ -115,7 +115,23 @@ export class TiledUpscaleRollbackError extends Error {
 const MAX_TILES = 64;
 const MAX_OUTPUT_SIDE = 32_768;
 const MAX_WORKING_SIDE = 4_096;
-const MAX_ESTIMATED_WORKING_BYTES = 192 * 1024 * 1024;
+const MAX_ESTIMATED_WORKING_BYTES = 96 * 1024 * 1024;
+const RGBA_BYTES_PER_PIXEL = 4;
+
+const estimateBase64Bytes = (binaryBytes: number) => Math.ceil(binaryBytes / 3) * 4;
+
+const estimateTileWorkingBytes = (tileSize: number, scale: number) => {
+  const sourcePixelBytes = tileSize * tileSize * RGBA_BYTES_PER_PIXEL;
+  const outputSide = tileSize * scale;
+  const outputPixelBytes = outputSide * outputSide * RGBA_BYTES_PER_PIXEL;
+  const sourceBase64Bytes = estimateBase64Bytes(sourcePixelBytes);
+  const outputBase64Bytes = estimateBase64Bytes(outputPixelBytes);
+
+  const enhancementPeak = sourcePixelBytes + sourceBase64Bytes + outputBase64Bytes;
+  const featherPeak = outputPixelBytes * 3 + outputBase64Bytes * 2;
+  const placementPeak = outputPixelBytes * 2 + outputBase64Bytes;
+  return Math.max(enhancementPeak, featherPeak, placementPeak);
+};
 
 const axisStarts = (
   length: number,
@@ -212,10 +228,9 @@ export const buildTiledUpscalePlan = (
       });
     }
   }
-  const workingSide = Math.min(config.tileSize * config.scale, MAX_WORKING_SIDE);
-  const estimatedWorkingBytes = workingSide * workingSide * 12;
+  const estimatedWorkingBytes = estimateTileWorkingBytes(config.tileSize, config.scale);
   if (estimatedWorkingBytes > MAX_ESTIMATED_WORKING_BYTES) {
-    throw new Error("单瓦片预计内存超过 192 MiB，请减小瓦片或倍率");
+    throw new Error("单瓦片预计峰值内存超过 96 MiB，请减小瓦片或倍率");
   }
   return {
     width,
@@ -293,7 +308,7 @@ export const executeTiledUpscale = async (
         right: input.source.bounds.left + tile.source.right,
         bottom: input.source.bounds.top + tile.source.bottom
       };
-      const sourceDataUrl = await input.adapters.readTile(
+      let sourceDataUrl = await input.adapters.readTile(
         input.source.documentId,
         absoluteBounds,
         input.taskId
@@ -307,6 +322,7 @@ export const executeTiledUpscale = async (
         input.config,
         input.taskId
       );
+      sourceDataUrl = "";
       assertCurrent();
       progress("blending");
       const blendedDataUrl = await input.adapters.featherTile(enhancedDataUrl, {
@@ -332,6 +348,7 @@ export const executeTiledUpscale = async (
     }
     assertCurrent();
     await input.adapters.finalize(layerIds, session.documentId, input.taskId);
+    assertCurrent();
     return { session, plan, layerIds };
   } catch (error) {
     if (session) {

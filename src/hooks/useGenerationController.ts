@@ -397,6 +397,7 @@ export interface GenerationControllerState {
   runGeneration: () => Promise<void>;
   stopGeneration: () => void;
   tiledUpscaleRunning: boolean;
+  tiledUpscaleStopping: boolean;
   tiledUpscaleProgress: TiledUpscaleProgress | null;
   tiledUpscaleSourceSize: { width: number; height: number } | null;
   inspectTiledUpscaleSelection: () => Promise<boolean>;
@@ -463,6 +464,7 @@ export const useGenerationController = (
   const [error, setError] = useState<string | null>(null);
   const [lastImages, setLastImages] = useState<string[]>([]);
   const [tiledUpscaleRunning, setTiledUpscaleRunning] = useState(false);
+  const [tiledUpscaleStopping, setTiledUpscaleStopping] = useState(false);
   const [tiledUpscaleProgress, setTiledUpscaleProgress] = useState<TiledUpscaleProgress | null>(null);
   const [tiledUpscaleSourceSize, setTiledUpscaleSourceSize] = useState<{ width: number; height: number } | null>(null);
   const [options, setOptions] = useState<SdOptions>(EMPTY_OPTIONS);
@@ -479,6 +481,7 @@ export const useGenerationController = (
   const [sourceLanguage, setSourceLanguage] = useState("zh");
   const [targetLanguage, setTargetLanguage] = useState("en");
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tiledUpscaleSettlingRef = useRef(false);
   const presetsLoadGateRef = useRef(new LatestLoadGate());
   const settingsRef = useRef(settings);
   const historyRestoreGenerationRef = useRef(0);
@@ -490,10 +493,12 @@ export const useGenerationController = (
   const stoppedByEngineChangeRef = useRef(false);
 
   useLayoutEffect(() => {
+    const tiledUpscaleSettling = tiledUpscaleSettlingRef.current;
     setProgress(0);
-    setTiledUpscaleRunning(false);
+    setTiledUpscaleRunning(tiledUpscaleSettling);
+    setTiledUpscaleStopping(tiledUpscaleSettling);
     setTiledUpscaleProgress(null);
-    setStatus((current) => current === "running" ? "idle" : current);
+    setStatus((current) => current === "running" && !tiledUpscaleSettling ? "idle" : current);
   }, [engineToken]);
 
   useEffect(() => () => {
@@ -833,6 +838,7 @@ export const useGenerationController = (
   const stopGeneration = useCallback(() => {
     const activeRun = runGateRef.current.current;
     if (!activeRun) return;
+    const tiledUpscaleStopping = activeRun.kind === "tiled-upscale";
     runGateRef.current.stop();
     engine.cancelAll();
     stopPolling(engineToken);
@@ -845,18 +851,19 @@ export const useGenerationController = (
         )
       );
     }
-    setStatus("idle");
-    setTiledUpscaleRunning(false);
+    setStatus(tiledUpscaleStopping ? "running" : "idle");
+    setTiledUpscaleRunning(tiledUpscaleStopping);
+    setTiledUpscaleStopping(tiledUpscaleStopping);
     setTiledUpscaleProgress(null);
     setProgress(0);
     setProgressPreview(null);
     setProgressText(null);
     setError(null);
-    pushToast("info", "已停止");
+    pushToast("info", tiledUpscaleStopping ? "正在停止并恢复源文档" : "已停止");
   }, [engine, engineToken, pushToast, stopPolling]);
 
   const inspectTiledUpscaleSelection = useCallback(async () => {
-    if (runGateRef.current.current) return false;
+    if (runGateRef.current.current || tiledUpscaleSettlingRef.current) return false;
     const metadata = await getSelectionMetadata();
     if (!metadata) {
       setTiledUpscaleSourceSize(null);
@@ -868,13 +875,15 @@ export const useGenerationController = (
   }, [pushToast]);
 
   const runTiledUpscale = useCallback(async (config: TiledUpscaleConfig): Promise<boolean> => {
-    if (runGateRef.current.current) return false;
+    if (runGateRef.current.current || tiledUpscaleSettlingRef.current) return false;
+    tiledUpscaleSettlingRef.current = true;
     const requestToken = engineToken;
     const requestEngine = requestToken.engine;
     const taskId = generateId();
     const { token: runToken } = runGateRef.current.begin("tiled-upscale", taskId);
     const isRunCurrent = () => isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken);
     setTiledUpscaleRunning(true);
+    setTiledUpscaleStopping(false);
     setTiledUpscaleProgress(null);
     setStatus("running");
     setError(null);
@@ -985,15 +994,16 @@ export const useGenerationController = (
       return false;
     } finally {
       if (runGateRef.current.isCurrent(runToken)) runGateRef.current.complete(runToken);
-      commitIfCurrent(requestToken, () => {
-        setTiledUpscaleRunning(false);
-        setProgress(0);
-      });
+      tiledUpscaleSettlingRef.current = false;
+      setTiledUpscaleRunning(false);
+      setTiledUpscaleStopping(false);
+      setProgress(0);
+      setStatus((current) => current === "running" ? "idle" : current);
     }
-  }, [commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pushToast, settings.timeoutMaxSeconds, settings.timeoutMultiplier]);
+  }, [dismissToast, engineToken, form, isEngineCurrent, pushToast, settings.timeoutMaxSeconds, settings.timeoutMultiplier]);
 
   const runGeneration = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (runGateRef.current.current || tiledUpscaleSettlingRef.current) return;
     const requestToken = engineToken;
     const requestEngine = requestToken.engine;
     const taskId = generateId();
@@ -1194,7 +1204,7 @@ export const useGenerationController = (
   }, [batchItems, engine, pushToast, stopGeneration]);
 
   const runBatch = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (runGateRef.current.current || tiledUpscaleSettlingRef.current) return;
     const runnableItems = batchItems.filter((item) => item.status !== "success");
     if (!runnableItems.length) {
       if (batchItems.length) {
@@ -1388,6 +1398,7 @@ export const useGenerationController = (
     runGeneration,
     stopGeneration,
     tiledUpscaleRunning,
+    tiledUpscaleStopping,
     tiledUpscaleProgress,
     tiledUpscaleSourceSize,
     inspectTiledUpscaleSelection,

@@ -71,6 +71,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     runGeneration,
     stopGeneration,
     tiledUpscaleRunning,
+    tiledUpscaleStopping,
     tiledUpscaleProgress,
     tiledUpscaleSourceSize,
     inspectTiledUpscaleSelection,
@@ -1027,6 +1028,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
         <TiledUpscaleDialog
           provider={settings.imageProvider}
           running={tiledUpscaleRunning}
+          stopping={tiledUpscaleStopping}
           progress={tiledUpscaleProgress}
           sourceSize={tiledUpscaleSourceSize}
           onInspect={inspectTiledUpscaleSelection}

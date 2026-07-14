@@ -84,6 +84,16 @@ describe("tiled upscale geometry", () => {
     expect(() => buildTiledUpscalePlan(20_000, 20_000, config)).toThrow("32768");
     expect(() => buildTiledUpscalePlan(4096, 4096, { ...config, tileSize: 2048, scale: 4 }))
       .toThrow("4096");
+    expect(() => buildTiledUpscalePlan(1024, 1024, { ...config, scale: 4 }))
+      .toThrow("96 MiB");
+    const safe4x = buildTiledUpscalePlan(1024, 1024, {
+      ...config,
+      scale: 4,
+      tileSize: 512,
+      overlap: 128,
+      feather: 64
+    });
+    expect(safe4x.estimatedWorkingBytes).toBeLessThanOrEqual(96 * 1024 * 1024);
   });
 });
 
@@ -169,6 +179,39 @@ describe("executeTiledUpscale", () => {
     expect(adapters.rollback).toHaveBeenCalledWith(
       { documentId: 9, previousDocumentId: 3 },
       "cancel"
+    );
+  });
+
+  it("rolls back when cancellation arrives while the output is being finalized", async () => {
+    let current = true;
+    let resolveFinalize!: () => void;
+    const adapters = {
+      readTile: vi.fn().mockResolvedValue("SOURCE"),
+      enhanceTile: vi.fn().mockResolvedValue("ENHANCED"),
+      featherTile: vi.fn().mockResolvedValue("BLENDED"),
+      createOutput: vi.fn().mockResolvedValue({ documentId: 9, previousDocumentId: 3 }),
+      placeTile: vi.fn().mockResolvedValue({ layerID: 101 }),
+      finalize: vi.fn().mockImplementation(() => new Promise<void>((resolve) => {
+        resolveFinalize = resolve;
+      })),
+      rollback: vi.fn().mockResolvedValue(undefined)
+    };
+    const run = executeTiledUpscale({
+      engine,
+      source: { documentId: 3, bounds: { left: 0, top: 0, right: 1024, bottom: 1024 }, width: 1024, height: 1024 },
+      config,
+      taskId: "finalize-cancel",
+      adapters,
+      isCurrent: () => current
+    });
+    await vi.waitFor(() => expect(adapters.finalize).toHaveBeenCalledOnce());
+    current = false;
+    resolveFinalize();
+
+    await expect(run).rejects.toMatchObject({ code: "ENGINE_STALE" });
+    expect(adapters.rollback).toHaveBeenCalledWith(
+      { documentId: 9, previousDocumentId: 3 },
+      "finalize-cancel"
     );
   });
 
