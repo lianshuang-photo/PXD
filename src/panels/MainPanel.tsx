@@ -3,6 +3,7 @@ import type { AppSettings } from "../context/types";
 import { useGenerationController } from "../hooks/useGenerationController";
 import OverlayPortal from "../components/OverlayPortal";
 import PromptParamControls from "../components/PromptParamControls";
+import TiledUpscaleDialog from "../components/TiledUpscaleDialog";
 
 interface Props {
   settings: AppSettings;
@@ -69,6 +70,11 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     refreshOptions,
     runGeneration,
     stopGeneration,
+    tiledUpscaleRunning,
+    tiledUpscaleProgress,
+    tiledUpscaleSourceSize,
+    inspectTiledUpscaleSelection,
+    runTiledUpscale,
     history,
     historyLoading,
     historyError,
@@ -111,6 +117,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
   const [presetName, setPresetName] = useState<string>("");
   const [customResolution, setCustomResolution] = useState(false);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
+  const [tiledUpscaleOpen, setTiledUpscaleOpen] = useState(false);
   const confirmResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -375,6 +382,15 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
           style={compactTopActionButtonStyle}
         >
           {status === "running" ? "生成中" : "开始生成"}
+        </button>
+        <button
+          type="button"
+          className="btn btn--secondary"
+          onClick={() => setTiledUpscaleOpen(true)}
+          disabled={status === "running"}
+          style={compactTopActionButtonStyle}
+        >
+          分块放大
         </button>
         <button
           type="button"
@@ -1007,6 +1023,18 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
       </div>
 
       </section>
+      {tiledUpscaleOpen && (
+        <TiledUpscaleDialog
+          provider={settings.imageProvider}
+          running={tiledUpscaleRunning}
+          progress={tiledUpscaleProgress}
+          sourceSize={tiledUpscaleSourceSize}
+          onInspect={inspectTiledUpscaleSelection}
+          onRun={runTiledUpscale}
+          onStop={stopGeneration}
+          onClose={() => setTiledUpscaleOpen(false)}
+        />
+      )}
       {toast && (
         <OverlayPortal>
           <div className={`toast toast--${toast.type}`}>

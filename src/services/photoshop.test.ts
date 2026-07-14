@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const boundary = vi.hoisted(() => ({
   bridge: {
     photoshop: null as any,
-    uxp: undefined,
+    uxp: undefined as any,
     getDataFolder: vi.fn(),
     createSessionToken: vi.fn()
   }
@@ -11,10 +11,97 @@ const boundary = vi.hoisted(() => ({
 
 vi.mock("./uxpBridge", () => ({ bridge: boundary.bridge }));
 
-import { closeGeneratedDocument, createGeneratedDocument, groupLayers } from "./photoshop";
+import {
+  closeGeneratedDocument,
+  createGeneratedDocument,
+  getDocumentPixels,
+  getSelectionMetadata,
+  groupLayers,
+  placeImageIntoDocumentBounds
+} from "./photoshop";
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("tiled upscale Photoshop adapters", () => {
+  it("reads selection metadata and bounded pixels without exporting the whole selection", async () => {
+    const dispose = vi.fn();
+    const getPixels = vi.fn().mockResolvedValue({ imageData: { dispose } });
+    const encodeImageData = vi.fn().mockResolvedValue("TILE");
+    boundary.bridge.photoshop = {
+      app: {
+        activeDocument: {
+          id: 7,
+          selection: { bounds: { left: 10, top: 20, right: 2010, bottom: 1220 } }
+        }
+      },
+      imaging: { getPixels, encodeImageData },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+
+    await expect(getSelectionMetadata()).resolves.toEqual({
+      documentId: 7,
+      width: 2000,
+      height: 1200,
+      selectionBounds: { left: 10, top: 20, right: 2010, bottom: 1220 }
+    });
+    await expect(getDocumentPixels(7, { left: 100, top: 200, right: 612, bottom: 712 }))
+      .resolves.toBe("data:image/png;base64,TILE");
+    expect(getPixels).toHaveBeenCalledWith(expect.objectContaining({
+      documentID: 7,
+      sourceBounds: { left: 100, top: 200, right: 612, bottom: 712 }
+    }));
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it("places and transforms a feathered tile to exact output bounds", async () => {
+    const file = { write: vi.fn().mockResolvedValue(undefined) };
+    boundary.bridge.uxp = {
+      storage: {
+        formats: { binary: "binary" },
+        localFileSystem: {
+          getTemporaryFolder: vi.fn().mockResolvedValue({ createFile: vi.fn().mockResolvedValue(file) }),
+          createSessionToken: vi.fn().mockResolvedValue("token")
+        }
+      }
+    };
+    const info = {
+      layerID: 42,
+      bounds: {
+        left: { _value: 100 },
+        top: { _value: 50 },
+        right: { _value: 612 },
+        bottom: { _value: 562 }
+      }
+    };
+    const batchPlay = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([info])
+      .mockResolvedValueOnce([]);
+    boundary.bridge.photoshop = {
+      app: { activeDocument: { id: 9 }, batchPlay },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+
+    await expect(placeImageIntoDocumentBounds(
+      "data:image/png;base64,QQ==",
+      { left: 0, top: 0, right: 1024, bottom: 768 },
+      1,
+      9
+    )).resolves.toBe(info);
+
+    expect(batchPlay.mock.calls[2][0][0]).toMatchObject({
+      _obj: "transform",
+      _target: [{ _ref: "layer", _id: 42 }],
+      width: { _unit: "percentUnit", _value: 200 },
+      height: { _unit: "percentUnit", _value: 150 },
+      offset: {
+        horizontal: { _unit: "pixelsUnit", _value: 156 },
+        vertical: { _unit: "pixelsUnit", _value: 78 }
+      }
+    });
+  });
 });
 
 describe("createGeneratedDocument", () => {
