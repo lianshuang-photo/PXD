@@ -372,9 +372,9 @@ describe("useGenerationController poster wizard", () => {
   });
 
   it("tracks a layer that finishes placing after cancellation during the Photoshop modal", async () => {
-    let resolvePlacement!: (value: { layerID: number }) => void;
-    boundary.photoshop.placeImageIntoSelection.mockImplementationOnce(() => new Promise((resolve) => {
-      resolvePlacement = resolve;
+    let rejectPlacement!: (reason: unknown) => void;
+    boundary.photoshop.placeImageIntoSelection.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      rejectPlacement = reject;
     }));
     const rendered = trackedRender({ initialSettings: geminiSettings });
     await flush();
@@ -385,7 +385,9 @@ describe("useGenerationController poster wizard", () => {
     });
     await vi.waitFor(() => expect(boundary.photoshop.placeImageIntoSelection).toHaveBeenCalledOnce());
     act(() => rendered.getController().stopGeneration());
-    resolvePlacement({ layerID: 616 });
+    rejectPlacement(Object.assign(new Error("selection restore failed"), {
+      placedLayerId: 616
+    }));
     await act(async () => {
       await generation;
     });
@@ -395,6 +397,11 @@ describe("useGenerationController poster wizard", () => {
       placedLayerIds: [616]
     });
     expect(rendered.getController().posterRunning).toBe(false);
+
+    const taskId = rendered.getController().posterLastResult?.taskId;
+    await act(async () => rendered.getController().undoPosterGeneration());
+    expect(boundary.photoshop.deleteLayersInDocument).toHaveBeenCalledWith(7, [616], { taskId });
+    expect(rendered.getController().posterLastResult).toBeNull();
   });
 
   it("retains the placed layer when a later move operation fails", async () => {

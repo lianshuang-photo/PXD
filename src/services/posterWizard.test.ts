@@ -93,7 +93,11 @@ describe("executePosterWorkflow", () => {
     expect(adapters.placeImage).toHaveBeenCalledWith(
       "data:image/png;base64,POSTER_IMAGE",
       1,
-      { feather: 12, taskId: "poster-1" }
+      expect.objectContaining({
+        feather: 12,
+        taskId: "poster-1",
+        onLayerPlaced: expect.any(Function)
+      })
     );
     expect(adapters.moveActiveLayerToTop).toHaveBeenCalledWith({ layerId: 42, taskId: "poster-1" });
     expect(result.placedLayerIds).toEqual([42]);

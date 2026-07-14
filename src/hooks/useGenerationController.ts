@@ -894,7 +894,11 @@ export const useGenerationController = (
         placeImage: async (
           dataUrl: string,
           index: number,
-          options: { feather: number; taskId?: string }
+          options: {
+            feather: number;
+            taskId?: string;
+            onLayerPlaced?: (layerId: number) => void | Promise<void>;
+          }
         ) => {
           await switchToDocument(selection.documentId, { taskId: options.taskId });
           return placeImageIntoSelection(dataUrl, index, options);
