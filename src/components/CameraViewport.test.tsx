@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const renderer = vi.hoisted(() => ({
+  failure: null as null | "controls" | "pixelRatio" | "setSize",
   render: vi.fn(),
   setSize: vi.fn(),
-  dispose: vi.fn()
+  dispose: vi.fn(),
+  controlsDispose: vi.fn()
 }));
 
 vi.mock("three", async (importOriginal) => {
@@ -14,8 +16,13 @@ vi.mock("three", async (importOriginal) => {
     outputColorSpace = "";
     toneMapping = 0;
     toneMappingExposure = 0;
-    setPixelRatio = vi.fn();
-    setSize = renderer.setSize;
+    setPixelRatio = vi.fn(() => {
+      if (renderer.failure === "pixelRatio") throw new Error("pixel ratio failed");
+    });
+    setSize = vi.fn((...args: unknown[]) => {
+      renderer.setSize(...args);
+      if (renderer.failure === "setSize") throw new Error("set size failed");
+    });
     render = renderer.render;
     dispose = renderer.dispose;
   }
@@ -25,6 +32,9 @@ vi.mock("three", async (importOriginal) => {
 vi.mock("three/examples/jsm/controls/OrbitControls.js", async () => {
   const { Vector3 } = await import("three");
   class OrbitControls {
+    constructor() {
+      if (renderer.failure === "controls") throw new Error("controls failed");
+    }
     target = new Vector3();
     enabled = true;
     enablePan = false;
@@ -38,15 +48,21 @@ vi.mock("three/examples/jsm/controls/OrbitControls.js", async () => {
     addEventListener = vi.fn();
     removeEventListener = vi.fn();
     update = vi.fn();
-    dispose = vi.fn();
+    dispose = renderer.controlsDispose;
   }
   return { OrbitControls };
 });
 
+import * as THREE from "three";
 import { mountCameraViewport } from "../cameraRuntime";
 
 describe("camera runtime WebGL recovery", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    renderer.failure = null;
+  });
+
+  afterEach(() => vi.restoreAllMocks());
 
   it("clears the paused state and resizes after context restoration", () => {
     const canvas = document.createElement("canvas");
@@ -73,5 +89,38 @@ describe("camera runtime WebGL recovery", () => {
     runtime.dispose();
     canvas.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
     expect(onStatus).toHaveBeenCalledTimes(callsBeforeDispose);
+  });
+
+  it.each([
+    ["controls", false, false],
+    ["pixelRatio", true, false],
+    ["setSize", true, true]
+  ] as const)("cleans partial initialization after %s fails", (failure, hasControls, hasListeners) => {
+    renderer.failure = failure;
+    const canvas = document.createElement("canvas");
+    const onStatus = vi.fn();
+    const removeListener = vi.spyOn(canvas, "removeEventListener");
+    const geometryDispose = vi.spyOn(THREE.BufferGeometry.prototype, "dispose");
+    const materialDispose = vi.spyOn(THREE.Material.prototype, "dispose");
+
+    expect(() => mountCameraViewport({
+      canvas,
+      value: { azimuth: 0, elevation: 0, distance: 2 },
+      onChange: vi.fn(),
+      onStatus
+    })).toThrow();
+
+    expect(renderer.dispose).toHaveBeenCalledOnce();
+    expect(renderer.controlsDispose).toHaveBeenCalledTimes(hasControls ? 1 : 0);
+    if (hasControls) {
+      expect(geometryDispose).toHaveBeenCalled();
+      expect(materialDispose).toHaveBeenCalled();
+    }
+    if (hasListeners) {
+      expect(removeListener).toHaveBeenCalledWith("webglcontextlost", expect.any(Function));
+      expect(removeListener).toHaveBeenCalledWith("webglcontextrestored", expect.any(Function));
+    }
+    canvas.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+    expect(onStatus).not.toHaveBeenCalled();
   });
 });

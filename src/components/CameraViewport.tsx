@@ -15,16 +15,28 @@ declare global {
 }
 
 const CAMERA_RUNTIME_SRC = "./assets/camera-runtime.js";
-let cameraRuntimePromise: Promise<CameraRuntime> | null = null;
 
-const loadCameraRuntime = (): Promise<CameraRuntime> => {
+export const createRetryableRuntimeLoader = (
+  load: () => Promise<CameraRuntime>
+) => {
+  let pending: Promise<CameraRuntime> | null = null;
+  return () => {
+    if (!pending) {
+      pending = load().catch((error) => {
+        pending = null;
+        throw error;
+      });
+    }
+    return pending;
+  };
+};
+
+const loadUncachedCameraRuntime = (): Promise<CameraRuntime> => {
   if (window.__PXD_CAMERA_RUNTIME__) return Promise.resolve(window.__PXD_CAMERA_RUNTIME__);
-  if (cameraRuntimePromise) return cameraRuntimePromise;
   if (!import.meta.env.PROD) {
-    cameraRuntimePromise = import("../cameraRuntime").then(({ cameraRuntime }) => cameraRuntime);
-    return cameraRuntimePromise;
+    return import("../cameraRuntime").then(({ cameraRuntime }) => cameraRuntime);
   }
-  cameraRuntimePromise = new Promise<CameraRuntime>((resolve, reject) => {
+  return new Promise<CameraRuntime>((resolve, reject) => {
     const script = document.createElement("script");
     script.src = CAMERA_RUNTIME_SRC;
     script.async = true;
@@ -34,12 +46,10 @@ const loadCameraRuntime = (): Promise<CameraRuntime> => {
     };
     script.onerror = () => reject(new Error("Camera runtime failed to load"));
     document.head.appendChild(script);
-  }).catch((error) => {
-    cameraRuntimePromise = null;
-    throw error;
   });
-  return cameraRuntimePromise;
 };
+
+const loadCameraRuntime = createRetryableRuntimeLoader(loadUncachedCameraRuntime);
 
 const CameraViewport = ({ value, disabled, onChange }: Props) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);

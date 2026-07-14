@@ -1,6 +1,7 @@
 import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
 import CameraViewControl, { CameraViewportBoundary } from "./CameraViewControl";
+import { createRetryableRuntimeLoader } from "./CameraViewport";
 
 const expand = async (renderer: ReturnType<typeof create>) => {
   const toggle = renderer.root.findByProps({ "aria-controls": "camera-view-controls" });
@@ -81,5 +82,17 @@ describe("CameraViewControl", () => {
     expect(alert.parent?.props.className).toBe("camera-view__viewport");
     warn.mockRestore();
     error.mockRestore();
+  });
+
+  it("retries the runtime loader after a transient dynamic import failure", async () => {
+    const runtime = { mount: vi.fn() };
+    const load = vi.fn()
+      .mockRejectedValueOnce(new Error("temporary import failure"))
+      .mockResolvedValueOnce(runtime);
+    const retry = createRetryableRuntimeLoader(load);
+
+    await expect(retry()).rejects.toThrow("temporary import failure");
+    await expect(retry()).resolves.toBe(runtime);
+    expect(load).toHaveBeenCalledTimes(2);
   });
 });

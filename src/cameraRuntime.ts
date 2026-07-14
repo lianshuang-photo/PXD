@@ -35,12 +35,23 @@ const SUBJECT_TARGET = new THREE.Vector3(0, 0.85, 0);
 const DISTANCE_OFFSET = 1.4;
 const DISTANCE_SCALE = 0.8;
 
-const disposeScene = (scene: THREE.Scene) => {
+interface DisposableResource {
+  dispose: () => void;
+}
+
+const disposeScene = (scene: THREE.Scene, disposed: Set<DisposableResource>) => {
   scene.traverse((object) => {
     if (!(object instanceof THREE.Mesh) && !(object instanceof THREE.Line)) return;
-    object.geometry?.dispose();
+    if (object.geometry && !disposed.has(object.geometry)) {
+      disposed.add(object.geometry);
+      object.geometry.dispose();
+    }
     const materials = Array.isArray(object.material) ? object.material : [object.material];
-    for (const material of materials) material?.dispose();
+    for (const material of materials) {
+      if (!material || disposed.has(material)) continue;
+      disposed.add(material);
+      material.dispose();
+    }
   });
 };
 
@@ -51,90 +62,21 @@ export const mountCameraViewport = ({
   onChange,
   onStatus
 }: CameraRuntimeMountOptions): CameraRuntimeHandle => {
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: "low-power" });
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x101319);
-  scene.fog = new THREE.Fog(0x101319, 5.5, 8);
-  const camera = new THREE.PerspectiveCamera(38, 16 / 9, 0.05, 20);
-  const controls = new OrbitControls(camera, canvas);
-  controls.target.copy(SUBJECT_TARGET);
-  controls.enablePan = false;
-  controls.enableDamping = false;
-  controls.rotateSpeed = 0.65;
-  controls.zoomSpeed = 0.7;
-  controls.minDistance = DISTANCE_OFFSET + CAMERA_DISTANCE_MIN * DISTANCE_SCALE;
-  controls.maxDistance = DISTANCE_OFFSET + CAMERA_DISTANCE_MAX * DISTANCE_SCALE;
-  controls.minPolarAngle = 0.001;
-  controls.maxPolarAngle = Math.PI - 0.001;
-
-  const subject = new THREE.Group();
-  const darkMaterial = new THREE.MeshStandardMaterial({ color: 0x28313b, roughness: 0.72, metalness: 0.05 });
-  const lightMaterial = new THREE.MeshStandardMaterial({ color: 0xd7b56d, roughness: 0.55, metalness: 0.08 });
-  const accentMaterial = new THREE.MeshStandardMaterial({ color: 0x4ea6a1, roughness: 0.62, metalness: 0.02 });
-  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.35, 0.72, 8, 16), darkMaterial);
-  torso.position.y = 0.72;
-  torso.scale.set(1, 1, 0.72);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 24, 16), lightMaterial);
-  head.position.y = 1.48;
-  const faceDirection = new THREE.Mesh(new THREE.ConeGeometry(0.065, 0.18, 12), accentMaterial);
-  faceDirection.rotation.x = Math.PI / 2;
-  faceDirection.position.set(0, 1.48, 0.25);
-  subject.add(torso, head, faceDirection);
-  scene.add(subject);
-
-  const grid = new THREE.GridHelper(7, 14, 0x47606a, 0x28343d);
-  grid.position.y = -0.02;
-  scene.add(grid);
-  const ringPoints = Array.from({ length: 65 }, (_, index) => {
-    const angle = index / 64 * Math.PI * 2;
-    return new THREE.Vector3(Math.sin(angle) * 1.3, 0.012, Math.cos(angle) * 1.3);
-  });
-  scene.add(new THREE.Line(
-    new THREE.BufferGeometry().setFromPoints(ringPoints),
-    new THREE.LineBasicMaterial({ color: 0x4ea6a1, transparent: true, opacity: 0.66 })
-  ));
-  scene.add(new THREE.HemisphereLight(0xf4ead8, 0x1d3540, 2));
-  const keyLight = new THREE.DirectionalLight(0xffffff, 2.6);
-  keyLight.position.set(2.5, 4, 3);
-  scene.add(keyLight);
-  const rimLight = new THREE.DirectionalLight(0x65c8c0, 1.8);
-  rimLight.position.set(-3, 2, -2);
-  scene.add(rimLight);
-
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
-  const render = () => renderer.render(scene, camera);
-  const resize = () => {
-    const width = Math.max(1, canvas.clientWidth || 320);
-    const height = Math.max(1, canvas.clientHeight || 180);
-    camera.aspect = width / height;
-    camera.updateProjectionMatrix();
-    renderer.setSize(width, height, false);
-    render();
+  let renderer: THREE.WebGLRenderer | null = null;
+  let scene: THREE.Scene | null = null;
+  let camera: THREE.PerspectiveCamera | null = null;
+  let controls: OrbitControls | null = null;
+  let resizeObserver: ResizeObserver | null = null;
+  let disposed = false;
+  let render: () => void = () => undefined;
+  let resize: () => void = () => undefined;
+  let update: (nextValue: CameraViewState, nextDisabled?: boolean) => void = () => undefined;
+  let commitOrbit: () => void = () => undefined;
+  const resources = new Set<DisposableResource>();
+  const track = <T extends DisposableResource>(resource: T): T => {
+    resources.add(resource);
+    return resource;
   };
-  const update = (nextValue: CameraViewState, nextDisabled?: boolean) => {
-    const normalized = snapCameraView(nextValue);
-    const radius = DISTANCE_OFFSET + normalized.distance * DISTANCE_SCALE;
-    const position = cameraPositionFor(normalized, radius / normalized.distance);
-    camera.position.set(position.x, position.y + SUBJECT_TARGET.y, position.z);
-    camera.lookAt(SUBJECT_TARGET);
-    controls.enabled = !nextDisabled;
-    controls.update();
-    render();
-  };
-  const commitOrbit = () => {
-    const offset = camera.position.clone().sub(SUBJECT_TARGET);
-    const spherical = new THREE.Spherical().setFromVector3(offset);
-    onChange(snapCameraView({
-      azimuth: THREE.MathUtils.radToDeg(spherical.theta),
-      elevation: 90 - THREE.MathUtils.radToDeg(spherical.phi),
-      distance: (spherical.radius - DISTANCE_OFFSET) / DISTANCE_SCALE
-    }));
-  };
-  controls.addEventListener("change", render);
-  controls.addEventListener("end", commitOrbit);
   const onContextLost = (event: Event) => {
     event.preventDefault();
     onStatus("3D 预览已暂停");
@@ -143,28 +85,133 @@ export const mountCameraViewport = ({
     onStatus(null);
     resize();
   };
-  canvas.addEventListener("webglcontextlost", onContextLost);
-  canvas.addEventListener("webglcontextrestored", onContextRestored);
-  const resizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(resize) : null;
-  resizeObserver?.observe(canvas);
-  window.addEventListener("resize", resize);
-  resize();
-  update(value, disabled);
-
-  return {
-    update,
-    dispose: () => {
-      resizeObserver?.disconnect();
-      window.removeEventListener("resize", resize);
-      canvas.removeEventListener("webglcontextlost", onContextLost);
-      canvas.removeEventListener("webglcontextrestored", onContextRestored);
-      controls.removeEventListener("change", render);
-      controls.removeEventListener("end", commitOrbit);
-      controls.dispose();
-      disposeScene(scene);
-      renderer.dispose();
+  const cleanup = () => {
+    if (disposed) return;
+    disposed = true;
+    const safely = (operation: () => void) => {
+      try {
+        operation();
+      } catch (error) {
+        console.warn("Camera viewport cleanup failed", error);
+      }
+    };
+    safely(() => resizeObserver?.disconnect());
+    safely(() => window.removeEventListener("resize", resize));
+    safely(() => canvas.removeEventListener("webglcontextlost", onContextLost));
+    safely(() => canvas.removeEventListener("webglcontextrestored", onContextRestored));
+    safely(() => controls?.removeEventListener("change", render));
+    safely(() => controls?.removeEventListener("end", commitOrbit));
+    safely(() => controls?.dispose());
+    const released = new Set<DisposableResource>();
+    if (scene) safely(() => disposeScene(scene as THREE.Scene, released));
+    for (const resource of resources) {
+      if (released.has(resource)) continue;
+      released.add(resource);
+      safely(() => resource.dispose());
     }
+    safely(() => renderer?.dispose());
   };
+
+  try {
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: "low-power" });
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x101319);
+    scene.fog = new THREE.Fog(0x101319, 5.5, 8);
+    camera = new THREE.PerspectiveCamera(38, 16 / 9, 0.05, 20);
+    controls = new OrbitControls(camera, canvas);
+    controls.target.copy(SUBJECT_TARGET);
+    controls.enablePan = false;
+    controls.enableDamping = false;
+    controls.rotateSpeed = 0.65;
+    controls.zoomSpeed = 0.7;
+    controls.minDistance = DISTANCE_OFFSET + CAMERA_DISTANCE_MIN * DISTANCE_SCALE;
+    controls.maxDistance = DISTANCE_OFFSET + CAMERA_DISTANCE_MAX * DISTANCE_SCALE;
+    controls.minPolarAngle = 0.001;
+    controls.maxPolarAngle = Math.PI - 0.001;
+
+    const subject = new THREE.Group();
+    const darkMaterial = track(new THREE.MeshStandardMaterial({ color: 0x28313b, roughness: 0.72, metalness: 0.05 }));
+    const lightMaterial = track(new THREE.MeshStandardMaterial({ color: 0xd7b56d, roughness: 0.55, metalness: 0.08 }));
+    const accentMaterial = track(new THREE.MeshStandardMaterial({ color: 0x4ea6a1, roughness: 0.62, metalness: 0.02 }));
+    const torso = new THREE.Mesh(track(new THREE.CapsuleGeometry(0.35, 0.72, 8, 16)), darkMaterial);
+    torso.position.y = 0.72;
+    torso.scale.set(1, 1, 0.72);
+    const head = new THREE.Mesh(track(new THREE.SphereGeometry(0.24, 24, 16)), lightMaterial);
+    head.position.y = 1.48;
+    const faceDirection = new THREE.Mesh(track(new THREE.ConeGeometry(0.065, 0.18, 12)), accentMaterial);
+    faceDirection.rotation.x = Math.PI / 2;
+    faceDirection.position.set(0, 1.48, 0.25);
+    subject.add(torso, head, faceDirection);
+    scene.add(subject);
+
+    const grid = new THREE.GridHelper(7, 14, 0x47606a, 0x28343d);
+    grid.position.y = -0.02;
+    scene.add(grid);
+    const ringPoints = Array.from({ length: 65 }, (_, index) => {
+      const angle = index / 64 * Math.PI * 2;
+      return new THREE.Vector3(Math.sin(angle) * 1.3, 0.012, Math.cos(angle) * 1.3);
+    });
+    const ringGeometry = track(new THREE.BufferGeometry());
+    ringGeometry.setFromPoints(ringPoints);
+    scene.add(new THREE.Line(
+      ringGeometry,
+      track(new THREE.LineBasicMaterial({ color: 0x4ea6a1, transparent: true, opacity: 0.66 }))
+    ));
+    scene.add(new THREE.HemisphereLight(0xf4ead8, 0x1d3540, 2));
+    const keyLight = new THREE.DirectionalLight(0xffffff, 2.6);
+    keyLight.position.set(2.5, 4, 3);
+    scene.add(keyLight);
+    const rimLight = new THREE.DirectionalLight(0x65c8c0, 1.8);
+    rimLight.position.set(-3, 2, -2);
+    scene.add(rimLight);
+
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+    render = () => renderer?.render(scene as THREE.Scene, camera as THREE.PerspectiveCamera);
+    resize = () => {
+      const width = Math.max(1, canvas.clientWidth || 320);
+      const height = Math.max(1, canvas.clientHeight || 180);
+      (camera as THREE.PerspectiveCamera).aspect = width / height;
+      (camera as THREE.PerspectiveCamera).updateProjectionMatrix();
+      renderer?.setSize(width, height, false);
+      render();
+    };
+    update = (nextValue: CameraViewState, nextDisabled?: boolean) => {
+      const normalized = snapCameraView(nextValue);
+      const radius = DISTANCE_OFFSET + normalized.distance * DISTANCE_SCALE;
+      const position = cameraPositionFor(normalized, radius / normalized.distance);
+      (camera as THREE.PerspectiveCamera).position.set(position.x, position.y + SUBJECT_TARGET.y, position.z);
+      (camera as THREE.PerspectiveCamera).lookAt(SUBJECT_TARGET);
+      (controls as OrbitControls).enabled = !nextDisabled;
+      (controls as OrbitControls).update();
+      render();
+    };
+    commitOrbit = () => {
+      const offset = (camera as THREE.PerspectiveCamera).position.clone().sub(SUBJECT_TARGET);
+      const spherical = new THREE.Spherical().setFromVector3(offset);
+      onChange(snapCameraView({
+        azimuth: THREE.MathUtils.radToDeg(spherical.theta),
+        elevation: 90 - THREE.MathUtils.radToDeg(spherical.phi),
+        distance: (spherical.radius - DISTANCE_OFFSET) / DISTANCE_SCALE
+      }));
+    };
+    controls.addEventListener("change", render);
+    controls.addEventListener("end", commitOrbit);
+    canvas.addEventListener("webglcontextlost", onContextLost);
+    canvas.addEventListener("webglcontextrestored", onContextRestored);
+    resizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(resize) : null;
+    resizeObserver?.observe(canvas);
+    window.addEventListener("resize", resize);
+    resize();
+    update(value, disabled);
+
+    return { update, dispose: cleanup };
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
 };
 
 export const cameraRuntime: CameraRuntime = { mount: mountCameraViewport };
