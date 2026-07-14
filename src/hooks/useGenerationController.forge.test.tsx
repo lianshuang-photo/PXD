@@ -22,7 +22,9 @@ const boundary = vi.hoisted(() => ({
     fetchOptions: vi.fn(),
     fetchProgress: vi.fn(),
     img2img: vi.fn(),
-    txt2img: vi.fn()
+    txt2img: vi.fn(),
+    cancel: vi.fn(),
+    cancelAll: vi.fn()
   },
   getSelectionPixels: vi.fn(),
   closeGeneratedDocument: vi.fn(),
@@ -114,6 +116,8 @@ beforeEach(() => {
   boundary.client.fetchProgress.mockResolvedValue(null);
   boundary.client.img2img.mockResolvedValue({ images: ["IMG2IMG"] });
   boundary.client.txt2img.mockResolvedValue({ images: ["TXT_ONE", "TXT_TWO"] });
+  boundary.client.cancel.mockReturnValue(true);
+  boundary.client.cancelAll.mockReturnValue(0);
   boundary.closeGeneratedDocument.mockResolvedValue(undefined);
   boundary.createGeneratedDocument.mockResolvedValue({
     documentId: 42,
@@ -217,15 +221,8 @@ describe("useGenerationController Forge completion", () => {
     act(() => harness.renderer.unmount());
   });
 
-  it("publishes current_image while Forge generation is running", async () => {
-    vi.useFakeTimers();
+  it("publishes task progress and countdown while Forge generation is running", async () => {
     boundary.getSelectionPixels.mockResolvedValue(selection);
-    boundary.client.fetchProgress.mockResolvedValue({
-      progress: 0.5,
-      eta_relative: 2,
-      current_image: "LIVE_PREVIEW",
-      textinfo: "Sampling"
-    });
     let resolveGeneration: ((value: { images: string[] }) => void) | null = null;
     boundary.client.img2img.mockImplementation(() => new Promise((resolve) => {
       resolveGeneration = resolve;
@@ -237,14 +234,13 @@ describe("useGenerationController Forge completion", () => {
       generationPromise = harness.controller.runGeneration();
     });
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_000);
+    await flushEffects();
+    expect(harness.controller.generationTasks[0]).toMatchObject({
+      status: "running",
+      progress: 0.02
     });
-    expect(harness.controller.progress).toBe(0.5);
-    expect(harness.controller.progressPreview).toBe(
-      "data:image/png;base64,LIVE_PREVIEW"
-    );
-    expect(harness.controller.progressText).toBe("Sampling");
+    expect(harness.controller.generationTasks[0].countdown).toBeGreaterThan(0);
+    expect(harness.controller.progressPreview).toBeNull();
 
     await act(async () => {
       resolveGeneration?.({ images: ["DONE"] });
@@ -254,18 +250,8 @@ describe("useGenerationController Forge completion", () => {
     act(() => harness.renderer.unmount());
   });
 
-  it("drops an in-flight progress response after stop and during the next generation", async () => {
-    vi.useFakeTimers();
+  it("drops a cancelled task's late result without affecting the next task", async () => {
     boundary.getSelectionPixels.mockResolvedValue(selection);
-    let resolveProgress: ((value: {
-      progress: number;
-      eta_relative: number;
-      current_image: string;
-      textinfo: string;
-    }) => void) | null = null;
-    boundary.client.fetchProgress.mockImplementation(() => new Promise((resolve) => {
-      resolveProgress = resolve;
-    }));
     let resolveFirst: ((value: { images: string[] }) => void) | null = null;
     let resolveSecond: ((value: { images: string[] }) => void) | null = null;
     boundary.client.img2img
@@ -282,58 +268,46 @@ describe("useGenerationController Forge completion", () => {
     act(() => {
       firstPromise = harness.controller.runGeneration();
     });
+    await flushEffects();
+    const firstId = harness.controller.generationTasks[0].id;
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(3_000);
-    });
-    expect(boundary.client.fetchProgress).toHaveBeenCalledOnce();
-
-    await act(async () => {
-      resolveFirst?.({ images: ["FIRST"] });
+      await harness.controller.cancelTask(firstId);
       await firstPromise!;
     });
     let secondPromise: Promise<void>;
     act(() => {
       secondPromise = harness.controller.runGeneration();
     });
+    await flushEffects();
     await act(async () => {
-      resolveProgress?.({
-        progress: 0.9,
-        eta_relative: 1,
-        current_image: "STALE_PREVIEW",
-        textinfo: "Stale"
-      });
-      await Promise.resolve();
-    });
-
-    expect(harness.controller.progress).toBe(0);
-    expect(harness.controller.progressPreview).toBeNull();
-    expect(harness.controller.progressText).toBeNull();
-    await act(async () => {
+      resolveFirst?.({ images: ["STALE"] });
       resolveSecond?.({ images: ["SECOND"] });
       await secondPromise!;
     });
+    expect(boundary.client.cancel).toHaveBeenCalledWith(firstId);
+    expect(boundary.placeImageIntoSelection).toHaveBeenCalledOnce();
+    expect(boundary.placeImageIntoSelection).toHaveBeenCalledWith(
+      "data:image/png;base64,SECOND",
+      1,
+      expect.anything()
+    );
     act(() => harness.renderer.unmount());
   });
 
-  it("clears the live preview in the batch finally path", async () => {
-    vi.useFakeTimers();
+  it("starts batch network requests concurrently", async () => {
     boundary.getSelectionPixels.mockResolvedValue(selection);
-    boundary.client.fetchProgress.mockResolvedValue({
-      progress: 0.25,
-      eta_relative: 4,
-      current_image: "BATCH_PREVIEW",
-      textinfo: "Batch sampling"
-    });
-    let resolveGeneration: ((value: { images: string[] }) => void) | null = null;
-    boundary.client.img2img.mockImplementation(() => new Promise((resolve) => {
-      resolveGeneration = resolve;
-    }));
+    let resolveFirst: ((value: { images: string[] }) => void) | null = null;
+    let resolveSecond: ((value: { images: string[] }) => void) | null = null;
+    boundary.client.img2img
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve; }));
     const harness = mountController();
     await flushEffects();
     await act(async () => {
       await harness.controller.addToBatch();
+      await harness.controller.addToBatch();
     });
-    expect(harness.controller.batchItems).toHaveLength(1);
+    expect(harness.controller.batchItems).toHaveLength(2);
     let batchPromise: Promise<void>;
     act(() => {
       batchPromise = harness.controller.runBatch();
@@ -342,21 +316,15 @@ describe("useGenerationController Forge completion", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(boundary.client.img2img).toHaveBeenCalledOnce();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_000);
-    });
-    expect(harness.controller.progressPreview).toBe(
-      "data:image/png;base64,BATCH_PREVIEW"
-    );
+    expect(boundary.client.img2img).toHaveBeenCalledTimes(2);
+    expect(harness.controller.batchItems.map(({ status }) => status)).toEqual(["running", "running"]);
 
     await act(async () => {
-      resolveGeneration?.({ images: ["DONE"] });
+      resolveFirst?.({ images: ["FIRST"] });
+      resolveSecond?.({ images: ["SECOND"] });
       await batchPromise!;
     });
-    expect(harness.controller.progress).toBe(0);
-    expect(harness.controller.progressPreview).toBeNull();
-    expect(harness.controller.progressText).toBeNull();
+    expect(harness.controller.batchItems.map(({ status }) => status)).toEqual(["success", "success"]);
     act(() => harness.renderer.unmount());
   });
 

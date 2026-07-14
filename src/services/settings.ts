@@ -11,6 +11,8 @@ const AUTODETECT_CANDIDATES = [
   "http://localhost:8080"
 ];
 const PROBE_TIMEOUT = 3_000;
+const normalizeMaxConcurrentTasks = (value: number) =>
+  Number.isFinite(value) ? Math.max(1, Math.min(8, Math.floor(value))) : 4;
 
 export const DEFAULT_SETTINGS: AppSettings = {
   sdEndpoint: "http://127.0.0.1:7860",
@@ -23,7 +25,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   brandColor: "#b794f6",
   timeoutMultiplier: 1,
   timeoutMinSeconds: 20,
-  timeoutMaxSeconds: 120
+  timeoutMaxSeconds: 120,
+  maxConcurrentTasks: 4
 };
 
 export const loadSettings = async (): Promise<AppSettings> => {
@@ -42,11 +45,13 @@ export const loadSettings = async (): Promise<AppSettings> => {
     ? Math.max(minSeconds, result.timeoutMaxSeconds)
     : DEFAULT_SETTINGS.timeoutMaxSeconds;
   const multiplier = Number.isFinite(result.timeoutMultiplier) ? Math.max(0.25, result.timeoutMultiplier) : DEFAULT_SETTINGS.timeoutMultiplier;
+  const maxConcurrentTasks = normalizeMaxConcurrentTasks(result.maxConcurrentTasks);
   return {
     ...result,
     timeoutMinSeconds: minSeconds,
     timeoutMaxSeconds: maxSeconds,
-    timeoutMultiplier: multiplier
+    timeoutMultiplier: multiplier,
+    maxConcurrentTasks
   };
 };
 
@@ -54,11 +59,13 @@ export const saveSettings = async (next: AppSettings): Promise<void> => {
   const minSeconds = Math.max(5, Math.min(next.timeoutMinSeconds, next.timeoutMaxSeconds));
   const maxSeconds = Math.max(minSeconds, next.timeoutMaxSeconds);
   const multiplier = Math.max(0.25, next.timeoutMultiplier);
+  const maxConcurrentTasks = normalizeMaxConcurrentTasks(next.maxConcurrentTasks);
   const payload: AppSettings = {
     ...next,
     timeoutMinSeconds: minSeconds,
     timeoutMaxSeconds: maxSeconds,
-    timeoutMultiplier: multiplier
+    timeoutMultiplier: multiplier,
+    maxConcurrentTasks
   };
   await bridge.writePreference<AppSettings>(SETTINGS_FILE, payload);
   await bridge.writeJsonFile<AppSettings>(SETTINGS_FILE, payload);

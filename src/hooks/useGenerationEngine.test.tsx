@@ -70,7 +70,7 @@ describe("useGenerationEngine", () => {
 
     act(() => {
       renderer.update(createElement(Harness, {
-        settings: { ...firstGeminiSettings, outputDirectory: "/unrelated" }
+        settings: { ...firstGeminiSettings, brandColor: "#123456" }
       }));
     });
     expect(current).toBe(firstGemini);

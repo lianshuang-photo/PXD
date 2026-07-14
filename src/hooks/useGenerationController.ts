@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppSettings } from "../context/types";
 import {
   isPxdRequestCancelledError,
@@ -12,13 +12,13 @@ import {
   formatGenerationError,
   GenerationEngineError,
   type EngineGenerateParams,
-  type EngineProgressMode
+  type EngineProgressMode,
+  type GenerationEngine
 } from "../services/generationEngine";
 import { useGenerationEngine } from "./useGenerationEngine";
 import { useEngineLifecycle } from "./useEngineLifecycle";
 import {
-  executeGenerationTask,
-  type GenerationWorkflowResult
+  returnGenerationImages
 } from "../services/generationWorkflow";
 import {
   closeDocument,
@@ -36,7 +36,11 @@ import {
   type GeneratedDocumentSession,
   type SelectionPixels
 } from "../services/photoshop";
-import { clearPSLockQueue, isPSLockControlError } from "../services/psLock";
+import {
+  clearPSLockQueue,
+  isPSLockControlError,
+  PSCircuitOpenError
+} from "../services/psLock";
 import {
   deletePresetFile,
   listPresetMetas,
@@ -45,11 +49,12 @@ import {
   type PresetMeta
 } from "../services/presets";
 import { LatestLoadGate } from "../services/loadGate";
-import { GenerationRunGate } from "../services/generationRunGate";
 import { translateText } from "../services/translator";
 import { useGenerationHistory } from "./useGenerationHistory";
 import type { GenerationHistoryEntry } from "../services/generationHistory";
 import { normalizePromptParams, sanitizePrompt } from "../services/promptParams";
+import { useGenerationTaskPool } from "./useGenerationTaskPool";
+import type { GenerationTaskSnapshot } from "../services/generationTaskPool";
 
 export type GenerationStatus = "idle" | "running" | "success" | "error";
 export type ToastType = "info" | "success" | "warning" | "error";
@@ -92,13 +97,26 @@ export interface BatchItem {
   selection: SelectionPixels;
   overrideWidth: number;
   overrideHeight: number;
-  status: "queued" | "running" | "success" | "stopped" | "error";
+  status: "queued" | "running" | "awaiting-return" | "success" | "stopped" | "error";
   error?: string;
   metadata?: {
     activeDocumentId?: number;
     batchDocumentId?: number;
     newLayerId?: number;
   };
+}
+
+interface PreparedPoolTask {
+  id: string;
+  title: string;
+  engine: GenerationEngine;
+  settings: AppSettings;
+  form: GenerationForm;
+  selection: SelectionPixels | null;
+  width: number;
+  height: number;
+  groupName?: string;
+  prepareReturn?: () => Promise<void>;
 }
 
 interface PresetPayload {
@@ -193,6 +211,12 @@ const normalizeFormPrompts = (form: GenerationForm): GenerationForm => ({
 
 const toDataUrl = (base64: string) => `data:image/png;base64,${base64}`;
 const dataUrlToBase64 = (dataUrl: string) => dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
+const layerIdFrom = (value: unknown) => {
+  if (!value || typeof value !== "object") return 0;
+  const info = value as Record<string, unknown>;
+  const layerId = Number(info.layerID ?? info.layerId ?? info.targetLayerID ?? info.targetLayerId ?? 0);
+  return Number.isFinite(layerId) && layerId > 0 ? layerId : 0;
+};
 
 const computeOverrideSize = (width: number, height: number, target: number) => {
   if (width <= target && height <= target) {
@@ -395,6 +419,14 @@ export interface GenerationControllerState {
   removeFromBatch: (id: string) => Promise<void>;
   clearBatch: () => Promise<void>;
   runBatch: () => Promise<void>;
+  generationTasks: GenerationTaskSnapshot[];
+  taskConcurrency: number;
+  cancelTask: (id: string) => Promise<GenerationTaskSnapshot | null>;
+  retryTask: (id: string) => Promise<GenerationTaskSnapshot | null>;
+  returnTask: (id: string) => Promise<GenerationTaskSnapshot | null>;
+  removeTask: (id: string) => Promise<boolean>;
+  extendTask: (id: string, seconds?: number) => boolean;
+  setTaskAutoReturn: (id: string, autoReturn: boolean) => boolean;
   toast: ToastState | null;
   dismissToast: () => void;
   presets: PresetMeta[];
@@ -432,12 +464,11 @@ export const useGenerationController = (
   settingsActions: GenerationControllerSettingsActions = {}
 ): GenerationControllerState => {
   const engine = useGenerationEngine(settings);
+  const taskPool = useGenerationTaskPool(settings.maxConcurrentTasks);
   const {
     token: engineToken,
     isCurrent: isEngineCurrent,
-    commitIfCurrent,
-    startPolling,
-    stopPolling
+    commitIfCurrent
   } = useEngineLifecycle(engine);
   const [form, setForm] = useState<GenerationForm>(DEFAULT_FORM);
   const [status, setStatus] = useState<GenerationStatus>("idle");
@@ -460,6 +491,7 @@ export const useGenerationController = (
   const [sourceLanguage, setSourceLanguage] = useState("zh");
   const [targetLanguage, setTargetLanguage] = useState("en");
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toastRef = useRef<ToastState | null>(null);
   const presetsLoadGateRef = useRef(new LatestLoadGate());
   const settingsRef = useRef(settings);
   const historyRestoreGenerationRef = useRef(0);
@@ -467,20 +499,6 @@ export const useGenerationController = (
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
-  const runGateRef = useRef(new GenerationRunGate());
-  const stoppedByEngineChangeRef = useRef(false);
-
-  useLayoutEffect(() => {
-    setProgress(0);
-    setStatus((current) => current === "running" ? "idle" : current);
-  }, [engineToken]);
-
-  useEffect(() => () => {
-    if (runGateRef.current.stop()) {
-      engine.cancelAll();
-      stoppedByEngineChangeRef.current = true;
-    }
-  }, [engine]);
   const clearToastTimer = useCallback(() => {
     if (toastTimerRef.current) {
       clearTimeout(toastTimerRef.current);
@@ -488,7 +506,9 @@ export const useGenerationController = (
     }
   }, []);
   const pushToast = useCallback((type: ToastType, message: string) => {
-    setToast({ type, message });
+    const next = { type, message };
+    toastRef.current = next;
+    setToast(next);
   }, []);
   const {
     entries: history,
@@ -498,6 +518,7 @@ export const useGenerationController = (
   } = useGenerationHistory<GenerationForm>((message) => pushToast("warning", message));
   const dismissToast = useCallback(() => {
     clearToastTimer();
+    toastRef.current = null;
     setToast(null);
   }, [clearToastTimer]);
   useEffect(() => {
@@ -507,6 +528,7 @@ export const useGenerationController = (
     }
     clearToastTimer();
     toastTimerRef.current = setTimeout(() => {
+      toastRef.current = null;
       setToast(null);
       toastTimerRef.current = null;
     }, 5000);
@@ -514,18 +536,6 @@ export const useGenerationController = (
       clearToastTimer();
     };
   }, [toast, clearToastTimer]);
-
-  useEffect(() => {
-    if (!stoppedByEngineChangeRef.current) return;
-    stoppedByEngineChangeRef.current = false;
-    setBatchItems((items) =>
-      items.map((item) =>
-        item.status === "running" ? { ...item, status: "stopped", error: undefined } : item
-      )
-    );
-    setError(null);
-    pushToast("info", "设置已更新，当前生成已停止");
-  }, [engine, pushToast]);
 
   const setFormValue = useCallback(
     <K extends keyof GenerationForm>(key: K, value: GenerationForm[K]) => {
@@ -667,6 +677,12 @@ export const useGenerationController = (
     pushToast("success", "已添加至反向提示词");
   }, [form.extraPrompt, pushToast]);
 
+  const hasActiveGenerationTask = taskPool.tasks.some(({ status: taskStatus }) =>
+    taskStatus === "queued" || taskStatus === "running" || taskStatus === "returning"
+  );
+  const hasActiveGenerationTaskRef = useRef(hasActiveGenerationTask);
+  hasActiveGenerationTaskRef.current = hasActiveGenerationTask;
+
   const restoreHistoryConfig = useCallback(async (id: string) => {
     const entry = history.find((candidate) => candidate.id === id);
     if (!entry) {
@@ -717,10 +733,11 @@ export const useGenerationController = (
         return;
       }
       const restored = hydrateHistoryForm(entry.params, entry.prompt);
-      await placeImageIntoSelection(entry.thumbnailDataUrl, 1, {
+      const placed = await placeImageIntoSelection(entry.thumbnailDataUrl, 1, {
         feather: restored.maskFeather
       });
-      await moveActiveLayerToTop();
+      const layerId = layerIdFrom(placed);
+      if (layerId) await moveActiveLayerToTop({ layerId });
       pushToast("success", "历史结果已贴回当前选区");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "历史结果贴回失败";
@@ -729,7 +746,7 @@ export const useGenerationController = (
   }, [history, pushToast]);
 
   const refreshOptions = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (hasActiveGenerationTaskRef.current) return;
     const requestToken = engineToken;
     const fetchOptions = requestToken.engine.fetchOptions;
     if (!fetchOptions) {
@@ -789,168 +806,205 @@ export const useGenerationController = (
     });
   }, [loadPresets]);
 
-  const pollProgress = useCallback(() => {
-    const activeRun = runGateRef.current.current;
-    if (!activeRun) return;
-    const runToken = activeRun.token;
-    const isPollCurrent = () => runGateRef.current.isCurrent(runToken);
-    startPolling(
-      engineToken,
-      (value) => {
-        if (!isPollCurrent()) return;
-        setProgress(value);
-      },
-      (info) => {
-        if (!isPollCurrent()) return;
-        setProgressPreview(info.current_image ? toDataUrl(info.current_image) : null);
-        const text = info.textinfo || info.message;
-        setProgressText(text ? String(text) : null);
-      }
+  const enqueuePreparedTask = useCallback((prepared: PreparedPoolTask) => {
+    let generatedDocument: GeneratedDocumentSession | null = null;
+    const timeoutSeconds = Math.max(
+      5,
+      prepared.settings.timeoutMaxSeconds * prepared.settings.timeoutMultiplier
     );
-  }, [engineToken, startPolling]);
+    const request = {
+      ...buildEngineGenerateParams(
+        prepared.engine.provider,
+        prepared.settings,
+        prepared.form,
+        prepared.selection,
+        prepared.width,
+        prepared.height,
+        prepared.id
+      ),
+      // The pool owns the extendable deadline; the client timeout remains a final failsafe.
+      timeoutMs: 24 * 60 * 60 * 1_000
+    };
+    const adapters = prepared.selection
+      ? GENERATION_WORKFLOW_ADAPTERS
+      : {
+          ...GENERATION_WORKFLOW_ADAPTERS,
+          placeImage: async (
+            dataUrl: string,
+            index: number,
+            options: { feather: number; taskId?: string }
+          ) => {
+            if (!generatedDocument) {
+              generatedDocument = await createGeneratedDocument(
+                prepared.width,
+                prepared.height,
+                undefined,
+                { taskId: options.taskId }
+              );
+            }
+            return await placeImageIntoDocument(
+              dataUrl,
+              index,
+              generatedDocument.documentId,
+              { taskId: options.taskId }
+            );
+          }
+        };
+
+    return taskPool.enqueueTask({
+      id: prepared.id,
+      title: prepared.title,
+      engine: prepared.engine.provider,
+      timeoutSeconds,
+      run: async ({ signal, updateProgress }) => {
+        updateProgress(0.02);
+        const result = await prepared.engine.generate({ ...request, signal });
+        updateProgress(1);
+        return result.images;
+      },
+      returnImages: async (images, context) => {
+        await returnGenerationImages(
+          prepared.engine,
+          images,
+          {
+            feather: Number.isFinite(prepared.form.maskFeather)
+              ? prepared.form.maskFeather
+              : DEFAULT_FORM.maskFeather,
+            taskId: prepared.id,
+            groupName: prepared.groupName,
+            prepare: prepared.prepareReturn,
+            isCurrent: context.isCurrent
+          },
+          adapters
+        );
+        generatedDocument = null;
+      },
+      cancelNetwork: () => {
+        prepared.engine.cancel(prepared.id);
+      },
+      clearPendingReturn: () => {
+        clearPSLockQueue(prepared.id);
+      },
+      cleanup: async () => {
+        if (!generatedDocument) return;
+        const session = generatedDocument;
+        generatedDocument = null;
+        try {
+          await closeGeneratedDocument(
+            session.documentId,
+            session.previousDocumentId,
+            { taskId: prepared.id }
+          );
+        } catch (caught) {
+          console.warn("Failed to clean up generated document", caught);
+        }
+      },
+      onResult: async (images) => {
+        setLastImages(images.map(toDataUrl));
+        await recordHistory({
+          provider: prepared.settings.imageProvider,
+          prompt: effectivePromptFor(prepared.form),
+          params: { ...prepared.form },
+          resultDataUrl: toDataUrl(images[0])
+        });
+      },
+      isCancelledError: isGenerationCancelledError,
+      isDeferredReturnError: (caught) => caught instanceof PSCircuitOpenError,
+      formatError: (caught) => formatGenerationError(caught, "生成任务失败")
+    });
+  }, [recordHistory, taskPool]);
+
+  useEffect(() => {
+    const activeTask = taskPool.tasks.find(({ status: taskStatus }) =>
+      taskStatus === "queued" || taskStatus === "running" || taskStatus === "returning"
+    );
+    if (activeTask) {
+      setStatus("running");
+      setProgress(activeTask.progress);
+      setProgressText(`${activeTask.title} · ${activeTask.countdown}s`);
+      setError(null);
+    } else {
+      const latest = taskPool.tasks[0];
+      setProgress(0);
+      setProgressPreview(null);
+      setProgressText(null);
+      if (!latest || latest.status === "cancelled") {
+        setStatus("idle");
+        setError(null);
+      } else if (latest.status === "error") {
+        setStatus("error");
+        setError(latest.error ?? "生成失败");
+      } else {
+        setStatus("success");
+        setError(null);
+      }
+    }
+
+    setBatchItems((items) => {
+      let changed = false;
+      const next = items.map((item) => {
+        const task = taskPool.taskMap[item.id];
+        if (!task) return item;
+        const taskStatus: BatchItem["status"] =
+          task.status === "cancelled"
+            ? "stopped"
+            : task.status === "returning"
+              ? "running"
+              : task.status;
+        const taskError = task.status === "error" || task.status === "awaiting-return"
+          ? task.error
+          : undefined;
+        if (item.status === taskStatus && item.error === taskError) return item;
+        changed = true;
+        return { ...item, status: taskStatus, error: taskError };
+      });
+      return changed ? next : items;
+    });
+  }, [taskPool.taskMap, taskPool.tasks]);
 
   const stopGeneration = useCallback(() => {
-    const activeRun = runGateRef.current.current;
-    if (!activeRun) return;
-    runGateRef.current.stop();
-    engine.cancelAll();
-    stopPolling(engineToken);
-    if (activeRun.kind === "batch" && activeRun.taskId) {
-      setBatchItems((items) =>
-        items.map((item) =>
-          item.id === activeRun.taskId && item.status === "running"
-            ? { ...item, status: "stopped", error: undefined }
-            : item
-        )
-      );
-    }
-    setStatus("idle");
-    setProgress(0);
-    setProgressPreview(null);
-    setProgressText(null);
-    setError(null);
-    pushToast("info", "已停止");
-  }, [engine, engineToken, pushToast, stopPolling]);
+    const activeTasks = taskPool.tasks.filter(({ status: taskStatus }) =>
+      taskStatus === "queued" || taskStatus === "running" || taskStatus === "returning"
+    );
+    if (!activeTasks.length) return;
+    for (const task of activeTasks) void taskPool.cancelTask(task.id);
+    pushToast("info", `已停止 ${activeTasks.length} 个任务`);
+  }, [pushToast, taskPool]);
 
   const runGeneration = useCallback(async () => {
-    if (runGateRef.current.current) return;
-    const requestToken = engineToken;
-    const requestEngine = requestToken.engine;
     const taskId = generateId();
-    const { token: runToken } = runGateRef.current.begin("single", taskId);
-    const isRunCurrent = () => isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken);
-    setStatus("running");
     setError(null);
-    setProgress(0);
-    setProgressPreview(null);
-    setProgressText(null);
     dismissToast();
     try {
       const selection = await getSelectionPixels({ taskId });
-      if (!isRunCurrent()) return;
-      if (!selection && requestEngine.provider === "gemini") {
+      if (!selection && engine.provider === "gemini") {
         throw new Error("请先在 Photoshop 中选择一个区域");
       }
       const target = clampNumber(form.resolution, 128, 2048);
       const { width, height } = selection
         ? computeOverrideSize(selection.width, selection.height, target)
         : { width: target, height: target };
-      let generatedDocument: GeneratedDocumentSession | null = null;
-      const adapters = selection
-        ? GENERATION_WORKFLOW_ADAPTERS
-        : {
-            ...GENERATION_WORKFLOW_ADAPTERS,
-            placeImage: async (
-              dataUrl: string,
-              index: number,
-              opts: { feather: number; taskId?: string }
-            ) => {
-              if (!generatedDocument) {
-                generatedDocument = await createGeneratedDocument(width, height, undefined, {
-                  taskId: opts.taskId
-                });
-              }
-              return placeImageIntoDocument(dataUrl, index, generatedDocument.documentId, {
-                taskId: opts.taskId
-              });
-            }
-          };
-      let result: GenerationWorkflowResult;
-      try {
-        result = await executeGenerationTask(
-          requestEngine,
-          {
-            request: buildEngineGenerateParams(
-              requestEngine.provider,
-              settings,
-              form,
-              selection,
-              width,
-              height,
-              taskId
-            ),
-            feather: Number.isFinite(form.maskFeather) ? form.maskFeather : DEFAULT_FORM.maskFeather,
-            taskId,
-            emptyImagesMessage: "未收到可用的生成图像",
-            isCurrent: isRunCurrent,
-            onRequestStart: () => {
-              if (requestEngine.progressMode === "determinate") pollProgress();
-            },
-            onRequestSettled: () => stopPolling(requestToken)
-          },
-          adapters
-        );
-      } catch (workflowError) {
-        if (generatedDocument) {
-          await closeGeneratedDocument(
-            (generatedDocument as GeneratedDocumentSession).documentId,
-            (generatedDocument as GeneratedDocumentSession).previousDocumentId,
-            { taskId }
-          ).catch((cleanupError) =>
-            ignoreBestEffortPhotoshopError("Failed to clean up generated document", cleanupError)
-          );
-        }
-        throw workflowError;
-      }
-      if (!isRunCurrent()) return;
-      const { images } = result;
-      setProgress(1);
-      setLastImages(images.map(toDataUrl));
-      const historyRecord = await recordHistory({
-        provider: settings.imageProvider,
-        prompt: effectivePromptFor(form),
-        params: { ...form },
-        resultDataUrl: toDataUrl(images[0])
+      const completion = await enqueuePreparedTask({
+        id: taskId,
+        title: createBatchItemName(form, taskPool.tasks.length),
+        engine,
+        settings: { ...settings },
+        form: { ...form },
+        selection,
+        width,
+        height
       });
-      setStatus("success");
-      if (historyRecord) pushToast("success", "生成成功");
-    } catch (err) {
-      stopPolling(requestToken);
-      if (!isRunCurrent()) return;
-      if (isGenerationCancelledError(err)) {
-        runGateRef.current.complete(runToken);
-        setStatus("idle");
-        setProgress(0);
-        setError(null);
-        pushToast("info", "已停止");
-        return;
+      if (completion.status === "success" && toastRef.current?.type !== "warning") {
+        pushToast("success", "生成成功并已回传");
       }
+      else if (completion.status === "awaiting-return") pushToast("warning", "生成完成，等待手动回传");
+      else if (completion.status === "error") pushToast("error", completion.error ?? "生成失败");
+    } catch (err) {
       const message = formatGenerationError(err, "生成失败");
-      setStatus("error");
       setError(message);
       pushToast("error", message);
-    } finally {
-      stopPolling(requestToken);
-      if (runGateRef.current.isCurrent(runToken)) {
-        runGateRef.current.complete(runToken);
-      }
-      commitIfCurrent(requestToken, () => {
-        setProgress(0);
-        setProgressPreview(null);
-        setProgressText(null);
-      });
     }
-  }, [commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pollProgress, pushToast, recordHistory, settings, stopPolling]);
+  }, [dismissToast, engine, enqueuePreparedTask, form, pushToast, settings, taskPool.tasks.length]);
 
   const addToBatch = useCallback(async () => {
     const taskId = generateId();
@@ -997,8 +1051,7 @@ export const useGenerationController = (
   const removeFromBatch = useCallback(
     async (id: string) => {
       const target = batchItems.find((item) => item.id === id);
-      engine.cancel(id);
-      clearPSLockQueue(id);
+      if (!(await taskPool.removeTask(id))) clearPSLockQueue(id);
       setBatchItems((prev) => prev.filter((item) => item.id !== id));
       if (target?.metadata?.batchDocumentId && target.metadata.activeDocumentId && target.metadata.newLayerId) {
         await closeDocument(
@@ -1009,18 +1062,14 @@ export const useGenerationController = (
         );
       }
     },
-    [batchItems, engine]
+    [batchItems, taskPool]
   );
 
   const clearBatch = useCallback(async () => {
     const items = batchItems.slice();
-    if (runGateRef.current.current?.kind === "batch") {
-      stopGeneration();
-    }
     setBatchItems([]);
     for (const item of items) {
-      engine.cancel(item.id);
-      clearPSLockQueue(item.id);
+      if (!(await taskPool.removeTask(item.id))) clearPSLockQueue(item.id);
       if (item.metadata?.batchDocumentId && item.metadata.activeDocumentId && item.metadata.newLayerId) {
         await closeDocument(
           item.metadata.batchDocumentId,
@@ -1031,10 +1080,9 @@ export const useGenerationController = (
       }
     }
     pushToast("info", "批次已清空");
-  }, [batchItems, engine, pushToast, stopGeneration]);
+  }, [batchItems, pushToast, taskPool]);
 
   const runBatch = useCallback(async () => {
-    if (runGateRef.current.current) return;
     const runnableItems = batchItems.filter((item) => item.status !== "success");
     if (!runnableItems.length) {
       if (batchItems.length) {
@@ -1044,125 +1092,55 @@ export const useGenerationController = (
       }
       return;
     }
-    const requestToken = engineToken;
-    const requestEngine = requestToken.engine;
-    const { token: runToken } = runGateRef.current.begin("batch");
-    const isRunCurrent = () => isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken);
-    setStatus("running");
     setError(null);
-    let historyRecorded = true;
-    setProgress(0);
     setBatchItems((items) =>
       items.map((item) =>
-        item.status === "success" ? item : { ...item, status: "queued", error: undefined }
+        runnableItems.some(({ id }) => id === item.id)
+          ? { ...item, status: "queued", error: undefined }
+          : item
       )
     );
-    let activeItemId: string | undefined;
     try {
-      for (const item of runnableItems) {
-        if (!isRunCurrent()) return;
-        activeItemId = item.id;
-        runGateRef.current.setTask(runToken, item.id);
-        setBatchItems((items) =>
-          items.map((candidate) =>
-            candidate.id === item.id ? { ...candidate, status: "running", error: undefined } : candidate
-          )
-        );
-        const result = await executeGenerationTask(
-          requestEngine,
-          {
-            request: buildEngineGenerateParams(
-              requestEngine.provider,
-              settings,
-              item.form,
-              item.selection,
-              item.overrideWidth,
-              item.overrideHeight,
-              item.id
-            ),
-            feather:
-              Number.isFinite(item.form?.maskFeather) && item.form.maskFeather >= 0
-                ? item.form.maskFeather
-                : DEFAULT_FORM.maskFeather,
-            taskId: item.id,
-            groupName: item.name,
-            emptyImagesMessage: `批次「${item.name}」未返回图像`,
-            isCurrent: isRunCurrent,
-            prepare: async () => {
-              if (item.metadata?.activeDocumentId) {
-                await switchToDocument(item.metadata.activeDocumentId, { taskId: item.id }).catch((error) =>
-                  ignoreBestEffortPhotoshopError("switchToDocument failed", error)
-                );
-              }
-              if (item.selection.selectionBounds) {
-                await setSelectionBounds(item.selection.selectionBounds, { taskId: item.id }).catch((error) =>
-                  ignoreBestEffortPhotoshopError("setSelectionBounds failed", error)
-                );
-              }
-            },
-            onRequestStart: () => {
-              if (requestEngine.progressMode === "determinate") pollProgress();
-            },
-            onRequestSettled: () => stopPolling(requestToken)
-          },
-          GENERATION_WORKFLOW_ADAPTERS
-        );
-        if (!isRunCurrent()) return;
-        setBatchItems((items) =>
-          items.map((candidate) =>
-            candidate.id === item.id ? { ...candidate, status: "success", error: undefined } : candidate
-          )
-        );
-        const historyRecord = await recordHistory({
-          provider: settings.imageProvider,
-          prompt: effectivePromptFor(item.form),
-          params: { ...item.form },
-          resultDataUrl: toDataUrl(result.images[0])
+      const capturedEngine = engine;
+      const capturedSettings = { ...settings };
+      const completions = runnableItems.map((item) => {
+        const existing = taskPool.taskMap[item.id];
+        if (existing) return taskPool.retryTask(item.id);
+        return enqueuePreparedTask({
+          id: item.id,
+          title: item.name,
+          engine: capturedEngine,
+          settings: capturedSettings,
+          form: { ...item.form },
+          selection: item.selection,
+          width: item.overrideWidth,
+          height: item.overrideHeight,
+          groupName: item.name,
+          prepareReturn: async () => {
+            if (item.metadata?.activeDocumentId) {
+              await switchToDocument(item.metadata.activeDocumentId, { taskId: item.id }).catch((caught) =>
+                ignoreBestEffortPhotoshopError("switchToDocument failed", caught)
+              );
+            }
+            if (item.selection.selectionBounds) {
+              await setSelectionBounds(item.selection.selectionBounds, { taskId: item.id }).catch((caught) =>
+                ignoreBestEffortPhotoshopError("setSelectionBounds failed", caught)
+              );
+            }
+          }
         });
-        if (!historyRecord) historyRecorded = false;
-        setProgress(0);
-      }
-      setStatus("success");
-      if (historyRecorded) pushToast("success", "批次执行完成");
+      });
+      const completed = await Promise.all(completions);
+      const successes = completed.filter((task) => task?.status === "success").length;
+      const deferred = completed.filter((task) => task?.status === "awaiting-return").length;
+      if (deferred) pushToast("warning", `${successes} 个任务已回传，${deferred} 个等待手动回传`);
+      else if (toastRef.current?.type !== "warning") pushToast("success", `${successes} 个批次任务执行完成`);
     } catch (caught) {
-      stopPolling(requestToken);
-      if (!isRunCurrent()) return;
-      if (isGenerationCancelledError(caught)) {
-        if (activeItemId) {
-          setBatchItems((items) =>
-            items.map((item) =>
-              item.id === activeItemId ? { ...item, status: "stopped", error: undefined } : item
-            )
-          );
-        }
-        runGateRef.current.complete(runToken);
-        setStatus("idle");
-        setProgress(0);
-        setError(null);
-        pushToast("info", "已停止");
-        return;
-      }
       const message = formatGenerationError(caught, "批次执行失败");
-      if (activeItemId) {
-        setBatchItems((items) =>
-          items.map((item) =>
-            item.id === activeItemId ? { ...item, status: "error", error: message } : item
-          )
-        );
-      }
-      setStatus("error");
       setError(message);
       pushToast("error", message);
-    } finally {
-      stopPolling(requestToken);
-      if (runGateRef.current.isCurrent(runToken)) {
-        runGateRef.current.complete(runToken);
-        setProgress(0);
-        setProgressPreview(null);
-        setProgressText(null);
-      }
     }
-  }, [batchItems, engineToken, isEngineCurrent, pollProgress, pushToast, recordHistory, settings, stopPolling]);
+  }, [batchItems, engine, enqueuePreparedTask, pushToast, settings, taskPool]);
 
   const applyPreset = useCallback(
     async (fileName: string) => {
@@ -1261,6 +1239,14 @@ export const useGenerationController = (
     appendTranslationToPositive,
     appendTranslationToNegative,
     appendExtraPromptToPositive,
-    appendExtraPromptToNegative
+    appendExtraPromptToNegative,
+    generationTasks: taskPool.tasks,
+    taskConcurrency: taskPool.concurrency,
+    cancelTask: taskPool.cancelTask,
+    retryTask: taskPool.retryTask,
+    returnTask: taskPool.returnTask,
+    removeTask: taskPool.removeTask,
+    extendTask: taskPool.extendTask,
+    setTaskAutoReturn: taskPool.setTaskAutoReturn
   };
 };

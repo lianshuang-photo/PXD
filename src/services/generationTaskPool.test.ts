@@ -1,0 +1,217 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  GenerationTaskPool,
+  type GenerationTaskDefinition
+} from "./generationTaskPool";
+
+const deferred = <T>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((candidateResolve, candidateReject) => {
+    resolve = candidateResolve;
+    reject = candidateReject;
+  });
+  return { promise, resolve, reject };
+};
+
+const flush = async () => {
+  await Promise.resolve();
+  await Promise.resolve();
+};
+
+const task = (
+  id: string,
+  run: GenerationTaskDefinition["run"],
+  overrides: Partial<GenerationTaskDefinition> = {}
+): GenerationTaskDefinition => ({
+  id,
+  title: id,
+  engine: "forge",
+  timeoutSeconds: 30,
+  run,
+  returnImages: vi.fn().mockResolvedValue(undefined),
+  ...overrides
+});
+
+describe("GenerationTaskPool", () => {
+  let pool: GenerationTaskPool;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    pool = new GenerationTaskPool({ concurrency: 2, tickMs: 1_000 });
+  });
+
+  afterEach(async () => {
+    await pool.dispose();
+    vi.useRealTimers();
+  });
+
+  it("limits network concurrency and releases a slot before Photoshop return", async () => {
+    const first = deferred<string[]>();
+    const second = deferred<string[]>();
+    const third = deferred<string[]>();
+    const blockedReturn = deferred<void>();
+    const started: string[] = [];
+
+    const completions = [pool.enqueue(task("one", async () => {
+      started.push("one");
+      return await first.promise;
+    }, { returnImages: () => blockedReturn.promise })), pool.enqueue(task("two", async () => {
+      started.push("two");
+      return await second.promise;
+    })), pool.enqueue(task("three", async () => {
+      started.push("three");
+      return await third.promise;
+    }))];
+    await flush();
+
+    expect(started).toEqual(["one", "two"]);
+    first.resolve(["ONE"]);
+    await flush();
+    expect(started).toEqual(["one", "two", "three"]);
+    expect(pool.getSnapshot().one.status).toBe("returning");
+
+    second.resolve(["TWO"]);
+    third.resolve(["THREE"]);
+    blockedReturn.resolve();
+    await Promise.all(completions);
+    expect(Object.values(pool.getSnapshot()).every(({ status }) => status === "success")).toBe(true);
+  });
+
+  it("cancels one task without cancelling or committing stale results from another", async () => {
+    const first = deferred<string[]>();
+    const second = deferred<string[]>();
+    const cancelFirst = vi.fn();
+    const firstReturn = vi.fn().mockResolvedValue(undefined);
+    const secondReturn = vi.fn().mockResolvedValue(undefined);
+
+    const firstCompletion = pool.enqueue(task("one", () => first.promise, {
+      cancelNetwork: cancelFirst,
+      returnImages: firstReturn
+    }));
+    const secondCompletion = pool.enqueue(task("two", () => second.promise, {
+      returnImages: secondReturn
+    }));
+    await flush();
+    await pool.cancel("one");
+    first.resolve(["STALE"]);
+    second.resolve(["CURRENT"]);
+    await Promise.all([firstCompletion, secondCompletion]);
+
+    expect(cancelFirst).toHaveBeenCalledOnce();
+    expect(firstReturn).not.toHaveBeenCalled();
+    expect(secondReturn).toHaveBeenCalledWith(["CURRENT"], expect.objectContaining({
+      isCurrent: expect.any(Function)
+    }));
+    expect(pool.getSnapshot().one.status).toBe("cancelled");
+    expect(pool.getSnapshot().two.status).toBe("success");
+  });
+
+  it("releases a network slot immediately when a cancelled request ignores abort", async () => {
+    pool.setConcurrency(1);
+    const stale = deferred<string[]>();
+    const next = deferred<string[]>();
+    const started: string[] = [];
+    pool.enqueue(task("stale", async () => {
+      started.push("stale");
+      return await stale.promise;
+    }));
+    const nextCompletion = pool.enqueue(task("next", async () => {
+      started.push("next");
+      return await next.promise;
+    }));
+    await flush();
+
+    await pool.cancel("stale");
+    await flush();
+    expect(started).toEqual(["stale", "next"]);
+
+    next.resolve(["NEXT"]);
+    expect((await nextCompletion).status).toBe("success");
+    stale.resolve(["STALE"]);
+    await flush();
+    expect(pool.getSnapshot().stale.status).toBe("cancelled");
+  });
+
+  it("caches images when Photoshop is busy and supports manual return", async () => {
+    const busy = new Error("Photoshop busy");
+    const returnImages = vi.fn()
+      .mockRejectedValueOnce(busy)
+      .mockResolvedValueOnce(undefined);
+    const completion = pool.enqueue(task("deferred", async () => ["IMAGE"], {
+      returnImages,
+      isDeferredReturnError: (error) => error === busy
+    }));
+
+    const deferredSnapshot = await completion;
+    expect(deferredSnapshot).toMatchObject({
+      status: "awaiting-return",
+      images: ["IMAGE"],
+      error: "Photoshop busy"
+    });
+
+    const returned = await pool.returnTask("deferred");
+    expect(returned?.status).toBe("success");
+    expect(returnImages).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries failed network work with a fresh attempt and cleans resources", async () => {
+    const cleanup = vi.fn().mockResolvedValue(undefined);
+    const run = vi.fn()
+      .mockRejectedValueOnce(new Error("temporary"))
+      .mockResolvedValueOnce(["RECOVERED"]);
+    const first = await pool.enqueue(task("retry", run, { cleanup }));
+    expect(first.status).toBe("error");
+
+    const retried = await pool.retry("retry");
+    expect(retried?.status).toBe("success");
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(pool.getSnapshot().retry.attempt).toBe(2);
+  });
+
+  it("extends a live countdown and times out only the selected task", async () => {
+    const never = deferred<string[]>();
+    const cancelNetwork = vi.fn();
+    const completion = pool.enqueue(task("slow", ({ signal }) => {
+      signal.addEventListener("abort", () => never.reject(new Error("aborted")), { once: true });
+      return never.promise;
+    }, {
+      timeoutSeconds: 2,
+      cancelNetwork
+    }));
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(pool.getSnapshot().slow.countdown).toBe(1);
+    expect(pool.extend("slow", 10)).toBe(true);
+    expect(pool.getSnapshot().slow.countdown).toBe(11);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(pool.getSnapshot().slow.status).toBe("running");
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect((await completion).status).toBe("error");
+    expect(pool.getSnapshot().slow.error).toBe("任务等待超时");
+    expect(cancelNetwork).toHaveBeenCalledOnce();
+  });
+
+  it("queues above a changed limit and starts work when capacity increases", async () => {
+    pool.setConcurrency(1);
+    const releases = [deferred<string[]>(), deferred<string[]>(), deferred<string[]>()];
+    const started: string[] = [];
+    releases.forEach((release, index) => {
+      pool.enqueue(task(String(index), async () => {
+        started.push(String(index));
+        return await release.promise;
+      }));
+    });
+    await flush();
+    expect(started).toEqual(["0"]);
+
+    pool.setConcurrency(3);
+    await flush();
+    expect(started).toEqual(["0", "1", "2"]);
+    releases.forEach((release, index) => release.resolve([String(index)]));
+    await flush();
+  });
+});

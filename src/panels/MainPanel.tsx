@@ -3,6 +3,7 @@ import type { AppSettings } from "../context/types";
 import { useGenerationController } from "../hooks/useGenerationController";
 import OverlayPortal from "../components/OverlayPortal";
 import PromptParamControls from "../components/PromptParamControls";
+import GenerationTaskCards from "../components/GenerationTaskCards";
 
 interface Props {
   settings: AppSettings;
@@ -21,6 +22,7 @@ const statusLabelMap: Record<string, string> = {
 const batchStatusLabelMap = {
   queued: "排队中",
   running: "生成中",
+  "awaiting-return": "等待回传",
   success: "已完成",
   stopped: "已停止",
   error: "失败"
@@ -103,7 +105,15 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     appendTranslationToPositive,
     appendTranslationToNegative,
     appendExtraPromptToPositive,
-    appendExtraPromptToNegative
+    appendExtraPromptToNegative,
+    generationTasks,
+    taskConcurrency,
+    cancelTask,
+    retryTask,
+    returnTask,
+    removeTask,
+    extendTask,
+    setTaskAutoReturn
   } = controller;
   const hasRunnableBatchItems = batchItems.some((item) => item.status !== "success");
 
@@ -371,10 +381,10 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
           type="button"
           className="btn btn--primary"
           onClick={runGeneration}
-          disabled={status === "running" || optionsLoading}
+          disabled={optionsLoading}
           style={compactTopActionButtonStyle}
         >
-          {status === "running" ? "生成中" : "开始生成"}
+          开始生成
         </button>
         <button
           type="button"
@@ -388,13 +398,12 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
             borderBottomColor: "rgba(239, 68, 68, 0.45)"
           }}
         >
-          停止
+          全部停止
         </button>
         <button 
           type="button" 
           className="btn btn--secondary" 
           onClick={addToBatch}
-          disabled={status === "running"}
           style={compactTopActionButtonStyle}
         >
           加入批次
@@ -403,7 +412,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
           type="button"
           className="btn btn--secondary"
           onClick={runBatch}
-          disabled={!hasRunnableBatchItems || status === "running"}
+          disabled={!hasRunnableBatchItems}
           style={compactTopActionButtonStyle}
         >
           执行批次
@@ -418,6 +427,17 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
           {optionsLoading ? "同步中" : "刷新"}
         </button>
       </div>
+
+      <GenerationTaskCards
+        tasks={generationTasks}
+        concurrency={taskConcurrency}
+        onCancel={cancelTask}
+        onRetry={retryTask}
+        onReturn={returnTask}
+        onRemove={removeTask}
+        onExtend={(id) => extendTask(id, 10)}
+        onAutoReturnChange={setTaskAutoReturn}
+      />
       
       {/* 进度条和错误提示 */}
       {status === "running" && (

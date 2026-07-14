@@ -120,7 +120,14 @@ describe("MainPanel generation controls", () => {
   it("disables refresh while running and the controller rejects direct refresh calls", async () => {
     let renderer: ReactTestRenderer;
     await act(async () => {
-      renderer = create(<MainPanel settings={{ ...DEFAULT_SETTINGS, offlineMode: false }} onOpenSettings={vi.fn()} />);
+      renderer = create(
+        <MainPanel
+          settings={{ ...DEFAULT_SETTINGS, offlineMode: false }}
+          settingsLoading={false}
+          onUpdateSettings={vi.fn().mockResolvedValue(undefined)}
+          onOpenSettings={vi.fn()}
+        />
+      );
       await Promise.resolve();
     });
     expect(serviceMocks.fetchOptions).toHaveBeenCalledTimes(1);
@@ -135,7 +142,7 @@ describe("MainPanel generation controls", () => {
 
     const refresh = buttonByText(renderer!, "刷新");
     expect(refresh.props.disabled).toBe(true);
-    expect(buttonByText(renderer!, "停止").props.disabled).toBe(false);
+    expect(buttonByText(renderer!, "全部停止").props.disabled).toBe(false);
     await act(async () => {
       await refresh.props.onClick();
     });
@@ -147,20 +154,28 @@ describe("MainPanel generation controls", () => {
     });
   });
 
-  it("preserves existing options when stop cancels an in-flight refresh", async () => {
+  it("stops generation without cancelling an independent options refresh", async () => {
     serviceMocks.fetchOptions.mockResolvedValueOnce({
       ...emptyOptions,
       models: [{ label: "Existing model", value: "existing-model", raw: {} }]
     });
     let renderer: ReactTestRenderer;
     await act(async () => {
-      renderer = create(<MainPanel settings={{ ...DEFAULT_SETTINGS, offlineMode: false }} onOpenSettings={vi.fn()} />);
+      renderer = create(
+        <MainPanel
+          settings={{ ...DEFAULT_SETTINGS, offlineMode: false }}
+          settingsLoading={false}
+          onUpdateSettings={vi.fn().mockResolvedValue(undefined)}
+          onOpenSettings={vi.fn()}
+        />
+      );
       await Promise.resolve();
     });
     expect(JSON.stringify(renderer!.toJSON())).toContain("Existing model");
 
-    serviceMocks.fetchOptions.mockImplementationOnce(() => new Promise((_resolve, reject) => {
-      serviceMocks.optionRejectors.push(reject);
+    let resolveRefresh!: (value: typeof emptyOptions) => void;
+    serviceMocks.fetchOptions.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveRefresh = resolve;
     }));
     let refreshPromise: Promise<void>;
     await act(async () => {
@@ -175,12 +190,14 @@ describe("MainPanel generation controls", () => {
       await Promise.resolve();
     });
     await act(async () => {
-      buttonByText(renderer!, "停止").props.onClick();
-      await Promise.all([refreshPromise!, generationPromise!]);
+      buttonByText(renderer!, "全部停止").props.onClick();
+      await generationPromise!;
+      resolveRefresh(emptyOptions);
+      await refreshPromise!;
     });
 
     const rendered = JSON.stringify(renderer!.toJSON());
-    expect(rendered).toContain("Existing model");
+    expect(rendered).toContain("existing-model");
     expect(rendered).not.toContain("Request cancelled");
     await act(async () => renderer!.unmount());
   });
