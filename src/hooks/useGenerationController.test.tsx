@@ -19,13 +19,16 @@ const boundary = vi.hoisted(() => ({
     cancelAll: vi.fn().mockReturnValue(0)
   },
   photoshop: {
+    captureDocumentRegions: vi.fn(),
     closeDocument: vi.fn(),
+    getActiveDocumentInfo: vi.fn(),
     getSelectionPixels: vi.fn(),
     groupLayers: vi.fn(),
     hasActiveSelection: vi.fn(),
     moveActiveLayerToTop: vi.fn(),
     onBatchAddLayer: vi.fn(),
     placeImageIntoSelection: vi.fn(),
+    placePartitionedImages: vi.fn(),
     setSelectionBounds: vi.fn(),
     switchToDocument: vi.fn()
   },
@@ -184,6 +187,24 @@ beforeEach(() => {
   boundary.forgeClient.img2img.mockResolvedValue({ images: ["FORGE_RESULT"] });
   boundary.geminiClient.editImage.mockResolvedValue("GEMINI_RESULT");
   boundary.photoshop.getSelectionPixels.mockResolvedValue(selection(""));
+  boundary.photoshop.getActiveDocumentInfo.mockResolvedValue({
+    documentId: 7,
+    width: 2000,
+    height: 1000
+  });
+  boundary.photoshop.captureDocumentRegions.mockImplementation(
+    async (_documentId: number, tiles: Array<{ id: string; targetWidth: number; targetHeight: number }>) =>
+      tiles.map((tile) => ({
+        tileId: tile.id,
+        dataUrl: `data:image/png;base64,${tile.id.toUpperCase()}`,
+        width: tile.targetWidth,
+        height: tile.targetHeight
+      }))
+  );
+  boundary.photoshop.placePartitionedImages.mockResolvedValue({
+    layerIds: [301, 302],
+    groupId: 303
+  });
   boundary.photoshop.hasActiveSelection.mockResolvedValue(true);
   boundary.photoshop.placeImageIntoSelection.mockResolvedValue({ layerID: 101 });
   boundary.photoshop.groupLayers.mockResolvedValue(undefined);
@@ -237,6 +258,86 @@ const trackedRender = (options: HarnessOptions = {}) => {
   renderers.push(rendered.renderer);
   return rendered;
 };
+
+describe("useGenerationController global partition", () => {
+  const geminiSettings: AppSettings = {
+    ...DEFAULT_SETTINGS,
+    imageProvider: "gemini",
+    offlineMode: false,
+    geminiApiKey: "key"
+  };
+
+  it("runs the shared engine concurrently, places into the source document, and records history once", async () => {
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    act(() => rendered.getController().setFormValue("positivePrompt", "unified editorial style"));
+
+    await act(async () => rendered.getController().runGlobalPartition());
+
+    expect(boundary.geminiClient.editImage).toHaveBeenCalledTimes(2);
+    expect(boundary.geminiClient.editImage).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      prompt: "unified editorial style",
+      baseImageBase64: "LEFT",
+      taskId: expect.stringContaining(":tile:0")
+    }));
+    expect(boundary.photoshop.placePartitionedImages).toHaveBeenCalledWith(
+      7,
+      expect.arrayContaining([
+        expect.objectContaining({ dataUrl: "data:image/png;base64,GEMINI_RESULT" })
+      ]),
+      expect.objectContaining({
+        maskContract: 24,
+        maskFeather: 48,
+        groupName: "PXD 大图全局分区"
+      })
+    );
+    expect(rendered.getController().status).toBe("success");
+    expect(rendered.getController().lastImages).toEqual([
+      "data:image/png;base64,GEMINI_RESULT",
+      "data:image/png;base64,GEMINI_RESULT"
+    ]);
+    expect(rendered.getController().history).toHaveLength(1);
+    expect(rendered.getController().history[0]).toMatchObject({
+      provider: "gemini",
+      prompt: "unified editorial style"
+    });
+  });
+
+  it("ignores a late placement result after stop and does not record history", async () => {
+    let resolvePlacement!: (value: { layerIds: number[]; groupId: number }) => void;
+    boundary.photoshop.placePartitionedImages.mockImplementationOnce(() => new Promise((resolve) => {
+      resolvePlacement = resolve;
+    }));
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    act(() => rendered.getController().setFormValue("positivePrompt", "unified style"));
+
+    let run!: Promise<void>;
+    act(() => {
+      run = rendered.getController().runGlobalPartition();
+    });
+    await vi.waitFor(() => expect(boundary.photoshop.placePartitionedImages).toHaveBeenCalledOnce());
+    act(() => rendered.getController().stopGeneration());
+    resolvePlacement({ layerIds: [401, 402], groupId: 403 });
+    await act(async () => run);
+
+    expect(rendered.getController().status).toBe("idle");
+    expect(rendered.getController().globalPartitionRunning).toBe(false);
+    expect(rendered.getController().history).toHaveLength(0);
+  });
+
+  it("does not switch providers when the partition command is unavailable", async () => {
+    const rendered = trackedRender();
+    await flush();
+    act(() => rendered.getController().setFormValue("positivePrompt", "style"));
+
+    await act(async () => rendered.getController().runGlobalPartition());
+
+    expect(boundary.photoshop.getActiveDocumentInfo).not.toHaveBeenCalled();
+    expect(rendered.updateSettings).not.toHaveBeenCalled();
+    expect(rendered.getController().toast).toMatchObject({ type: "warning" });
+  });
+});
 
 describe("useGenerationController generation history integration", () => {
   it("records a single generation and restores its provider and complete form", async () => {

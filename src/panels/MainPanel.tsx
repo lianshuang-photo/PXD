@@ -2,6 +2,7 @@ import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react"
 import type { AppSettings } from "../context/types";
 import { useGenerationController } from "../hooks/useGenerationController";
 import OverlayPortal from "../components/OverlayPortal";
+import GlobalPartitionControls from "../components/GlobalPartitionControls";
 import PromptParamControls from "../components/PromptParamControls";
 
 interface Props {
@@ -68,6 +69,10 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     optionsError,
     refreshOptions,
     runGeneration,
+    globalPartitionOptions,
+    globalPartitionRunning,
+    setGlobalPartitionOptions,
+    runGlobalPartition,
     stopGeneration,
     history,
     historyLoading,
@@ -749,6 +754,15 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   />
                 </div>
               </div>
+
+              <GlobalPartitionControls
+                provider={settings.imageProvider}
+                options={globalPartitionOptions}
+                running={globalPartitionRunning}
+                disabled={status === "running" && !globalPartitionRunning}
+                onChange={setGlobalPartitionOptions}
+                onRun={runGlobalPartition}
+              />
               
               {/* ControlNet */}
               <hr style={{ margin: "0.2rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />

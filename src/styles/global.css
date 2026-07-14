@@ -832,6 +832,77 @@ select.input::-ms-expand {
   pointer-events: auto;
 }
 
+.global-partition-controls {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: end;
+  gap: 6px;
+  margin: 8px 0 4px;
+  padding: 8px 0 0;
+  border: 0;
+  border-top: 1px solid var(--border-color);
+}
+
+.global-partition-controls legend {
+  padding: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.global-partition-controls__sliders {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(70px, 1fr));
+  gap: 6px;
+}
+
+.global-partition-controls__sliders label {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.global-partition-controls__sliders label > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.global-partition-controls__sliders output {
+  color: var(--text-primary);
+}
+
+.global-partition-controls__sliders input {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--brand-color);
+}
+
+.global-partition-controls__run {
+  min-width: 74px;
+  white-space: nowrap;
+}
+
+.global-partition-controls__provider {
+  align-self: center;
+  color: #fbbf24;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+@media (max-width: 430px) {
+  .global-partition-controls {
+    grid-template-columns: 1fr auto;
+  }
+
+  .global-partition-controls__sliders {
+    grid-column: 1 / -1;
+  }
+}
+
 .result-grid {
   display: grid;
   gap: var(--gap-sm);
