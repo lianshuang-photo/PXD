@@ -15,6 +15,7 @@ interface Props {
 const statusLabels: Record<GenerationTaskSnapshot["status"], string> = {
   queued: "排队中",
   retrying: "准备重试",
+  cancelling: "停止中",
   running: "生成中",
   returning: "回传中",
   "awaiting-return": "等待回传",
@@ -29,6 +30,10 @@ const engineLabels: Record<GenerationTaskSnapshot["engine"], string> = {
 };
 
 const isActive = (task: GenerationTaskSnapshot) =>
+  task.status === "queued" || task.status === "retrying" || task.status === "cancelling" ||
+  task.status === "running" || task.status === "returning";
+
+const canCancel = (task: GenerationTaskSnapshot) =>
   task.status === "queued" || task.status === "retrying" || task.status === "running" || task.status === "returning";
 
 const GenerationTaskCards = ({
@@ -89,13 +94,13 @@ const GenerationTaskCards = ({
                 {task.status === "awaiting-return" && !task.cleanupPending && (
                   <button type="button" className="btn btn--primary" onClick={() => void onReturn(task.id)}>回传</button>
                 )}
-                {isActive(task) && (
+                {canCancel(task) && (
                   <button type="button" className="btn btn--ghost generation-task__stop" onClick={() => void onCancel(task.id)}>停止</button>
                 )}
                 {canRetry && (
                   <button type="button" className="btn btn--secondary" onClick={() => void onRetry(task.id)}>重试</button>
                 )}
-                {task.cleanupPending && (
+                {task.cleanupPending && task.status !== "cancelling" && (
                   <button type="button" className="btn btn--secondary" onClick={() => void onCleanup(task.id)}>清理</button>
                 )}
                 {canRemove && (

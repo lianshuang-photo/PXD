@@ -3,6 +3,7 @@ import type { AppSettings } from "../context/types";
 export type GenerationTaskStatus =
   | "queued"
   | "retrying"
+  | "cancelling"
   | "running"
   | "returning"
   | "awaiting-return"
@@ -220,21 +221,30 @@ export class GenerationTaskPool {
     this.releaseNetwork(record);
     record.snapshot = {
       ...record.snapshot,
-      status: "cancelled",
+      status: "cancelling",
       error: undefined,
       countdown: 0
     };
-    record.resolveCompletion({ ...record.snapshot });
     this.emit();
     if (activeReturn) await activeReturn;
     await this.runCleanup(record);
+    if (record.snapshot.status === "cancelling") {
+      record.snapshot = { ...record.snapshot, status: "cancelled" };
+    }
+    record.resolveCompletion({ ...record.snapshot });
+    this.emit();
     this.pump();
     return { ...record.snapshot };
   }
 
   async retry(id: string): Promise<GenerationTaskSnapshot | null> {
-    const record = this.records.get(id);
+    let record = this.records.get(id);
     if (!record) return null;
+    if (record.cancelPromise) {
+      await record.cancelPromise;
+      record = this.records.get(id);
+      if (!record) return null;
+    }
     if (record.retryPromise) return await record.retryPromise;
     if (record.snapshot.cleanupPending || !isTerminal(record.snapshot.status)) return { ...record.snapshot };
     const retryPromise = this.performRetry(record);
@@ -284,6 +294,11 @@ export class GenerationTaskPool {
   async returnTask(id: string): Promise<GenerationTaskSnapshot | null> {
     let record = this.records.get(id);
     if (!record || !record.snapshot.images?.length) return record?.snapshot ?? null;
+    if (record.cancelPromise) {
+      await record.cancelPromise;
+      record = this.records.get(id);
+      if (!record || !record.snapshot.images?.length) return record?.snapshot ?? null;
+    }
     if (record.snapshot.cleanupPending) return { ...record.snapshot };
     if (record.returnPromise) {
       if (record.snapshot.status === "returning") return await record.returnPromise;

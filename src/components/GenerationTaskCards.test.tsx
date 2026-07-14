@@ -75,4 +75,14 @@ describe("GenerationTaskCards", () => {
     act(() => button(renderer, "清理")?.props.onClick());
     expect(handlers.onCleanup).toHaveBeenCalledWith("task-1");
   });
+
+  it("does not expose actions while cancellation is settling", () => {
+    const { renderer } = render([
+      task({ status: "cancelling", cleanupPending: true })
+    ]);
+    expect(button(renderer, "停止")).toBeUndefined();
+    expect(button(renderer, "重试")).toBeUndefined();
+    expect(button(renderer, "清理")).toBeUndefined();
+    expect(button(renderer, "移除")).toBeUndefined();
+  });
 });

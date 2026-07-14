@@ -185,6 +185,41 @@ describe("GenerationTaskPool", () => {
     expect(pool.activeCount).toBe(0);
   });
 
+  it("waits for in-flight cancellation before starting an immediate retry", async () => {
+    const returnStarted = deferred<void>();
+    const finishFirstReturn = deferred<void>();
+    const returnImages = vi.fn()
+      .mockImplementationOnce(async () => {
+        returnStarted.resolve();
+        await finishFirstReturn.promise;
+        throw new Error("stale return failed");
+      })
+      .mockResolvedValueOnce(undefined);
+    const cleanup = vi.fn().mockResolvedValue(undefined);
+    const run = vi.fn().mockResolvedValue(["IMAGE"]);
+    const completion = pool.enqueue(task("cancel-retry", run, { cleanup, returnImages }));
+    await returnStarted.promise;
+
+    const cancellation = pool.cancel("cancel-retry");
+    const retry = pool.retry("cancel-retry");
+    expect(pool.getSnapshot()["cancel-retry"].status).toBe("cancelling");
+    expect(returnImages).toHaveBeenCalledTimes(1);
+
+    finishFirstReturn.resolve();
+    const [cancelled, retried, initiallyCompleted] = await Promise.all([
+      cancellation,
+      retry,
+      completion
+    ]);
+    expect(cancelled).toMatchObject({ status: "cancelled" });
+    expect(initiallyCompleted).toMatchObject({ status: "cancelled" });
+    expect(retried).toMatchObject({ status: "success", attempt: 1 });
+    expect(pool.getSnapshot()["cancel-retry"].status).toBe("success");
+    expect(run).toHaveBeenCalledOnce();
+    expect(returnImages).toHaveBeenCalledTimes(2);
+    expect(pool.activeCount).toBe(0);
+  });
+
   it("keeps a cancelled task dirty when a late rollback fails", async () => {
     const returnStarted = deferred<void>();
     const releaseReturn = deferred<void>();
@@ -214,7 +249,7 @@ describe("GenerationTaskPool", () => {
     expect(cleanup).not.toHaveBeenCalled();
     finishReturn.resolve();
     await cancellation;
-    expect((await completion).status).toBe("cancelled");
+    expect((await completion).status).toBe("error");
     expect(pool.getSnapshot()["late-rollback"]).toMatchObject({
       status: "error",
       cleanupPending: true,

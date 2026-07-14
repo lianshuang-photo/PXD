@@ -680,7 +680,8 @@ export const useGenerationController = (
   }, [form.extraPrompt, pushToast]);
 
   const hasActiveGenerationTask = taskPool.tasks.some(({ status: taskStatus }) =>
-    taskStatus === "queued" || taskStatus === "running" || taskStatus === "returning"
+    taskStatus === "queued" || taskStatus === "retrying" || taskStatus === "cancelling" ||
+    taskStatus === "running" || taskStatus === "returning"
   );
   const hasActiveGenerationTaskRef = useRef(hasActiveGenerationTask);
   hasActiveGenerationTaskRef.current = hasActiveGenerationTask;
@@ -1001,7 +1002,8 @@ export const useGenerationController = (
 
   useEffect(() => {
     const activeTask = taskPool.tasks.find(({ status: taskStatus }) =>
-      taskStatus === "queued" || taskStatus === "retrying" || taskStatus === "running" || taskStatus === "returning"
+      taskStatus === "queued" || taskStatus === "retrying" || taskStatus === "cancelling" ||
+      taskStatus === "running" || taskStatus === "returning"
     );
     if (activeTask) {
       setStatus("running");
@@ -1033,6 +1035,8 @@ export const useGenerationController = (
         const taskStatus: BatchItem["status"] =
           task.status === "cancelled"
             ? "stopped"
+            : task.status === "cancelling"
+              ? "running"
             : task.status === "retrying"
               ? "queued"
             : task.status === "returning"
@@ -1051,7 +1055,8 @@ export const useGenerationController = (
 
   const stopGeneration = useCallback(() => {
     const activeTasks = taskPool.tasks.filter(({ status: taskStatus }) =>
-      taskStatus === "queued" || taskStatus === "retrying" || taskStatus === "running" || taskStatus === "returning"
+      taskStatus === "queued" || taskStatus === "retrying" || taskStatus === "cancelling" ||
+      taskStatus === "running" || taskStatus === "returning"
     );
     if (!activeTasks.length) return;
     for (const task of activeTasks) void taskPool.cancelTask(task.id);
