@@ -170,6 +170,7 @@ export interface PosterWorkflowInput {
   isCurrent: () => boolean;
   onRequestStart?: () => void | Promise<void>;
   onRequestSettled?: () => void | Promise<void>;
+  onLayerPlaced?: (layerId: number) => void | Promise<void>;
   signal?: AbortSignal;
 }
 
@@ -213,7 +214,8 @@ export const executePosterWorkflow = async (input: PosterWorkflowInput): Promise
       emptyImagesMessage: "海报模型未返回可用图像",
       isCurrent: input.isCurrent,
       onRequestStart: input.onRequestStart,
-      onRequestSettled: input.onRequestSettled
+      onRequestSettled: input.onRequestSettled,
+      onLayerPlaced: input.onLayerPlaced
     },
     input.adapters
   );

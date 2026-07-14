@@ -166,4 +166,55 @@ describe("generation workflow", () => {
     )).rejects.toMatchObject({ code: "ENGINE_STALE" });
     expect(harness.adapters.placeImage).not.toHaveBeenCalled();
   });
+
+  it("reports a layer placed during a Photoshop modal before rejecting a cancelled run", async () => {
+    const harness = makeHarness("gemini", [["poster"]]);
+    let current = true;
+    let resolvePlacement!: (value: { layerID: number }) => void;
+    const placement = new Promise<{ layerID: number }>((resolve) => {
+      resolvePlacement = resolve;
+    });
+    (harness.adapters.placeImage as ReturnType<typeof vi.fn>).mockReturnValueOnce(placement);
+    const onLayerPlaced = vi.fn();
+
+    const run = executeGenerationTask(
+      harness.engine,
+      {
+        request: requestFor("gemini"),
+        feather: 0,
+        emptyImagesMessage: "no image",
+        isCurrent: () => current,
+        onLayerPlaced
+      },
+      harness.adapters
+    );
+    await vi.waitFor(() => expect(harness.adapters.placeImage).toHaveBeenCalledOnce());
+    current = false;
+    resolvePlacement({ layerID: 303 });
+
+    await expect(run).rejects.toMatchObject({ code: "ENGINE_STALE" });
+    expect(onLayerPlaced).toHaveBeenCalledWith(303);
+  });
+
+  it("reports a placed layer before a later move operation fails", async () => {
+    const harness = makeHarness("gemini", [["poster"]]);
+    const moveFailure = new Error("move failed");
+    (harness.adapters.moveActiveLayerToTop as ReturnType<typeof vi.fn>).mockRejectedValueOnce(moveFailure);
+    const onLayerPlaced = vi.fn();
+
+    await expect(executeGenerationTask(
+      harness.engine,
+      {
+        request: requestFor("gemini"),
+        feather: 0,
+        emptyImagesMessage: "no image",
+        onLayerPlaced
+      },
+      harness.adapters
+    )).rejects.toBe(moveFailure);
+
+    expect(onLayerPlaced).toHaveBeenCalledWith(100);
+    expect(onLayerPlaced.mock.invocationCallOrder[0])
+      .toBeLessThan((harness.adapters.moveActiveLayerToTop as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]);
+  });
 });

@@ -28,6 +28,7 @@ export interface GenerationWorkflowTask {
   prepare?: () => Promise<void>;
   onRequestStart?: () => void | Promise<void>;
   onRequestSettled?: () => void | Promise<void>;
+  onLayerPlaced?: (layerId: number) => void | Promise<void>;
   isCurrent?: () => boolean;
 }
 
@@ -94,9 +95,12 @@ export const executeGenerationTask = async (
       feather: task.feather,
       taskId: task.taskId
     });
-    assertCurrent();
     const layerId = extractLayerId(info);
-    if (layerId) placedLayerIds.push(layerId);
+    if (layerId) {
+      placedLayerIds.push(layerId);
+      await task.onLayerPlaced?.(layerId);
+    }
+    assertCurrent();
   }
   let topLayerId: number | undefined = placedLayerIds[placedLayerIds.length - 1];
   if (placedLayerIds.length > 1) {

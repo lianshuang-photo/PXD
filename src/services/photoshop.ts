@@ -12,6 +12,7 @@ export interface SelectionPixels {
   dataUrl: string;
   width: number;
   height: number;
+  documentId: number;
   selectionBounds: SelectionBounds;
 }
 
@@ -330,25 +331,52 @@ export const groupLayers = (
   options: GroupLayersOptions = {}
 ): Promise<number | null> => runTransaction(() => groupLayersUnlocked(layerIds, groupName, options), options);
 
-const deleteLayersUnlocked = async (layerIds: number[]): Promise<void> => {
-  const ids = uniqueLayerIds(layerIds);
-  if (!ids.length) return;
-  const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  await executeAsModalUnlocked(photoshop, async () => {
-    await photoshop.app.batchPlay(
-      ids.map((id) => ({
-        _obj: "delete",
-        _target: [{ _ref: "layer", _id: id }]
-      })),
-      { synchronousExecution: true }
-    );
-  }, { commandName: "撤销 PXD 海报生成" });
-};
-
-export const deleteLayers = (
+export const deleteLayersInDocument = (
+  documentId: number,
   layerIds: number[],
   options: PhotoshopOperationOptions = {}
-): Promise<void> => runTransaction(() => deleteLayersUnlocked(layerIds), options);
+): Promise<void> => runTransaction(async () => {
+  const ids = uniqueLayerIds(layerIds);
+  if (!ids.length) return;
+  const sourceDocumentId = Number(documentId);
+  if (!Number.isInteger(sourceDocumentId) || sourceDocumentId <= 0) {
+    throw new Error("海报源文档 ID 无效");
+  }
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const restoreDocumentId = Number(photoshop.app.activeDocument?.id) || null;
+  await executeAsModalUnlocked(photoshop, async () => {
+    let operationError: unknown;
+    try {
+      if (restoreDocumentId !== sourceDocumentId) {
+        await photoshop.app.batchPlay(
+          [{ _obj: "select", _target: [{ _ref: "document", _id: sourceDocumentId }] }],
+          { synchronousExecution: true }
+        );
+      }
+      await photoshop.app.batchPlay(
+        ids.map((id) => ({
+          _obj: "delete",
+          _target: [{ _ref: "layer", _id: id }]
+        })),
+        { synchronousExecution: true }
+      );
+    } catch (error) {
+      operationError = error;
+    } finally {
+      if (restoreDocumentId && restoreDocumentId !== sourceDocumentId) {
+        try {
+          await photoshop.app.batchPlay(
+            [{ _obj: "select", _target: [{ _ref: "document", _id: restoreDocumentId }] }],
+            { synchronousExecution: true }
+          );
+        } catch (error) {
+          operationError ??= error;
+        }
+      }
+    }
+    if (operationError) throw operationError;
+  }, { commandName: "撤销 PXD 海报生成" });
+}, options);
 
 const hasActiveSelectionUnlocked = async (): Promise<boolean> => {
   try {
@@ -394,6 +422,7 @@ const getSelectionPixelsUnlocked = async (): Promise<SelectionPixels | null> => 
           dataUrl: `data:image/png;base64,${encoded}`,
           width,
           height,
+          documentId: Number(doc.id),
           selectionBounds: bounds
         };
       },

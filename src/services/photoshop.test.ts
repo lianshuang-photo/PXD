@@ -11,7 +11,7 @@ const boundary = vi.hoisted(() => ({
 
 vi.mock("./uxpBridge", () => ({ bridge: boundary.bridge }));
 
-import { closeGeneratedDocument, createGeneratedDocument, deleteLayers, groupLayers } from "./photoshop";
+import { closeGeneratedDocument, createGeneratedDocument, deleteLayersInDocument, groupLayers } from "./photoshop";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -119,7 +119,7 @@ describe("createGeneratedDocument", () => {
   });
 });
 
-describe("deleteLayers", () => {
+describe("deleteLayersInDocument", () => {
   it("deletes each unique valid generated layer in one modal transaction", async () => {
     const batchPlay = vi.fn().mockResolvedValue([]);
     const executeAsModal = vi.fn().mockImplementation(async (callback) => await callback());
@@ -128,7 +128,7 @@ describe("deleteLayers", () => {
       core: { executeAsModal }
     };
 
-    await deleteLayers([42, 42, -1, Number.NaN, 77]);
+    await deleteLayersInDocument(1, [42, 42, -1, Number.NaN, 77]);
 
     expect(batchPlay).toHaveBeenCalledWith([
       { _obj: "delete", _target: [{ _ref: "layer", _id: 42 }] },
@@ -139,6 +139,45 @@ describe("deleteLayers", () => {
     });
   });
 
+  it("deletes colliding layer ids only in the source document and restores the user's document", async () => {
+    let activeDocumentId = 20;
+    const layersByDocument = new Map([
+      [10, new Set([42])],
+      [20, new Set([42])]
+    ]);
+    const batchPlay = vi.fn().mockImplementation(async (descriptors: any[]) => {
+      for (const descriptor of descriptors) {
+        if (descriptor._obj === "select" && descriptor._target?.[0]?._ref === "document") {
+          activeDocumentId = descriptor._target[0]._id;
+        }
+        if (descriptor._obj === "delete") {
+          layersByDocument.get(activeDocumentId)?.delete(descriptor._target[0]._id);
+        }
+      }
+      return [];
+    });
+    boundary.bridge.photoshop = {
+      app: {
+        batchPlay,
+        get activeDocument() {
+          return { id: activeDocumentId };
+        }
+      },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+
+    await deleteLayersInDocument(10, [42]);
+
+    expect(layersByDocument.get(10)?.has(42)).toBe(false);
+    expect(layersByDocument.get(20)?.has(42)).toBe(true);
+    expect(activeDocumentId).toBe(20);
+    expect(batchPlay.mock.calls.map(([descriptors]) => descriptors[0])).toEqual([
+      { _obj: "select", _target: [{ _ref: "document", _id: 10 }] },
+      { _obj: "delete", _target: [{ _ref: "layer", _id: 42 }] },
+      { _obj: "select", _target: [{ _ref: "document", _id: 20 }] }
+    ]);
+  });
+
   it("surfaces Photoshop deletion failures", async () => {
     const failure = new Error("layer is locked");
     boundary.bridge.photoshop = {
@@ -146,6 +185,6 @@ describe("deleteLayers", () => {
       core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
     };
 
-    await expect(deleteLayers([42])).rejects.toBe(failure);
+    await expect(deleteLayersInDocument(1, [42])).rejects.toBe(failure);
   });
 });

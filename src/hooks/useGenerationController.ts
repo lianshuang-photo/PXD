@@ -24,7 +24,7 @@ import {
   closeDocument,
   closeGeneratedDocument,
   createGeneratedDocument,
-  deleteLayers,
+  deleteLayersInDocument,
   getSelectionPixels,
   groupLayers,
   hasActiveSelection,
@@ -433,6 +433,7 @@ export interface GenerationControllerState {
 
 export interface PosterGenerationResult {
   taskId: string;
+  documentId: number;
   placedLayerIds: number[];
 }
 
@@ -864,7 +865,6 @@ export const useGenerationController = (
     const { token: runToken } = runGateRef.current.begin("poster", taskId);
     const isRunCurrent = () => isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken);
     setPosterRunning(true);
-    setPosterLastResult(null);
     setStatus("running");
     setError(null);
     setProgress(0);
@@ -877,6 +877,29 @@ export const useGenerationController = (
       if (!selection) {
         throw new Error("请先在 Photoshop 中选择需要保留的主体区域");
       }
+      if (!Number.isInteger(selection.documentId) || selection.documentId <= 0) {
+        throw new Error("无法确定海报源 Photoshop 文档");
+      }
+      const placedLayerIds: number[] = [];
+      const trackPlacedLayer = (layerId: number) => {
+        if (!placedLayerIds.includes(layerId)) placedLayerIds.push(layerId);
+        setPosterLastResult({
+          taskId,
+          documentId: selection.documentId,
+          placedLayerIds: [...placedLayerIds]
+        });
+      };
+      const posterAdapters = {
+        ...GENERATION_WORKFLOW_ADAPTERS,
+        placeImage: async (
+          dataUrl: string,
+          index: number,
+          options: { feather: number; taskId?: string }
+        ) => {
+          await switchToDocument(selection.documentId, { taskId: options.taskId });
+          return placeImageIntoSelection(dataUrl, index, options);
+        }
+      };
       const result = await executePosterWorkflow({
         engine: requestEngine,
         draft,
@@ -887,16 +910,21 @@ export const useGenerationController = (
         ),
         feather: Number.isFinite(form.maskFeather) ? form.maskFeather : DEFAULT_FORM.maskFeather,
         taskId,
-        adapters: GENERATION_WORKFLOW_ADAPTERS,
+        adapters: posterAdapters,
         isCurrent: isRunCurrent,
         onRequestStart: () => {
           if (requestEngine.progressMode === "determinate") pollProgress();
         },
-        onRequestSettled: () => stopPolling(requestToken)
+        onRequestSettled: () => stopPolling(requestToken),
+        onLayerPlaced: trackPlacedLayer
       });
       if (!isRunCurrent()) return false;
       setLastImages(result.images.map(toDataUrl));
-      setPosterLastResult({ taskId, placedLayerIds: result.placedLayerIds });
+      setPosterLastResult({
+        taskId,
+        documentId: selection.documentId,
+        placedLayerIds: result.placedLayerIds
+      });
       setProgress(1);
       const historyRecord = await recordHistory({
         provider: "gemini",
@@ -940,7 +968,7 @@ export const useGenerationController = (
     const result = posterLastResult;
     if (!result || posterRunning) return;
     try {
-      await deleteLayers(result.placedLayerIds, { taskId: result.taskId });
+      await deleteLayersInDocument(result.documentId, result.placedLayerIds, { taskId: result.taskId });
       setPosterLastResult(null);
       pushToast("success", "已移除上一次海报生成图层");
     } catch (caught) {
