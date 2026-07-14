@@ -249,7 +249,15 @@ const uniqueLayerIds = (layerIds: number[]) =>
     )
   );
 
-const groupLayersUnlocked = async (layerIds: number[], groupName: string): Promise<number | null> => {
+export interface GroupLayersOptions extends PhotoshopOperationOptions {
+  requireGroup?: boolean;
+}
+
+const groupLayersUnlocked = async (
+  layerIds: number[],
+  groupName: string,
+  options: { requireGroup?: boolean } = {}
+): Promise<number | null> => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
   const ids = uniqueLayerIds(layerIds);
   if (!ids.length) {
@@ -284,6 +292,7 @@ const groupLayersUnlocked = async (layerIds: number[], groupName: string): Promi
   try {
     await runJsxCodeUnlocked(jsx);
   } catch (error) {
+    if (options.requireGroup) throw error;
     console.warn("groupLayers failed", error);
   }
   try {
@@ -302,8 +311,14 @@ const groupLayersUnlocked = async (layerIds: number[], groupName: string): Promi
     const id = Number(
       info?.layerID ?? info?.layerId ?? info?.targetLayerID ?? info?.targetLayerId ?? 0
     );
-    return Number.isFinite(id) && id > 0 ? id : null;
+    const layerSection = info?.layerSection?._value ?? info?.layerSection;
+    const groupId = Number.isFinite(id) && id > 0 ? id : null;
+    if (options.requireGroup && (!groupId || layerSection !== "layerSectionStart")) {
+      throw new Error("Photoshop 未创建预期的图层组");
+    }
+    return groupId;
   } catch (error) {
+    if (options.requireGroup) throw error;
     console.warn("groupLayers get info failed", error);
     return null;
   }
@@ -312,8 +327,8 @@ const groupLayersUnlocked = async (layerIds: number[], groupName: string): Promi
 export const groupLayers = (
   layerIds: number[],
   groupName = DEFAULT_GROUP_NAME,
-  options: PhotoshopOperationOptions = {}
-): Promise<number | null> => runTransaction(() => groupLayersUnlocked(layerIds, groupName), options);
+  options: GroupLayersOptions = {}
+): Promise<number | null> => runTransaction(() => groupLayersUnlocked(layerIds, groupName, options), options);
 
 const hasActiveSelectionUnlocked = async (): Promise<boolean> => {
   try {
@@ -472,6 +487,130 @@ const placeImageIntoSelectionUnlocked = async (
   }
   return info;
 };
+
+export interface GeneratedDocumentSession {
+  documentId: number;
+  previousDocumentId: number | null;
+}
+
+const createGeneratedDocumentUnlocked = async (
+  width: number,
+  height: number,
+  name = "PXD 文生图"
+): Promise<GeneratedDocumentSession> => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const documentWidth = Math.max(32, Math.round(width));
+  const documentHeight = Math.max(32, Math.round(height));
+  let previousDocumentId: number | null = null;
+  try {
+    const previousIdCandidate = Number(photoshop.app.activeDocument?.id);
+    if (Number.isFinite(previousIdCandidate) && previousIdCandidate > 0) {
+      previousDocumentId = previousIdCandidate;
+    }
+  } catch {
+    // Text-to-image also supports starting with no open Photoshop document.
+  }
+  const documentId = await executeAsModalUnlocked(photoshop, async () => {
+    if (typeof photoshop.app.createDocument === "function") {
+      try {
+        const document = await photoshop.app.createDocument({
+          width: documentWidth,
+          height: documentHeight,
+          resolution: 72,
+          mode: "RGBColorMode",
+          fill: "transparent",
+          name
+        });
+        const id = Number(document?.id);
+        if (Number.isFinite(id) && id > 0) return id;
+      } catch (error) {
+        console.warn("Photoshop createDocument failed, falling back to batchPlay", error);
+      }
+    }
+    const result = await photoshop.app.batchPlay(
+      [
+        {
+          _obj: "make",
+          _target: [{ _ref: "document" }],
+          using: {
+            _obj: "document",
+            name,
+            width: { _unit: "pixelsUnit", _value: documentWidth },
+            height: { _unit: "pixelsUnit", _value: documentHeight },
+            resolution: { _unit: "densityUnit", _value: 72 },
+            mode: { _class: "RGBColorMode" },
+            fill: { _enum: "fill", _value: "transparent" }
+          }
+        }
+      ],
+      { synchronousExecution: true }
+    );
+    const descriptor = result?.[0];
+    const descriptorId = Number(
+      descriptor?.documentID ?? descriptor?.documentId ?? descriptor?.ID ?? descriptor?.id
+    );
+    if (Number.isFinite(descriptorId) && descriptorId > 0) return descriptorId;
+    const activeId = Number(photoshop.app.activeDocument?.id);
+    if (!Number.isFinite(activeId) || activeId <= 0) {
+      throw new Error("Photoshop 未返回新建文档 ID");
+    }
+    return activeId;
+  }, { commandName: "创建 PXD 文生图画布" });
+  return { documentId, previousDocumentId };
+};
+
+const closeGeneratedDocumentUnlocked = async (
+  documentId: number,
+  restoreDocumentId: number | null
+): Promise<void> => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  let cleanupError: unknown;
+  try {
+    await executeAsModalUnlocked(photoshop, async () => {
+      await photoshop.app.batchPlay(
+        [
+          {
+            _obj: "close",
+            _target: [{ _ref: "document", _id: documentId }],
+            saving: { _enum: "yesNo", _value: "no" }
+          }
+        ],
+        { synchronousExecution: true }
+      );
+    }, { commandName: "关闭失败的 PXD 文生图画布" });
+  } catch (error) {
+    cleanupError = error;
+  }
+  if (restoreDocumentId) {
+    try {
+      await executeAsModalUnlocked(photoshop, async () => {
+        await photoshop.app.batchPlay(
+          [{ _obj: "select", _target: [{ _ref: "document", _id: restoreDocumentId }] }],
+          { synchronousExecution: true }
+        );
+      }, { commandName: "恢复原 Photoshop 文档" });
+    } catch (error) {
+      cleanupError ??= error;
+    }
+  }
+  if (cleanupError) throw cleanupError;
+};
+
+
+export const createGeneratedDocument = (
+  width: number,
+  height: number,
+  name = "PXD 文生图",
+  options: PhotoshopOperationOptions = {}
+): Promise<GeneratedDocumentSession> =>
+  runTransaction(() => createGeneratedDocumentUnlocked(width, height, name), options);
+
+export const closeGeneratedDocument = (
+  documentId: number,
+  restoreDocumentId: number | null,
+  options: PhotoshopOperationOptions = {}
+): Promise<void> =>
+  runTransaction(() => closeGeneratedDocumentUnlocked(documentId, restoreDocumentId), options);
 
 export const placeImageIntoSelection = (
   dataUrl: string,

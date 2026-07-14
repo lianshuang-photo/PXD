@@ -184,6 +184,62 @@ body {
   font-size: 12px;
 }
 
+.generation-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 8px;
+  border-bottom: 1px solid var(--border-color);
+  background: rgba(60, 131, 246, 0.1);
+}
+
+.generation-progress__preview {
+  width: 64px;
+  height: 64px;
+  flex: 0 0 64px;
+  object-fit: cover;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+
+.generation-progress__details {
+  min-width: 0;
+  flex: 1;
+}
+
+.generation-progress__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.generation-progress__track {
+  height: 4px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.generation-progress__fill {
+  height: 100%;
+  background: var(--brand-color);
+  transition: width 0.3s;
+}
+
+.generation-progress__text {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .progress-bar {
   position: relative;
   width: 180px;

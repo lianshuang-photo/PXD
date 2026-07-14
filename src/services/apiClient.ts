@@ -205,6 +205,20 @@ export const normalizeOptions = (collection: unknown, labelKeys: string[], value
     .filter((item): item is SdOption => Boolean(item));
 };
 
+const extractOptionCollection = (payload: unknown, keys: string[]): unknown[] => {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== "object") return [];
+  const record = payload as Record<string, unknown>;
+  for (const key of keys) {
+    if (Array.isArray(record[key])) return record[key] as unknown[];
+  }
+  for (const value of Object.values(record)) {
+    const nested = extractOptionCollection(value, keys);
+    if (nested.length > 0) return nested;
+  }
+  return [];
+};
+
 const buildTxt2ImgPayload = (params: Txt2ImgParams) => {
   const overrideSettings: Record<string, unknown> = {};
   if (params.model) overrideSettings.sd_model_checkpoint = params.model;
@@ -255,7 +269,7 @@ const buildTxt2ImgPayload = (params: Txt2ImgParams) => {
       pixel_perfect: params.controlNet.pixelPerfect ?? true
     };
     if (params.controlNet.image) {
-      unit.input_image = params.controlNet.image;
+      unit.image = params.controlNet.image;
     }
     payload.controlnet_units = [unit];
     payload.alwayson_scripts = {
@@ -383,6 +397,18 @@ export const createPxdClient = (settings: AppSettings) => {
     return activeControllers.length;
   };
 
+  const fetchFirstOptionCollection = async (paths: string[], responseKeys: string[]) => {
+    for (const path of paths) {
+      const payload = await fetchJson<unknown>(path).catch((error) => {
+        rethrowCancellation(error);
+        return null;
+      });
+      const collection = extractOptionCollection(payload, responseKeys);
+      if (collection.length > 0) return collection;
+    }
+    return [];
+  };
+
   return {
     async ping(): Promise<boolean> {
       if (!baseURL) return false;
@@ -427,30 +453,26 @@ export const createPxdClient = (settings: AppSettings) => {
         console.warn("Failed to fetch schedulers", error);
         return [];
       });
-      const controlNetModelsPromise = (async () => {
-        const endpoints = [
+      const controlNetModelsPromise = fetchFirstOptionCollection(
+        [
           "/controlnet/model_list",
+          "/sdapi/v1/controlnet/model_list",
           "/controlnet/models",
           "/sdapi/v1/controlnet/models",
           "/controlnet/control_types"
-        ];
-        for (const endpoint of endpoints) {
-          const result = await fetchJson<unknown>(endpoint).catch((error) => {
-            rethrowCancellation(error);
-            return null;
-          });
-          const list = extractOptionList(result, ["model_list", "models"]);
-          if (list) return list;
-        }
-        return [];
-      })();
-      const controlNetModulesPromise = fetchJson<unknown>("/controlnet/module_list")
-        .then((result) => extractOptionList(result, ["module_list", "modules"]) ?? [])
-        .catch((error) => {
-          rethrowCancellation(error);
-          console.warn("Failed to fetch controlnet modules", error);
-          return [];
-        });
+        ],
+        ["model_list", "models"]
+      );
+      const controlNetModulesPromise = fetchFirstOptionCollection(
+        [
+          "/controlnet/module_list?alias_names=true",
+          "/sdapi/v1/controlnet/module_list?alias_names=true",
+          "/controlnet/modules",
+          "/sdapi/v1/controlnet/modules",
+          "/controlnet/control_types"
+        ],
+        ["module_list", "modules"]
+      );
 
       const [models, vaes, loras, samplers, schedulers, controlNetModels, controlNetModules] = await Promise.all([
         modelsPromise,
@@ -473,7 +495,15 @@ export const createPxdClient = (settings: AppSettings) => {
       };
     },
     async txt2img(params: Txt2ImgParams, options: RequestTaskOptions = {}): Promise<Txt2ImgResponse> {
-      const payload = buildTxt2ImgPayload(params);
+      const payload = buildTxt2ImgPayload({
+        ...params,
+        controlNet: params.controlNet
+          ? {
+              ...params.controlNet,
+              image: params.controlNet.image ? dataUrlToBase64(params.controlNet.image) : undefined
+            }
+          : undefined
+      });
       const timeoutMs = computeDynamicTimeout(params.steps, params.width, params.height, timeoutOptions);
       return await fetchJson<Txt2ImgResponse>("/sdapi/v1/txt2img", {
         method: "POST",
@@ -507,7 +537,7 @@ export const createPxdClient = (settings: AppSettings) => {
     },
     async fetchProgress(): Promise<ProgressResponse | null> {
       try {
-        return await fetchJson<ProgressResponse>("/sdapi/v1/progress", {
+        return await fetchJson<ProgressResponse>("/sdapi/v1/progress?skip_current_image=false", {
           method: "GET",
           timeoutMs: 5_000
         });

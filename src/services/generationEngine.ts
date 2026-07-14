@@ -3,7 +3,8 @@ import {
   createPxdClient,
   type Img2ImgParams,
   type ProgressResponse,
-  type SdOptions
+  type SdOptions,
+  type Txt2ImgParams
 } from "./apiClient";
 import { createImageModelClient, type ImageModelClient } from "./imageModelClient";
 
@@ -16,6 +17,7 @@ export interface EngineGenerateParams {
   baseImageBase64: string;
   timeoutMs: number;
   forgeParams?: Img2ImgParams;
+  forgeTxt2ImgParams?: Txt2ImgParams;
   taskId?: string;
   signal?: AbortSignal;
 }
@@ -139,6 +141,13 @@ export const createGenerationEngine = (
     fetchProgress: () => client.fetchProgress(),
     async generate(params) {
       try {
+        if (params.forgeTxt2ImgParams) {
+          const result = await client.txt2img(params.forgeTxt2ImgParams, {
+            taskId: params.taskId,
+            signal: params.signal
+          });
+          return { images: result.images ?? [] };
+        }
         if (!params.forgeParams) {
           throw new GenerationEngineError(
             "Forge 生成参数不完整",

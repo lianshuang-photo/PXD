@@ -1,4 +1,5 @@
 import { useCallback, useLayoutEffect, useMemo, useRef } from "react";
+import type { ProgressResponse } from "../services/apiClient";
 import type { GenerationEngine } from "../services/generationEngine";
 
 export interface EngineGenerationToken {
@@ -35,7 +36,11 @@ export const useEngineLifecycle = (engine: GenerationEngine) => {
   );
 
   const startPolling = useCallback(
-    (candidate: EngineGenerationToken, onProgress: (progress: number) => void) => {
+    (
+      candidate: EngineGenerationToken,
+      onProgress: (progress: number) => void,
+      onSnapshot?: (info: ProgressResponse) => void
+    ) => {
       const fetchProgress = candidate.engine.fetchProgress;
       if (!fetchProgress || !isCurrent(candidate)) return;
       stopPolling();
@@ -49,8 +54,13 @@ export const useEngineLifecycle = (engine: GenerationEngine) => {
         inFlight = true;
         try {
           const progressInfo = await fetchProgress();
-          if (progressInfo && typeof progressInfo.progress === "number") {
-            commitIfCurrent(candidate, () => onProgress(progressInfo.progress));
+          if (progressInfo) {
+            commitIfCurrent(candidate, () => {
+              if (typeof progressInfo.progress === "number") {
+                onProgress(progressInfo.progress);
+              }
+              onSnapshot?.(progressInfo);
+            });
           }
         } catch {
           // Progress is best-effort; generation errors are reported by the main request.

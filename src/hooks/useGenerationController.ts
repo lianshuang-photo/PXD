@@ -4,7 +4,8 @@ import {
   isPxdRequestCancelledError,
   type ControlNetPayload,
   type Img2ImgParams,
-  type SdOptions
+  type SdOptions,
+  type Txt2ImgParams
 } from "../services/apiClient";
 import { isImageModelCancelledError } from "../services/imageModelClient";
 import {
@@ -15,17 +16,24 @@ import {
 } from "../services/generationEngine";
 import { useGenerationEngine } from "./useGenerationEngine";
 import { useEngineLifecycle } from "./useEngineLifecycle";
-import { executeGenerationTask } from "../services/generationWorkflow";
+import {
+  executeGenerationTask,
+  type GenerationWorkflowResult
+} from "../services/generationWorkflow";
 import {
   closeDocument,
+  closeGeneratedDocument,
+  createGeneratedDocument,
   getSelectionPixels,
   groupLayers,
   hasActiveSelection,
   moveActiveLayerToTop,
   onBatchAddLayer,
+  placeImageIntoDocument,
   placeImageIntoSelection,
   setSelectionBounds,
   switchToDocument,
+  type GeneratedDocumentSession,
   type SelectionPixels
 } from "../services/photoshop";
 import { clearPSLockQueue, isPSLockControlError } from "../services/psLock";
@@ -258,6 +266,39 @@ const appendPromptValue = (current: string, addition: string) => {
   };
 };
 
+const buildTxt2ImgParams = (
+  form: GenerationForm,
+  width: number,
+  height: number
+): Txt2ImgParams => {
+  const effectivePrompt = sanitizePrompt(
+    [form.positivePrompt, form.extraPrompt].filter(Boolean).join("\n").trim()
+  );
+  return {
+    prompt: effectivePrompt,
+    negativePrompt: sanitizePrompt(form.negativePrompt),
+    steps: clampNumber(form.steps, 1, 150),
+    cfgScale: clampNumber(form.cfgScale, 1, 30),
+    sampler: form.sampler || undefined,
+    scheduler: form.scheduler || undefined,
+    model: form.model || undefined,
+    vae: form.vae || undefined,
+    loras: form.lora
+      ? [{
+          name: form.lora,
+          weight: Number.isFinite(form.loraWeight) ? clampNumber(form.loraWeight, -2, 2) : 1
+        }]
+      : undefined,
+    batchSize: clampNumber(form.imageCount, 1, 8),
+    width,
+    height,
+    seed: form.seed ?? -1,
+    clipSkip: form.clipSkip > 0 ? form.clipSkip : undefined,
+    restoreFaces: form.restoreFaces,
+    tiling: form.tiling
+  };
+};
+
 const buildImg2ImgParams = (
   form: GenerationForm,
   baseImage: string,
@@ -276,7 +317,12 @@ const buildImg2ImgParams = (
     scheduler: form.scheduler || undefined,
     model: form.model || undefined,
     vae: form.vae || undefined,
-    loras: form.lora ? [{ name: form.lora, weight: form.loraWeight || 1 }] : undefined,
+    loras: form.lora
+      ? [{
+          name: form.lora,
+          weight: Number.isFinite(form.loraWeight) ? clampNumber(form.loraWeight, -2, 2) : 1
+        }]
+      : undefined,
     batchSize: clampNumber(form.imageCount, 1, 8),
     width,
     height,
@@ -294,7 +340,7 @@ const buildEngineGenerateParams = (
   provider: AppSettings["imageProvider"],
   settings: AppSettings,
   form: GenerationForm,
-  selection: SelectionPixels,
+  selection: SelectionPixels | null,
   width: number,
   height: number,
   taskId?: string
@@ -304,15 +350,19 @@ const buildEngineGenerateParams = (
   );
   return {
     prompt,
-    baseImageBase64: dataUrlToBase64(selection.dataUrl),
+    baseImageBase64: selection ? dataUrlToBase64(selection.dataUrl) : "",
     timeoutMs: Math.max(
       5_000,
       Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)
     ),
     taskId,
     forgeParams:
-      provider === "forge"
+      provider === "forge" && selection
         ? buildImg2ImgParams(form, selection.dataUrl, width, height)
+        : undefined,
+    forgeTxt2ImgParams:
+      provider === "forge" && !selection
+        ? buildTxt2ImgParams(form, width, height)
         : undefined
   };
 };
@@ -325,6 +375,8 @@ export interface GenerationControllerState {
   status: GenerationStatus;
   progress: number;
   progressMode: EngineProgressMode;
+  progressPreview: string | null;
+  progressText: string | null;
   error: string | null;
   lastImages: string[];
   options: SdOptions;
@@ -390,6 +442,8 @@ export const useGenerationController = (
   const [form, setForm] = useState<GenerationForm>(DEFAULT_FORM);
   const [status, setStatus] = useState<GenerationStatus>("idle");
   const [progress, setProgress] = useState(0);
+  const [progressPreview, setProgressPreview] = useState<string | null>(null);
+  const [progressText, setProgressText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastImages, setLastImages] = useState<string[]>([]);
   const [options, setOptions] = useState<SdOptions>(EMPTY_OPTIONS);
@@ -736,7 +790,23 @@ export const useGenerationController = (
   }, [loadPresets]);
 
   const pollProgress = useCallback(() => {
-    startPolling(engineToken, setProgress);
+    const activeRun = runGateRef.current.current;
+    if (!activeRun) return;
+    const runToken = activeRun.token;
+    const isPollCurrent = () => runGateRef.current.isCurrent(runToken);
+    startPolling(
+      engineToken,
+      (value) => {
+        if (!isPollCurrent()) return;
+        setProgress(value);
+      },
+      (info) => {
+        if (!isPollCurrent()) return;
+        setProgressPreview(info.current_image ? toDataUrl(info.current_image) : null);
+        const text = info.textinfo || info.message;
+        setProgressText(text ? String(text) : null);
+      }
+    );
   }, [engineToken, startPolling]);
 
   const stopGeneration = useCallback(() => {
@@ -756,6 +826,8 @@ export const useGenerationController = (
     }
     setStatus("idle");
     setProgress(0);
+    setProgressPreview(null);
+    setProgressText(null);
     setError(null);
     pushToast("info", "已停止");
   }, [engine, engineToken, pushToast, stopPolling]);
@@ -770,38 +842,76 @@ export const useGenerationController = (
     setStatus("running");
     setError(null);
     setProgress(0);
+    setProgressPreview(null);
+    setProgressText(null);
     dismissToast();
     try {
       const selection = await getSelectionPixels({ taskId });
       if (!isRunCurrent()) return;
-      if (!selection) {
+      if (!selection && requestEngine.provider === "gemini") {
         throw new Error("请先在 Photoshop 中选择一个区域");
       }
       const target = clampNumber(form.resolution, 128, 2048);
-      const { width, height } = computeOverrideSize(selection.width, selection.height, target);
-      const result = await executeGenerationTask(
-        requestEngine,
-        {
-          request: buildEngineGenerateParams(
-            requestEngine.provider,
-            settings,
-            form,
-            selection,
-            width,
-            height,
-            taskId
-          ),
-          feather: Number.isFinite(form.maskFeather) ? form.maskFeather : DEFAULT_FORM.maskFeather,
-          taskId,
-          emptyImagesMessage: "未收到可用的生成图像",
-          isCurrent: isRunCurrent,
-          onRequestStart: () => {
-            if (requestEngine.progressMode === "determinate") pollProgress();
+      const { width, height } = selection
+        ? computeOverrideSize(selection.width, selection.height, target)
+        : { width: target, height: target };
+      let generatedDocument: GeneratedDocumentSession | null = null;
+      const adapters = selection
+        ? GENERATION_WORKFLOW_ADAPTERS
+        : {
+            ...GENERATION_WORKFLOW_ADAPTERS,
+            placeImage: async (
+              dataUrl: string,
+              index: number,
+              opts: { feather: number; taskId?: string }
+            ) => {
+              if (!generatedDocument) {
+                generatedDocument = await createGeneratedDocument(width, height, undefined, {
+                  taskId: opts.taskId
+                });
+              }
+              return placeImageIntoDocument(dataUrl, index, generatedDocument.documentId, {
+                taskId: opts.taskId
+              });
+            }
+          };
+      let result: GenerationWorkflowResult;
+      try {
+        result = await executeGenerationTask(
+          requestEngine,
+          {
+            request: buildEngineGenerateParams(
+              requestEngine.provider,
+              settings,
+              form,
+              selection,
+              width,
+              height,
+              taskId
+            ),
+            feather: Number.isFinite(form.maskFeather) ? form.maskFeather : DEFAULT_FORM.maskFeather,
+            taskId,
+            emptyImagesMessage: "未收到可用的生成图像",
+            isCurrent: isRunCurrent,
+            onRequestStart: () => {
+              if (requestEngine.progressMode === "determinate") pollProgress();
+            },
+            onRequestSettled: () => stopPolling(requestToken)
           },
-          onRequestSettled: () => stopPolling(requestToken)
-        },
-        GENERATION_WORKFLOW_ADAPTERS
-      );
+          adapters
+        );
+      } catch (workflowError) {
+        if (generatedDocument) {
+          await closeGeneratedDocument(
+            (generatedDocument as GeneratedDocumentSession).documentId,
+            (generatedDocument as GeneratedDocumentSession).previousDocumentId,
+            { taskId }
+          ).catch((cleanupError) =>
+            ignoreBestEffortPhotoshopError("Failed to clean up generated document", cleanupError)
+          );
+        }
+        throw workflowError;
+      }
       if (!isRunCurrent()) return;
       const { images } = result;
       setProgress(1);
@@ -834,7 +944,11 @@ export const useGenerationController = (
       if (runGateRef.current.isCurrent(runToken)) {
         runGateRef.current.complete(runToken);
       }
-      commitIfCurrent(requestToken, () => setProgress(0));
+      commitIfCurrent(requestToken, () => {
+        setProgress(0);
+        setProgressPreview(null);
+        setProgressText(null);
+      });
     }
   }, [commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pollProgress, pushToast, recordHistory, settings, stopPolling]);
 
@@ -1044,6 +1158,8 @@ export const useGenerationController = (
       if (runGateRef.current.isCurrent(runToken)) {
         runGateRef.current.complete(runToken);
         setProgress(0);
+        setProgressPreview(null);
+        setProgressText(null);
       }
     }
   }, [batchItems, engineToken, isEngineCurrent, pollProgress, pushToast, recordHistory, settings, stopPolling]);
@@ -1101,6 +1217,8 @@ export const useGenerationController = (
     status,
     progress,
     progressMode: engine.progressMode,
+    progressPreview,
+    progressText,
     error,
     lastImages,
     options,
