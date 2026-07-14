@@ -66,6 +66,13 @@ const OnboardingGuide = ({
   const [error, setError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
 
+  useEffect(() => {
+    if (!open || typeof document === "undefined") return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    queueMicrotask(() => dialogRef.current?.focus());
+    return () => previousFocus?.focus();
+  }, [open]);
+
   const locate = useMemo(() => () => {
     if (!open || !step || typeof document === "undefined") {
       setPosition(null);
@@ -115,7 +122,6 @@ const OnboardingGuide = ({
     window.addEventListener("resize", handleViewportChange);
     window.addEventListener("scroll", handleViewportChange, true);
     document.addEventListener("keydown", handleKeyDown);
-    queueMicrotask(() => dialogRef.current?.focus());
     return () => {
       window.removeEventListener("resize", handleViewportChange);
       window.removeEventListener("scroll", handleViewportChange, true);

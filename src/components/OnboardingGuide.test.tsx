@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import OnboardingGuide, { type OnboardingStep } from "./OnboardingGuide";
@@ -99,5 +99,44 @@ describe("OnboardingGuide", () => {
       .find((button) => button.textContent === "下一步");
     expect(next?.disabled).toBe(true);
     expect(document.querySelector(".onboarding-guide__validation")?.textContent).toContain("目标暂不可用");
+  });
+
+  it.each(["Escape", "稍后", "跳过", "完成"])("restores focus after closing with %s", async (action) => {
+    const ControlledGuide = () => {
+      const [open, setOpen] = useState(true);
+      const closeAsync = async () => setOpen(false);
+      return (
+        <OnboardingGuide
+          open={open}
+          stepIndex={action === "完成" ? 1 : 0}
+          steps={steps}
+          onStepChange={vi.fn().mockResolvedValue(undefined)}
+          onComplete={closeAsync}
+          onPause={() => setOpen(false)}
+          onSkip={closeAsync}
+        />
+      );
+    };
+
+    anchor.focus();
+    await act(async () => {
+      root.render(<ControlledGuide />);
+      await Promise.resolve();
+    });
+    expect(document.activeElement).toBe(document.querySelector(".onboarding-guide"));
+
+    await act(async () => {
+      if (action === "Escape") {
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      } else {
+        const button = Array.from(document.querySelectorAll<HTMLButtonElement>(".onboarding-guide button"))
+          .find((candidate) => candidate.textContent === action);
+        button?.click();
+      }
+      await Promise.resolve();
+    });
+
+    expect(document.querySelector(".onboarding-guide")).toBeNull();
+    expect(document.activeElement).toBe(anchor);
   });
 });

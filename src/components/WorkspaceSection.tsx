@@ -5,7 +5,6 @@ interface Props {
   id: LayoutSectionId;
   title: string;
   collapsed: boolean;
-  order: number;
   first: boolean;
   last: boolean;
   busy: boolean;
@@ -18,7 +17,6 @@ const WorkspaceSection = ({
   id,
   title,
   collapsed,
-  order,
   first,
   last,
   busy,
@@ -32,7 +30,6 @@ const WorkspaceSection = ({
       className={first ? "workspace-section workspace-section--first" : "workspace-section"}
       data-layout-section={id}
       data-guide={id === "prompts" ? "section-prompts" : undefined}
-      style={{ order }}
     >
       <header className="workspace-section__header">
         <button

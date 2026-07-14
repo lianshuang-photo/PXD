@@ -1,4 +1,4 @@
-import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { AppSettings } from "../context/types";
 import { useGenerationController } from "../hooks/useGenerationController";
 import { useLayoutExperience } from "../hooks/useLayoutExperience";
@@ -359,20 +359,24 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     setTargetLanguage(sourceLanguage);
   };
 
+  const visibleSectionIds = layoutExperience.store.layout.order.filter((sectionId) =>
+    (sectionId !== "batch" || batchItems.length > 0) &&
+    (sectionId !== "outputs" || lastImages.length > 0)
+  );
+
   const sectionProps = (id: LayoutSectionId) => {
-    const index = layoutExperience.store.layout.order.indexOf(id);
+    const index = visibleSectionIds.indexOf(id);
     return {
       id,
       collapsed: layoutExperience.store.layout.collapsed.includes(id),
-      order: index,
       first: index === 0,
-      last: index === layoutExperience.store.layout.order.length - 1,
+      last: index === visibleSectionIds.length - 1,
       busy: layoutExperience.saving,
       onToggle: (sectionId: LayoutSectionId, collapsed: boolean) => {
         void layoutExperience.setSectionCollapsed(sectionId, collapsed).catch(() => undefined);
       },
       onMove: (sectionId: LayoutSectionId, direction: -1 | 1) => {
-        void layoutExperience.moveSection(sectionId, direction).catch(() => undefined);
+        void layoutExperience.moveSection(sectionId, direction, visibleSectionIds).catch(() => undefined);
       }
     };
   };
@@ -385,6 +389,59 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
       setLayoutToolsOpen(true);
     }
   };
+
+  const renderHistorySection = () => (
+    <section key="history" aria-label="生成历史">
+      <div className="generation-history__header">
+        <span style={compactLabelStyle}>生成历史</span>
+        <span className="generation-history__count">{history.length}/50</span>
+      </div>
+      {historyError && <div className="generation-history__error">{historyError}</div>}
+      {historyLoading ? (
+        <div className="generation-history__empty">正在加载…</div>
+      ) : history.length === 0 ? (
+        <div className="generation-history__empty">暂无生成记录</div>
+      ) : (
+        <div className="generation-history__stream">
+          {history.map((entry) => (
+            <div className="generation-history__item" key={entry.id}>
+              <img
+                className="generation-history__thumbnail"
+                src={entry.thumbnailDataUrl}
+                alt={entry.prompt || "生成结果"}
+              />
+              <div className="generation-history__content">
+                <div className="generation-history__prompt" title={entry.prompt}>
+                  {entry.prompt || "未命名生成"}
+                </div>
+                <div className="generation-history__meta">
+                  <span>{entry.provider === "forge" ? "Forge" : "Gemini"}</span>
+                  <span>{formatDateTime(entry.ts)}</span>
+                </div>
+                <div className="generation-history__actions">
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() => void restoreHistoryConfig(entry.id)}
+                  >
+                    回填配置
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    disabled={status === "running"}
+                    onClick={() => void pasteHistoryResult(entry.id)}
+                  >
+                    再次贴回
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
 
   return (
     <>
@@ -531,7 +588,10 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
         <div style={{ maxWidth: "100%", width: "100%", boxSizing: "border-box" }}>
           <article style={{ width: "100%", padding: "0.25rem", background: "var(--bg-panel)", borderRadius: "4px", boxSizing: "border-box" }}>
             <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: "0.2rem", boxSizing: "border-box" }}>
-              <WorkspaceSection {...sectionProps("presets")} title="预设">
+              {(() => {
+                const workspaceSections: Record<LayoutSectionId, ReactNode> = {
+                  presets: (
+              <WorkspaceSection key="presets" {...sectionProps("presets")} title="预设">
                 <div style={{ display: "flex", gap: "0.12rem", marginBottom: "0.12rem" }}>
                   <select
                     className="input"
@@ -590,59 +650,10 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   </button>
                 </div>
               </WorkspaceSection>
+                  ),
 
-              <section aria-label="生成历史">
-                <div className="generation-history__header">
-                  <span style={compactLabelStyle}>生成历史</span>
-                  <span className="generation-history__count">{history.length}/50</span>
-                </div>
-                {historyError && <div className="generation-history__error">{historyError}</div>}
-                {historyLoading ? (
-                  <div className="generation-history__empty">正在加载…</div>
-                ) : history.length === 0 ? (
-                  <div className="generation-history__empty">暂无生成记录</div>
-                ) : (
-                  <div className="generation-history__stream">
-                    {history.map((entry) => (
-                      <div className="generation-history__item" key={entry.id}>
-                        <img
-                          className="generation-history__thumbnail"
-                          src={entry.thumbnailDataUrl}
-                          alt={entry.prompt || "生成结果"}
-                        />
-                        <div className="generation-history__content">
-                          <div className="generation-history__prompt" title={entry.prompt}>
-                            {entry.prompt || "未命名生成"}
-                          </div>
-                          <div className="generation-history__meta">
-                            <span>{entry.provider === "forge" ? "Forge" : "Gemini"}</span>
-                            <span>{formatDateTime(entry.ts)}</span>
-                          </div>
-                          <div className="generation-history__actions">
-                            <button
-                              type="button"
-                              className="btn btn--ghost"
-                              onClick={() => void restoreHistoryConfig(entry.id)}
-                            >
-                              回填配置
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn--ghost"
-                              disabled={status === "running"}
-                              onClick={() => void pasteHistoryResult(entry.id)}
-                            >
-                              再次贴回
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
-
-              <WorkspaceSection {...sectionProps("models")} title="模型与采样">
+                  models: (
+              <WorkspaceSection key="models" {...sectionProps("models")} title="模型与采样">
               <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", marginBottom: "0.12rem" }}>
                 <span style={{ ...compactLabelStyle, minWidth: "1.5rem" }}>模型</span>
                 <select className="input" value={form.model} onChange={(event) => setFormValue("model", event.target.value)} style={{ flex: 1, minWidth: 0 }}>
@@ -690,8 +701,10 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                 </div>
               </div>
               </WorkspaceSection>
+                  ),
               
-              <WorkspaceSection {...sectionProps("generation")} title="生成参数">
+                  generation: (
+              <WorkspaceSection key="generation" {...sectionProps("generation")} title="生成参数">
               <div style={{ display: "flex", gap: "0.12rem", marginBottom: "0.12rem" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", flex: 1, minWidth: 0 }}>
                   <span style={{ ...compactLabelStyle, minWidth: "1.2rem" }}>步数</span>
@@ -823,8 +836,10 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                 </div>
               </div>
               </WorkspaceSection>
+                  ),
               
-              <WorkspaceSection {...sectionProps("controlnet")} title="ControlNet">
+                  controlnet: (
+              <WorkspaceSection key="controlnet" {...sectionProps("controlnet")} title="ControlNet">
               <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", marginBottom: "0.12rem" }}>
                 <span style={{ ...compactLabelStyle, minWidth: "1.5rem" }}>模型</span>
                 <select
@@ -865,8 +880,10 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                 </div>
               </div>
               </WorkspaceSection>
+                  ),
               
-              <WorkspaceSection {...sectionProps("prompts")} title="提示词">
+                  prompts: (
+              <WorkspaceSection key="prompts" {...sectionProps("prompts")} title="提示词">
               <textarea
                 className="input input--multiline"
                 value={form.positivePrompt}
@@ -957,8 +974,10 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                 onChange={(value) => setFormValue("extraPrompt", value)}
               />
               </WorkspaceSection>
+                  ),
               
-              <WorkspaceSection {...sectionProps("translation")} title="翻译助手">
+                  translation: (
+              <WorkspaceSection key="translation" {...sectionProps("translation")} title="翻译助手">
               <div style={{ fontSize: "0.7rem", fontWeight: 500, marginBottom: "0.25rem", color: "var(--text-secondary)" }}>翻译助手（这个懒得找api也没啥用，如果你向下滑看到了就当没看见吧～）</div>
               <div style={{ display: "flex", gap: "0.35rem", marginBottom: "0.35rem" }}>
                 <select
@@ -1034,9 +1053,10 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
               />
               {translationError && <div style={{ color: "var(--error-color)", fontSize: "0.875rem", marginTop: "-0.35rem", marginBottom: "0.5rem" }}>{translationError}</div>}
               </WorkspaceSection>
+                  ),
               
-              {batchItems.length > 0 && (
-                <WorkspaceSection {...sectionProps("batch")} title={`批次队列 (${batchItems.length})`}>
+                  batch: batchItems.length > 0 ? (
+                <WorkspaceSection key="batch" {...sectionProps("batch")} title={`批次队列 (${batchItems.length})`}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
                     <button type="button" className="btn btn--ghost" onClick={clearBatch} disabled={status === "running"} style={{ padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}>
                       清空
@@ -1059,17 +1079,25 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                     ))}
                   </ul>
                 </WorkspaceSection>
-              )}
+                  ) : null,
               
-              {lastImages.length > 0 && (
-                <WorkspaceSection {...sectionProps("outputs")} title="最近输出">
+                  outputs: lastImages.length > 0 ? (
+                <WorkspaceSection key="outputs" {...sectionProps("outputs")} title="最近输出">
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(100px, 1fr))", gap: "0.5rem" }}>
                     {lastImages.map((src, index) => (
                       <img key={`${src}-${index}`} src={src} alt={`result-${index}`} style={{ width: "100%", borderRadius: "4px" }} />
                     ))}
                   </div>
                 </WorkspaceSection>
-              )}
+                  ) : null
+                };
+
+                return visibleSectionIds.flatMap((sectionId) =>
+                  sectionId === "presets"
+                    ? [workspaceSections[sectionId], renderHistorySection()]
+                    : [workspaceSections[sectionId]]
+                );
+              })()}
             </div>
           </article>
         </div>

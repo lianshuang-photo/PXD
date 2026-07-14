@@ -69,23 +69,24 @@ export const useLayoutExperience = () => {
     await load();
     pendingWritesRef.current += 1;
     if (mountedRef.current) setSaving(true);
-    let committed: LayoutExperienceStore | null = null;
     const write = writeQueueRef.current
       .catch(() => undefined)
       .then(async () => {
         const next = transform(storeRef.current);
         await saveLayoutStore(next);
         storeRef.current = next;
-        committed = next;
         if (mountedRef.current) {
           setStore(next);
           setError(null);
         }
+        return next;
       });
-    writeQueueRef.current = write;
+    writeQueueRef.current = write.then(
+      () => undefined,
+      () => undefined
+    );
     try {
-      await write;
-      return committed as LayoutExperienceStore;
+      return await write;
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "布局数据保存失败";
       if (mountedRef.current) setError(message);
@@ -111,12 +112,21 @@ export const useLayoutExperience = () => {
     });
   }, [commit]);
 
-  const moveSection = useCallback((sectionId: LayoutSectionId, direction: -1 | 1) => {
+  const moveSection = useCallback((
+    sectionId: LayoutSectionId,
+    direction: -1 | 1,
+    visibleSectionIds?: LayoutSectionId[]
+  ) => {
     return commit((current) => {
       const order = [...current.layout.order];
+      const visible = visibleSectionIds
+        ? order.filter((candidate) => visibleSectionIds.includes(candidate))
+        : order;
+      const visibleFrom = visible.indexOf(sectionId);
+      const visibleTo = visibleFrom + direction;
+      if (visibleFrom < 0 || visibleTo < 0 || visibleTo >= visible.length) return current;
       const from = order.indexOf(sectionId);
-      const to = from + direction;
-      if (from < 0 || to < 0 || to >= order.length) return current;
+      const to = order.indexOf(visible[visibleTo]);
       [order[from], order[to]] = [order[to], order[from]];
       return withLayout(current, normalizeWorkspaceLayout({ ...current.layout, order }));
     });

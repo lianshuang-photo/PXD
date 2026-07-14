@@ -90,4 +90,33 @@ describe("useLayoutExperience", () => {
     expect(experience.error).toContain("disk full");
     expect(experience.saving).toBe(false);
   });
+
+  it("moves across adjacent visible sections while preserving hidden positions", async () => {
+    await act(async () => {
+      await experience.updateLayout({
+        version: 1,
+        order: ["presets", "batch", "models", "outputs", "generation", "controlnet", "prompts", "translation"],
+        collapsed: []
+      });
+    });
+
+    await act(async () => {
+      await experience.moveSection(
+        "presets",
+        1,
+        ["presets", "models", "generation", "controlnet", "prompts", "translation"]
+      );
+    });
+
+    expect(experience.store.layout.order).toEqual([
+      "models",
+      "batch",
+      "presets",
+      "outputs",
+      "generation",
+      "controlnet",
+      "prompts",
+      "translation"
+    ]);
+  });
 });
