@@ -3,13 +3,17 @@ const RELEASE_COOLDOWN_MS = 150;
 
 interface LockWaiter {
   taskId?: string;
-  resolve: (release: () => void) => void;
+  resolve: (release: (options?: { keepCircuitOpen?: boolean }) => void) => void;
   reject: (error: Error) => void;
 }
 
-export interface PSExclusiveOptions {
+export interface PSExclusiveOptions<T = unknown> {
   taskId?: string;
   timeoutMs?: number;
+  onLateSettlement?: (settlement:
+    | { status: "fulfilled"; value: T }
+    | { status: "rejected"; reason: unknown }
+  ) => Promise<void> | void;
 }
 
 export class PSLockCancelledError extends Error {
@@ -82,12 +86,13 @@ const dispatchNext = () => {
 
   isLocked = true;
   let released = false;
-  waiter.resolve(() => {
+  waiter.resolve((options = {}) => {
     if (released) {
       return;
     }
     released = true;
     isLocked = false;
+    if (options.keepCircuitOpen) return;
     cooldownTimer = setTimeout(() => {
       cooldownTimer = null;
       isCircuitOpen = false;
@@ -97,7 +102,9 @@ const dispatchNext = () => {
   });
 };
 
-export const acquirePSLock = (taskId?: string): Promise<() => void> => {
+export const acquirePSLock = (
+  taskId?: string
+): Promise<(options?: { keepCircuitOpen?: boolean }) => void> => {
   if (isCircuitOpen) {
     return Promise.reject(new PSCircuitOpenError(circuitBlockingTaskId, taskId));
   }
@@ -123,7 +130,7 @@ export const clearPSLockQueue = (taskId?: string): number => {
 
 export const runPSExclusive = async <T>(
   operation: () => Promise<T> | T,
-  options: PSExclusiveOptions = {}
+  options: PSExclusiveOptions<T> = {}
 ): Promise<T> => {
   const release = await acquirePSLock(options.taskId);
   const timeoutMs =
@@ -131,11 +138,41 @@ export const runPSExclusive = async <T>(
       ? options.timeoutMs
       : DEFAULT_TIMEOUT_MS;
   let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+  let lateCleanupFailed = false;
   const operationPromise = Promise.resolve().then(operation);
+  const settledPromise = operationPromise.then(
+    async (value) => {
+      if (timedOut && options.onLateSettlement) {
+        try {
+          await options.onLateSettlement({ status: "fulfilled", value });
+        } catch (error) {
+          lateCleanupFailed = true;
+          throw error;
+        }
+      }
+      return value;
+    },
+    async (reason) => {
+      if (timedOut && options.onLateSettlement) {
+        try {
+          await options.onLateSettlement({ status: "rejected", reason });
+        } catch (error) {
+          lateCleanupFailed = true;
+          throw error;
+        }
+      }
+      throw reason;
+    }
+  );
   // UXP cannot cancel a running modal, so a timeout must not unlock concurrent work.
-  void operationPromise.then(release, release);
+  void settledPromise.then(
+    () => release({ keepCircuitOpen: lateCleanupFailed }),
+    () => release({ keepCircuitOpen: lateCleanupFailed })
+  );
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutTimer = setTimeout(() => {
+      timedOut = true;
       const error = new PSOperationTimeoutError(timeoutMs, options.taskId);
       openCircuit(options.taskId);
       reject(error);
@@ -143,7 +180,7 @@ export const runPSExclusive = async <T>(
   });
 
   try {
-    return await Promise.race([operationPromise, timeoutPromise]);
+    return await Promise.race([settledPromise, timeoutPromise]);
   } finally {
     if (timeoutTimer) {
       clearTimeout(timeoutTimer);

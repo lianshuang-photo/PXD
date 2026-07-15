@@ -50,8 +50,14 @@ import { translateText } from "../services/translator";
 import { useGenerationHistory } from "./useGenerationHistory";
 import type { GenerationHistoryEntry } from "../services/generationHistory";
 import { normalizePromptParams, sanitizePrompt } from "../services/promptParams";
+import {
+  executeColorizeWorkflow,
+  type ColorizePhase
+} from "../services/colorizeWorkflow";
+import { COLORIZE_PHOTOSHOP_ADAPTER } from "../services/colorizePhotoshopAdapter";
 
 export type GenerationStatus = "idle" | "running" | "success" | "error";
+export type ColorizeStatus = "idle" | ColorizePhase | "success" | "error";
 export type ToastType = "info" | "success" | "warning" | "error";
 
 interface ToastState {
@@ -395,6 +401,11 @@ export interface GenerationControllerState {
   removeFromBatch: (id: string) => Promise<void>;
   clearBatch: () => Promise<void>;
   runBatch: () => Promise<void>;
+  colorizePrompt: string;
+  setColorizePrompt: (value: string) => void;
+  colorizeStatus: ColorizeStatus;
+  colorizeError: string | null;
+  runColorize: () => Promise<void>;
   toast: ToastState | null;
   dismissToast: () => void;
   presets: PresetMeta[];
@@ -450,6 +461,9 @@ export const useGenerationController = (
   const [optionsLoading, setOptionsLoading] = useState(false);
   const [optionsError, setOptionsError] = useState<string | null>(null);
   const [batchItems, setBatchItems] = useState<BatchItem[]>([]);
+  const [colorizePrompt, setColorizePrompt] = useState("");
+  const [colorizeStatus, setColorizeStatus] = useState<ColorizeStatus>("idle");
+  const [colorizeError, setColorizeError] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [presets, setPresets] = useState<PresetMeta[]>([]);
   const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
@@ -468,6 +482,8 @@ export const useGenerationController = (
     settingsRef.current = settings;
   }, [settings]);
   const runGateRef = useRef(new GenerationRunGate());
+  const colorizeAbortRef = useRef<AbortController | null>(null);
+  const colorizeHistoryTailCountRef = useRef(0);
   const stoppedByEngineChangeRef = useRef(false);
 
   useLayoutEffect(() => {
@@ -476,7 +492,13 @@ export const useGenerationController = (
   }, [engineToken]);
 
   useEffect(() => () => {
-    if (runGateRef.current.stop()) {
+    const stopped = runGateRef.current.stop();
+    if (stopped) {
+      if (stopped.taskId) clearPSLockQueue(stopped.taskId);
+      if (stopped.kind === "colorize") {
+        colorizeAbortRef.current?.abort();
+        colorizeAbortRef.current = null;
+      }
       engine.cancelAll();
       stoppedByEngineChangeRef.current = true;
     }
@@ -495,7 +517,10 @@ export const useGenerationController = (
     loading: historyLoading,
     error: historyError,
     record: recordHistory
-  } = useGenerationHistory<GenerationForm>((message) => pushToast("warning", message));
+  } = useGenerationHistory<GenerationForm>((message) => {
+    if (colorizeHistoryTailCountRef.current > 0) return;
+    pushToast("warning", message);
+  });
   const dismissToast = useCallback(() => {
     clearToastTimer();
     setToast(null);
@@ -524,6 +549,8 @@ export const useGenerationController = (
       )
     );
     setError(null);
+    setColorizeStatus("idle");
+    setColorizeError(null);
     pushToast("info", "设置已更新，当前生成已停止");
   }, [engine, pushToast]);
 
@@ -813,6 +840,9 @@ export const useGenerationController = (
     const activeRun = runGateRef.current.current;
     if (!activeRun) return;
     runGateRef.current.stop();
+    if (activeRun.taskId) clearPSLockQueue(activeRun.taskId);
+    colorizeAbortRef.current?.abort();
+    colorizeAbortRef.current = null;
     engine.cancelAll();
     stopPolling(engineToken);
     if (activeRun.kind === "batch" && activeRun.taskId) {
@@ -823,6 +853,10 @@ export const useGenerationController = (
             : item
         )
       );
+    }
+    if (activeRun.kind === "colorize") {
+      setColorizeStatus("idle");
+      setColorizeError(null);
     }
     setStatus("idle");
     setProgress(0);
@@ -951,6 +985,99 @@ export const useGenerationController = (
       });
     }
   }, [commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pollProgress, pushToast, recordHistory, settings, stopPolling]);
+
+  const runColorize = useCallback(async () => {
+    if (runGateRef.current.current) return;
+    const requestToken = engineToken;
+    const requestEngine = requestToken.engine;
+    const taskId = generateId();
+    const { token: runToken } = runGateRef.current.begin("colorize", taskId);
+    const controller = new AbortController();
+    colorizeAbortRef.current = controller;
+    const isRunCurrent = () =>
+      isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken) && !controller.signal.aborted;
+    setStatus("running");
+    setError(null);
+    setColorizeStatus("preparing");
+    setColorizeError(null);
+    setProgressPreview(null);
+    setProgressText("正在准备去色图");
+    dismissToast();
+    let photoshopCommitted = false;
+    try {
+      const result = await executeColorizeWorkflow(
+        requestEngine,
+        {
+          prompt: colorizePrompt,
+          taskId,
+          timeoutMs: Math.max(5_000, settings.timeoutMaxSeconds * settings.timeoutMultiplier * 1_000),
+          signal: controller.signal,
+          isCurrent: isRunCurrent,
+          onPhase: (phase) => {
+            if (!isRunCurrent()) return;
+            setColorizeStatus(phase);
+            setProgressText(
+              phase === "preparing"
+                ? "正在准备去色图"
+                : phase === "generating"
+                  ? "闭源引擎正在重新上色"
+                  : "正在以颜色模式贴回"
+            );
+          }
+        },
+        COLORIZE_PHOTOSHOP_ADAPTER
+      );
+      if (!isRunCurrent()) return;
+      photoshopCommitted = true;
+      runGateRef.current.complete(runToken);
+      if (colorizeAbortRef.current === controller) colorizeAbortRef.current = null;
+      const resultDataUrl = toDataUrl(result.image);
+      setLastImages([resultDataUrl]);
+      setColorizeStatus("success");
+      setStatus("success");
+      setProgress(0);
+      setProgressPreview(null);
+      setProgressText(null);
+      pushToast("success", "智能调色完成");
+      colorizeHistoryTailCountRef.current += 1;
+      try {
+        await recordHistory({
+          provider: "gemini",
+          prompt: colorizePrompt.trim() || "AI 智能调色",
+          params: {
+            ...form,
+            positivePrompt: colorizePrompt.trim() || "AI 智能调色",
+            extraPrompt: ""
+          },
+          resultDataUrl
+        });
+      } finally {
+        colorizeHistoryTailCountRef.current -= 1;
+      }
+    } catch (caught) {
+      if (photoshopCommitted) return;
+      if (!isRunCurrent()) return;
+      const message = formatGenerationError(caught, "智能调色失败");
+      setColorizeStatus("error");
+      setColorizeError(message);
+      setStatus("error");
+      setError(message);
+      pushToast("error", message);
+    } finally {
+      if (!photoshopCommitted) {
+        const runIsCurrent = runGateRef.current.isCurrent(runToken);
+        if (colorizeAbortRef.current === controller) colorizeAbortRef.current = null;
+        if (runIsCurrent) {
+          runGateRef.current.complete(runToken);
+          commitIfCurrent(requestToken, () => {
+            setProgress(0);
+            setProgressPreview(null);
+            setProgressText(null);
+          });
+        }
+      }
+    }
+  }, [colorizePrompt, commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pushToast, recordHistory, settings]);
 
   const addToBatch = useCallback(async () => {
     const taskId = generateId();
@@ -1237,6 +1364,11 @@ export const useGenerationController = (
     removeFromBatch,
     clearBatch,
     runBatch,
+    colorizePrompt,
+    setColorizePrompt,
+    colorizeStatus,
+    colorizeError,
+    runColorize,
     toast,
     dismissToast,
     presets,

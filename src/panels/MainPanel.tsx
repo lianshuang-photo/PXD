@@ -79,6 +79,11 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     removeFromBatch,
     clearBatch,
     runBatch,
+    colorizePrompt,
+    setColorizePrompt,
+    colorizeStatus,
+    colorizeError,
+    runColorize,
     toast,
     dismissToast,
     presets,
@@ -883,6 +888,52 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                 label="追加提示词"
                 onChange={(value) => setFormValue("extraPrompt", value)}
               />
+
+              <hr style={{ margin: "0.5rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
+              <section aria-label="AI 智能调色">
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.35rem", marginBottom: "0.25rem" }}>
+                  <span style={{ fontSize: "0.7rem", fontWeight: 500, color: "var(--text-secondary)" }}>AI 智能调色</span>
+                  {colorizeStatus !== "idle" && (
+                    <span style={{ fontSize: "0.65rem", color: "var(--text-secondary)" }}>
+                      {{
+                        preparing: "准备选区",
+                        generating: "生成颜色",
+                        applying: "贴回图层",
+                        success: "已完成",
+                        error: "失败"
+                      }[colorizeStatus]}
+                    </span>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: "0.35rem", alignItems: "stretch" }}>
+                  <textarea
+                    className="input input--multiline"
+                    value={colorizePrompt}
+                    onChange={(event) => setColorizePrompt(event.target.value)}
+                    rows={2}
+                    placeholder="调色方向，例如：自然暖色、保留肤色"
+                    disabled={status === "running"}
+                    style={{ flex: 1, minWidth: 0 }}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn--primary"
+                    onClick={() => void runColorize()}
+                    disabled={status === "running" || settings.imageProvider !== "gemini"}
+                    title={settings.imageProvider === "gemini" ? "AI 智能调色" : "请先切换到闭源图像引擎"}
+                    style={{ minWidth: "4.5rem", alignSelf: "stretch" }}
+                  >
+                    {colorizeStatus === "preparing" || colorizeStatus === "generating" || colorizeStatus === "applying"
+                      ? "处理中"
+                      : "智能调色"}
+                  </button>
+                </div>
+                {colorizeError && (
+                  <div style={{ color: "var(--error-color)", fontSize: "0.7rem", marginTop: "0.25rem" }}>
+                    {colorizeError}
+                  </div>
+                )}
+              </section>
               
               {/* 翻译 */}
               <hr style={{ margin: "0.5rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />

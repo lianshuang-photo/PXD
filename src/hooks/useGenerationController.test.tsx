@@ -19,13 +19,18 @@ const boundary = vi.hoisted(() => ({
     cancelAll: vi.fn().mockReturnValue(0)
   },
   photoshop: {
+    deleteLayer: vi.fn(),
     closeDocument: vi.fn(),
     getSelectionPixels: vi.fn(),
     groupLayers: vi.fn(),
     hasActiveSelection: vi.fn(),
     moveActiveLayerToTop: vi.fn(),
     onBatchAddLayer: vi.fn(),
+    placeColorizedResult: vi.fn(),
     placeImageIntoSelection: vi.fn(),
+    prepareColorizeSource: vi.fn(),
+    restoreColorizeContext: vi.fn(),
+    validateColorizeSource: vi.fn(),
     setSelectionBounds: vi.fn(),
     switchToDocument: vi.fn()
   },
@@ -189,6 +194,18 @@ beforeEach(() => {
   boundary.photoshop.groupLayers.mockResolvedValue(undefined);
   boundary.photoshop.moveActiveLayerToTop.mockResolvedValue(undefined);
   boundary.photoshop.onBatchAddLayer.mockResolvedValue(null);
+  boundary.photoshop.prepareColorizeSource.mockResolvedValue({
+    dataUrl: "data:image/png;base64,GRAY",
+    documentId: 7,
+    documentWidth: 1200,
+    documentHeight: 800,
+    selectionBounds: { left: 10, top: 20, right: 650, bottom: 500 },
+    squareSize: 640
+  });
+  boundary.photoshop.placeColorizedResult.mockResolvedValue({ layerId: 301 });
+  boundary.photoshop.restoreColorizeContext.mockResolvedValue(undefined);
+  boundary.photoshop.validateColorizeSource.mockResolvedValue(undefined);
+  boundary.photoshop.deleteLayer.mockResolvedValue(undefined);
   boundary.photoshop.setSelectionBounds.mockResolvedValue(undefined);
   boundary.photoshop.switchToDocument.mockResolvedValue(undefined);
   boundary.storage.readJsonFile.mockResolvedValue(historyFile());
@@ -239,6 +256,169 @@ const trackedRender = (options: HarnessOptions = {}) => {
 };
 
 describe("useGenerationController generation history integration", () => {
+  it("records a successful colorization with its dedicated prompt", async () => {
+    const rendered = trackedRender({
+      initialSettings: { ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }
+    });
+    await flush();
+    act(() => rendered.getController().setColorizePrompt("natural warm palette"));
+
+    await act(async () => rendered.getController().runColorize());
+
+    expect(rendered.getController().colorizeStatus).toBe("success");
+    expect(rendered.getController().status).toBe("success");
+    expect(rendered.getController().history).toHaveLength(1);
+    expect(rendered.getController().history[0]).toMatchObject({
+      provider: "gemini",
+      prompt: "natural warm palette",
+      thumbnailDataUrl: "data:image/jpeg;base64,THUMB"
+    });
+    expect(boundary.photoshop.placeColorizedResult).toHaveBeenCalledWith(
+      expect.any(Object),
+      "data:image/png;base64,GEMINI_RESULT",
+      expect.any(Function),
+      expect.objectContaining({ taskId: expect.any(String) })
+    );
+  });
+
+  it("aborts colorization without recording a late result", async () => {
+    boundary.geminiClient.editImage.mockImplementation(({ signal }) => new Promise((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    }));
+    const rendered = trackedRender({
+      initialSettings: { ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }
+    });
+    await flush();
+
+    let running!: Promise<void>;
+    act(() => {
+      running = rendered.getController().runColorize();
+    });
+    await flush();
+    expect(rendered.getController().colorizeStatus).toBe("generating");
+
+    act(() => rendered.getController().stopGeneration());
+    await act(async () => running);
+
+    expect(rendered.getController().colorizeStatus).toBe("idle");
+    expect(rendered.getController().status).toBe("idle");
+    expect(rendered.getController().history).toHaveLength(0);
+    expect(boundary.photoshop.placeColorizedResult).not.toHaveBeenCalled();
+    expect(boundary.photoshop.restoreColorizeContext).toHaveBeenCalledOnce();
+  });
+
+  it("commits colorization success before history persistence can be stopped", async () => {
+    let finishHistoryWrite: (() => void) | undefined;
+    boundary.storage.writeJsonFile.mockImplementation(() => new Promise<void>((resolve) => {
+      finishHistoryWrite = resolve;
+    }));
+    const rendered = trackedRender({
+      initialSettings: { ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }
+    });
+    await flush();
+
+    let running!: Promise<void>;
+    act(() => {
+      running = rendered.getController().runColorize();
+    });
+    await flush();
+
+    expect(rendered.getController().colorizeStatus).toBe("success");
+    expect(rendered.getController().status).toBe("success");
+    act(() => rendered.getController().stopGeneration());
+    expect(rendered.getController().colorizeStatus).toBe("success");
+    expect(rendered.getController().status).toBe("success");
+    expect(boundary.photoshop.deleteLayer).not.toHaveBeenCalled();
+
+    finishHistoryWrite?.();
+    await act(async () => running);
+    expect(rendered.getController().history).toHaveLength(1);
+  });
+
+  it("does not let resolved colorize history tail overwrite a newer colorize run", async () => {
+    let finishHistoryWrite: (() => void) | undefined;
+    boundary.storage.writeJsonFile.mockImplementation(() => new Promise<void>((resolve) => {
+      finishHistoryWrite = resolve;
+    }));
+    boundary.geminiClient.editImage
+      .mockResolvedValueOnce("FIRST_COLOR")
+      .mockImplementation(({ signal }) => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }));
+    const rendered = trackedRender({
+      initialSettings: { ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }
+    });
+    await flush();
+
+    let firstRun!: Promise<void>;
+    act(() => {
+      firstRun = rendered.getController().runColorize();
+    });
+    await flush();
+    expect(rendered.getController().status).toBe("success");
+
+    let secondRun!: Promise<void>;
+    act(() => {
+      secondRun = rendered.getController().runColorize();
+    });
+    await flush();
+    expect(rendered.getController().status).toBe("running");
+    expect(rendered.getController().colorizeStatus).toBe("generating");
+    expect(rendered.getController().progressText).toBe("闭源引擎正在重新上色");
+    expect(rendered.getController().toast).toBeNull();
+
+    finishHistoryWrite?.();
+    await act(async () => firstRun);
+    expect(rendered.getController().status).toBe("running");
+    expect(rendered.getController().colorizeStatus).toBe("generating");
+    expect(rendered.getController().progressText).toBe("闭源引擎正在重新上色");
+    expect(rendered.getController().toast).toBeNull();
+
+    act(() => rendered.getController().stopGeneration());
+    await act(async () => secondRun);
+  });
+
+  it("does not let rejected colorize history tail overwrite a newer normal run", async () => {
+    let failHistoryWrite: ((error: Error) => void) | undefined;
+    boundary.storage.writeJsonFile.mockImplementation(() => new Promise<void>((_resolve, reject) => {
+      failHistoryWrite = reject;
+    }));
+    let rejectSecondGeneration: ((error: Error) => void) | undefined;
+    boundary.geminiClient.editImage
+      .mockResolvedValueOnce("FIRST_COLOR")
+      .mockImplementation(() => new Promise((_resolve, reject) => {
+        rejectSecondGeneration = reject;
+      }));
+    const rendered = trackedRender({
+      initialSettings: { ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }
+    });
+    await flush();
+
+    let firstRun!: Promise<void>;
+    act(() => {
+      firstRun = rendered.getController().runColorize();
+    });
+    await flush();
+
+    let secondRun!: Promise<void>;
+    act(() => {
+      secondRun = rendered.getController().runGeneration();
+    });
+    await flush();
+    expect(rendered.getController().status).toBe("running");
+    expect(rendered.getController().toast).toBeNull();
+
+    failHistoryWrite?.(new Error("disk full"));
+    await act(async () => firstRun);
+    expect(rendered.getController().status).toBe("running");
+    expect(rendered.getController().progressText).toBeNull();
+    expect(rendered.getController().toast).toBeNull();
+
+    act(() => rendered.getController().stopGeneration());
+    rejectSecondGeneration?.(new Error("stopped"));
+    await act(async () => secondRun);
+  });
+
   it("records a single generation and restores its provider and complete form", async () => {
     const rendered = trackedRender();
     await flush();

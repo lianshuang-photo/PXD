@@ -28,6 +28,15 @@ export interface MoveLayerOptions extends PhotoshopOperationOptions {
   layerId: number;
 }
 
+export interface ColorizeSource {
+  dataUrl: string;
+  documentId: number;
+  documentWidth: number;
+  documentHeight: number;
+  selectionBounds: SelectionBounds | null;
+  squareSize: number;
+}
+
 const DEFAULT_MODAL_OPTIONS = { commandName: "PXDUI" };
 
 const getPhotoshop = () => bridge.photoshop;
@@ -49,10 +58,15 @@ const executeAsModalUnlocked = <T>(
 
 const runTransaction = <T>(
   operation: () => Promise<T>,
-  options: PhotoshopOperationOptions = {}
+  options: PhotoshopOperationOptions = {},
+  onLateSettlement?: (settlement:
+    | { status: "fulfilled"; value: T }
+    | { status: "rejected"; reason: unknown }
+  ) => Promise<void> | void
 ): Promise<T> => runPSExclusive(operation, {
   taskId: options.taskId,
-  timeoutMs: options.timeoutMs
+  timeoutMs: options.timeoutMs,
+  onLateSettlement
 });
 
 const toBounds = (bounds: any): SelectionBounds => ({
@@ -818,3 +832,508 @@ export const switchToDocument = (
   docId: number,
   options: PhotoshopOperationOptions = {}
 ): Promise<void> => runTransaction(() => switchToDocumentUnlocked(docId), options);
+
+const pixelValue = (value: unknown) => {
+  if (typeof value === "number") return value;
+  if (value && typeof value === "object") {
+    const candidate = value as { value?: unknown; _value?: unknown; as?: (unit: string) => number };
+    if (typeof candidate.as === "function") return Number(candidate.as("px"));
+    return Number(candidate.value ?? candidate._value);
+  }
+  return Number(value);
+};
+
+const selectionBoundsEqual = (left: SelectionBounds, right: SelectionBounds) =>
+  left.left === right.left &&
+  left.top === right.top &&
+  left.right === right.right &&
+  left.bottom === right.bottom;
+
+const colorizeErrorMessage = (error: unknown, fallback: string) =>
+  error instanceof Error ? error.message : fallback;
+
+const appendColorizeCleanupError = (
+  error: unknown,
+  label: string,
+  cleanupError: unknown
+) => new Error(
+  `${colorizeErrorMessage(error, "智能调色贴回失败")}；${label}：${colorizeErrorMessage(cleanupError, "未知错误")}`
+);
+
+const activeColorizeLayerIdUnlocked = () => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const layerId = Number(
+    photoshop.app.activeDocument?.activeLayers?.[0]?.id ??
+    photoshop.app.activeDocument?.activeLayer?.id
+  );
+  return Number.isInteger(layerId) && layerId > 0 ? layerId : 0;
+};
+
+const colorizeSelectionDescriptor = (bounds: SelectionBounds | null) => ({
+  _obj: "set",
+  _target: [{ _ref: "channel", _property: "selection" }],
+  to: bounds
+    ? selectionToRectangle(bounds)
+    : { _enum: "ordinal", _value: "none" }
+});
+
+const setColorizeSelectionUnlocked = async (bounds: SelectionBounds | null) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  await executeAsModalUnlocked(photoshop, async () => {
+    await photoshop.app.batchPlay([colorizeSelectionDescriptor(bounds)], {});
+  }, { commandName: "恢复 PXD 调色选区" });
+};
+
+const validateColorizeSourceUnlocked = async (source: ColorizeSource) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const document = photoshop.app.activeDocument;
+  if (Number(document?.id) !== source.documentId) {
+    throw new Error("等待智能调色期间活动文档已切换，请重新发起调色");
+  }
+  const width = Math.round(pixelValue(document?.width));
+  const height = Math.round(pixelValue(document?.height));
+  if (width !== source.documentWidth || height !== source.documentHeight) {
+    throw new Error("等待智能调色期间画布尺寸已变化，请重新发起调色");
+  }
+};
+
+const restoreColorizeContextUnlocked = async (source: ColorizeSource) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  if (Number(photoshop.app.activeDocument?.id) !== source.documentId) {
+    await switchToDocumentUnlocked(source.documentId);
+  }
+  const currentBounds = photoshop.app.activeDocument?.selection?.bounds
+    ? toBounds(photoshop.app.activeDocument.selection.bounds)
+    : null;
+  const selectionMatches = source.selectionBounds
+    ? currentBounds !== null && selectionBoundsEqual(currentBounds, source.selectionBounds)
+    : currentBounds === null;
+  if (!selectionMatches) {
+    await setColorizeSelectionUnlocked(source.selectionBounds);
+  }
+};
+
+const canvasSizeDescriptor = (width: number, height: number) => ({
+  _obj: "canvasSize",
+  width: { _unit: "pixelsUnit", _value: width },
+  height: { _unit: "pixelsUnit", _value: height },
+  horizontal: { _enum: "horizontalLocation", _value: "center" },
+  vertical: { _enum: "verticalLocation", _value: "center" }
+});
+
+const expandCanvasToSquareUnlocked = async () => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const doc = photoshop.app.activeDocument;
+  const width = Math.round(pixelValue(doc.width));
+  const height = Math.round(pixelValue(doc.height));
+  const squareSize = Math.max(width, height);
+  if (width !== height) {
+    await executeAsModalUnlocked(photoshop, async () => {
+      await photoshop.app.batchPlay([canvasSizeDescriptor(squareSize, squareSize)], {});
+    }, { commandName: "扩展 PXD 调色画布" });
+  }
+  return { width, height, squareSize };
+};
+
+export const expandCanvasToSquare = (
+  options: PhotoshopOperationOptions = {}
+) => runTransaction(expandCanvasToSquareUnlocked, options);
+
+const addBlackWhiteAdjustmentLayerUnlocked = async () => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  return await executeAsModalUnlocked(photoshop, async () => {
+    const result = await photoshop.app.batchPlay([{
+      _obj: "make",
+      _target: [{ _ref: "adjustmentLayer" }],
+      using: {
+        _obj: "adjustmentLayer",
+        name: "PXD 临时去色",
+        type: { _obj: "blackAndWhite" }
+      }
+    }], {});
+    const directId = Number(result?.[0]?.layerID ?? result?.[0]?.layerId);
+    if (Number.isFinite(directId) && directId > 0) return directId;
+    const info = await photoshop.app.batchPlay([{
+      _obj: "get",
+      _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }]
+    }], { synchronousExecution: true });
+    const layerId = Number(info?.[0]?.layerID ?? info?.[0]?.layerId);
+    if (!Number.isFinite(layerId) || layerId <= 0) throw new Error("Photoshop 未返回黑白调整层 ID");
+    return layerId;
+  }, { commandName: "添加 PXD 黑白调整层" });
+};
+
+export const addBlackWhiteAdjustmentLayer = (
+  options: PhotoshopOperationOptions = {}
+) => runTransaction(addBlackWhiteAdjustmentLayerUnlocked, options);
+
+const deleteLayerUnlocked = async (layerId: number) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  await executeAsModalUnlocked(photoshop, async () => {
+    await photoshop.app.batchPlay([{
+      _obj: "delete",
+      _target: [{ _ref: "layer", _id: layerId }]
+    }], {});
+  }, { commandName: "删除 PXD 临时图层" });
+};
+
+export const deleteLayer = (
+  layerId: number,
+  options: PhotoshopOperationOptions = {}
+) => runTransaction(() => deleteLayerUnlocked(layerId), options);
+
+const setLayerBlendModeUnlocked = async (layerId: number, mode: "color") => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  await executeAsModalUnlocked(photoshop, async () => {
+    await photoshop.app.batchPlay([{
+      _obj: "set",
+      _target: [{ _ref: "layer", _id: layerId }],
+      to: {
+        _obj: "layer",
+        name: "AI 智能调色",
+        mode: { _enum: "blendMode", _value: mode }
+      }
+    }], {});
+  }, { commandName: "设置 PXD 调色混合模式" });
+};
+
+export const setLayerBlendMode = (
+  layerId: number,
+  mode: "color" = "color",
+  options: PhotoshopOperationOptions = {}
+) => runTransaction(() => setLayerBlendModeUnlocked(layerId, mode), options);
+
+const captureDocumentPixelsUnlocked = async (
+  documentId: number,
+  width: number,
+  height: number
+) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  return await executeAsModalUnlocked(photoshop, async () => {
+    const pixels = await photoshop.imaging.getPixels({
+      documentID: documentId,
+      sourceBounds: { left: 0, top: 0, right: width, bottom: height },
+      applyAlpha: true,
+      componentSize: 8,
+      colorProfile: "sRGB IEC61966-2.1"
+    });
+    try {
+      return await photoshop.imaging.encodeImageData({ imageData: pixels.imageData, base64: true });
+    } finally {
+      pixels.imageData.dispose?.();
+    }
+  }, { commandName: "截取 PXD 去色图" });
+};
+
+const prepareColorizeSourceUnlocked = async (): Promise<ColorizeSource> => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const originalDocument = photoshop.app.activeDocument;
+  const documentId = Number(originalDocument?.id);
+  const documentWidth = Math.round(pixelValue(originalDocument?.width));
+  const documentHeight = Math.round(pixelValue(originalDocument?.height));
+  const hasSelection = await hasActiveSelectionUnlocked();
+  const selection = hasSelection ? await getSelectionPixelsUnlocked() : null;
+  if (hasSelection && !selection) throw new Error("无法读取当前 Photoshop 选区");
+  const sourceDataUrl = selection?.dataUrl ?? `data:image/png;base64,${await captureDocumentPixelsUnlocked(
+    documentId,
+    documentWidth,
+    documentHeight
+  )}`;
+  const sourceWidth = selection?.width ?? documentWidth;
+  const sourceHeight = selection?.height ?? documentHeight;
+  let temporaryDocument: GeneratedDocumentSession | null = null;
+  let adjustmentLayerId: number | null = null;
+  try {
+    temporaryDocument = await createGeneratedDocumentUnlocked(sourceWidth, sourceHeight, "PXD 调色预处理");
+    await placeImageIntoDocumentUnlocked(sourceDataUrl, 1, temporaryDocument.documentId);
+    const { squareSize } = await expandCanvasToSquareUnlocked();
+    adjustmentLayerId = await addBlackWhiteAdjustmentLayerUnlocked();
+    const encoded = await captureDocumentPixelsUnlocked(temporaryDocument.documentId, squareSize, squareSize);
+    await deleteLayerUnlocked(adjustmentLayerId);
+    adjustmentLayerId = null;
+    return {
+      dataUrl: `data:image/png;base64,${encoded}`,
+      documentId,
+      documentWidth,
+      documentHeight,
+      selectionBounds: selection?.selectionBounds ?? null,
+      squareSize
+    };
+  } finally {
+    let cleanupError: unknown;
+    if (adjustmentLayerId) {
+      try {
+        await deleteLayerUnlocked(adjustmentLayerId);
+      } catch (error) {
+        cleanupError = error;
+      }
+    }
+    if (temporaryDocument) {
+      try {
+        await closeGeneratedDocumentUnlocked(temporaryDocument.documentId, documentId);
+      } catch (error) {
+        cleanupError ??= error;
+      }
+    }
+    try {
+      if (Number(photoshop.app.activeDocument?.id) !== documentId) {
+        await switchToDocumentUnlocked(documentId);
+      }
+    } catch (error) {
+      cleanupError ??= error;
+    }
+    if (cleanupError) throw cleanupError;
+  }
+};
+
+export const prepareColorizeSource = (
+  options: PhotoshopOperationOptions = {}
+): Promise<ColorizeSource> => runTransaction(prepareColorizeSourceUnlocked, options);
+
+export const validateColorizeSource = (
+  source: ColorizeSource,
+  options: PhotoshopOperationOptions = {}
+): Promise<void> => runTransaction(() => validateColorizeSourceUnlocked(source), options);
+
+const placeColorizedResultUnlocked = async (
+  source: ColorizeSource,
+  dataUrl: string,
+  isCurrent: () => boolean
+) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  await validateColorizeSourceUnlocked(source);
+  const resultBase64 = dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
+  const token = await createTempTokenFromBase64(resultBase64, "pxd-colorized.png");
+  const previousLayerId = activeColorizeLayerIdUnlocked();
+  let layerId = 0;
+  const squareCanvas = Math.max(source.documentWidth, source.documentHeight);
+  const offsetX = (squareCanvas - source.documentWidth) / 2;
+  const offsetY = (squareCanvas - source.documentHeight) / 2;
+  const sourceRegion = source.selectionBounds ?? {
+    left: 0,
+    top: 0,
+    right: source.documentWidth,
+    bottom: source.documentHeight
+  };
+  const shiftedSelection = {
+    left: sourceRegion.left + offsetX,
+    top: sourceRegion.top + offsetY,
+    right: sourceRegion.right + offsetX,
+    bottom: sourceRegion.bottom + offsetY
+  };
+  const selectionWidth = shiftedSelection.right - shiftedSelection.left;
+  const selectionHeight = shiftedSelection.bottom - shiftedSelection.top;
+  const targetSize = Math.max(selectionWidth, selectionHeight);
+  try {
+    await photoshop.core.executeAsModal(async (executionContext: any) => {
+      const suspension = await executionContext.hostControl.suspendHistory({
+        documentID: source.documentId,
+        name: "AI 智能调色"
+      });
+      let operationError: unknown;
+      try {
+        if (!isCurrent()) throw new Error("COLORIZE_CANCELLED");
+        if (source.documentWidth !== source.documentHeight) {
+          await photoshop.app.batchPlay([canvasSizeDescriptor(squareCanvas, squareCanvas)], {});
+        }
+        const placeResult = await photoshop.app.batchPlay([{
+          ID: source.documentId,
+          _obj: "placeEvent",
+          freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
+          null: { _kind: "local", _path: token },
+          offset: {
+            _obj: "offset",
+            horizontal: { _unit: "pixelsUnit", _value: 0 },
+            vertical: { _unit: "pixelsUnit", _value: 0 }
+          }
+        }], {});
+        const placedLayerId = Number(placeResult?.[0]?.layerID ?? placeResult?.[0]?.layerId);
+        if (Number.isInteger(placedLayerId) && placedLayerId > 0) layerId = placedLayerId;
+        const activeLayerId = activeColorizeLayerIdUnlocked();
+        if (activeLayerId && activeLayerId !== previousLayerId) layerId = activeLayerId;
+
+        const info = await photoshop.app.batchPlay([{
+          _obj: "get",
+          _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }]
+        }], { synchronousExecution: true });
+        const layer = info[0] ?? {};
+        const reportedLayerId = Number(layer.layerID ?? layer.layerId);
+        if (Number.isInteger(reportedLayerId) && reportedLayerId > 0 && reportedLayerId !== previousLayerId) {
+          layerId = reportedLayerId;
+        }
+        if (!layerId || layerId === previousLayerId) {
+          throw new Error("Photoshop 未返回智能调色图层 ID");
+        }
+        const bounds = layer.bounds ?? {};
+        const left = pixelValue(bounds.left);
+        const top = pixelValue(bounds.top);
+        const right = pixelValue(bounds.right);
+        const bottom = pixelValue(bounds.bottom);
+        if (![left, top, right, bottom].every(Number.isFinite) || right <= left || bottom <= top) {
+          throw new Error("Photoshop 未返回有效的智能调色图层范围");
+        }
+        const layerWidth = right - left;
+        const layerHeight = bottom - top;
+        const targetCenterX = (shiftedSelection.left + shiftedSelection.right) / 2;
+        const targetCenterY = (shiftedSelection.top + shiftedSelection.bottom) / 2;
+        await photoshop.app.batchPlay([{
+          _obj: "transform",
+          _target: [{ _ref: "layer", _id: layerId }],
+          freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
+          offset: {
+            _obj: "offset",
+            horizontal: { _unit: "pixelsUnit", _value: targetCenterX - (left + right) / 2 },
+            vertical: { _unit: "pixelsUnit", _value: targetCenterY - (top + bottom) / 2 }
+          },
+          width: { _unit: "percentUnit", _value: targetSize / layerWidth * 100 },
+          height: { _unit: "percentUnit", _value: targetSize / layerHeight * 100 }
+        }, {
+          _obj: "set",
+          _target: [{ _ref: "channel", _property: "selection" }],
+          to: selectionToRectangle(shiftedSelection)
+        }, {
+          _obj: "make",
+          new: { _class: "channel" },
+          at: { _ref: "channel", _enum: "channel", _value: "mask" },
+          using: { _enum: "userMaskEnabled", _value: "revealSelection" }
+        }, {
+          _obj: "set",
+          _target: [{ _ref: "layer", _id: layerId }],
+          to: {
+            _obj: "layer",
+            name: "AI 智能调色",
+            mode: { _enum: "blendMode", _value: "color" }
+          }
+        }], {});
+        if (!isCurrent()) throw new Error("COLORIZE_CANCELLED");
+        if (source.documentWidth !== source.documentHeight) {
+          await photoshop.app.batchPlay([canvasSizeDescriptor(source.documentWidth, source.documentHeight)], {});
+        }
+        await photoshop.app.batchPlay([colorizeSelectionDescriptor(source.selectionBounds)], {});
+      } catch (error) {
+        operationError = error;
+        if (!layerId) {
+          const activeLayerId = activeColorizeLayerIdUnlocked();
+          if (activeLayerId && activeLayerId !== previousLayerId) layerId = activeLayerId;
+        }
+        if (layerId) {
+          try {
+            await photoshop.app.batchPlay([{
+              _obj: "delete",
+              _target: [{ _ref: "layer", _id: layerId }]
+            }], {});
+            layerId = 0;
+          } catch (caught) {
+            operationError = appendColorizeCleanupError(operationError, "自动清理失败", caught);
+          }
+        }
+        if (source.documentWidth !== source.documentHeight) {
+          await photoshop.app.batchPlay([canvasSizeDescriptor(source.documentWidth, source.documentHeight)], {})
+            .catch((caught) => {
+              operationError = appendColorizeCleanupError(operationError, "画布恢复失败", caught);
+            });
+        }
+        await photoshop.app.batchPlay([colorizeSelectionDescriptor(source.selectionBounds)], {}).catch((caught) => {
+          operationError = appendColorizeCleanupError(operationError, "选区恢复失败", caught);
+        });
+      } finally {
+        try {
+          await executionContext.hostControl.resumeHistory(suspension);
+        } catch (resumeError) {
+          operationError = operationError
+            ? appendColorizeCleanupError(operationError, "历史记录恢复失败", resumeError)
+            : resumeError;
+        }
+      }
+      if (operationError) throw operationError;
+    }, { commandName: "AI 智能调色贴回" });
+  } catch (error) {
+    let cleanupError: unknown;
+    if (!layerId) {
+      const activeLayerId = activeColorizeLayerIdUnlocked();
+      if (activeLayerId && activeLayerId !== previousLayerId) layerId = activeLayerId;
+    }
+    if (layerId) {
+      try {
+        await deleteLayerUnlocked(layerId);
+        layerId = 0;
+      } catch (caught) {
+        cleanupError = caught;
+      }
+    }
+    try {
+      if (Number(photoshop.app.activeDocument?.id) !== source.documentId) {
+        await switchToDocumentUnlocked(source.documentId);
+      }
+      if (source.documentWidth !== source.documentHeight) {
+        const activeDocument = photoshop.app.activeDocument;
+        const width = Math.round(pixelValue(activeDocument?.width));
+        const height = Math.round(pixelValue(activeDocument?.height));
+        if (width !== source.documentWidth || height !== source.documentHeight) {
+          await executeAsModalUnlocked(photoshop, async () => {
+            await photoshop.app.batchPlay([canvasSizeDescriptor(source.documentWidth, source.documentHeight)], {});
+          }, { commandName: "恢复 PXD 调色画布" });
+        }
+      }
+      await restoreColorizeContextUnlocked(source);
+    } catch (caught) {
+      cleanupError = cleanupError
+        ? appendColorizeCleanupError(cleanupError, "上下文恢复失败", caught)
+        : caught;
+    }
+    if (cleanupError) {
+      const combined = appendColorizeCleanupError(error, "自动清理失败", cleanupError) as Error & {
+        placedLayerId?: number;
+      };
+      if (layerId > 0) combined.placedLayerId = layerId;
+      throw combined;
+    }
+    throw error;
+  }
+  return { layerId };
+};
+
+const cleanupLateColorizedResultUnlocked = async (
+  source: ColorizeSource,
+  layerId: number
+) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  if (Number(photoshop.app.activeDocument?.id) !== source.documentId) {
+    await switchToDocumentUnlocked(source.documentId);
+  }
+  if (layerId > 0) await deleteLayerUnlocked(layerId);
+  const activeDocument = photoshop.app.activeDocument;
+  const width = Math.round(pixelValue(activeDocument?.width));
+  const height = Math.round(pixelValue(activeDocument?.height));
+  if (width !== source.documentWidth || height !== source.documentHeight) {
+    await executeAsModalUnlocked(photoshop, async () => {
+      await photoshop.app.batchPlay([canvasSizeDescriptor(source.documentWidth, source.documentHeight)], {});
+    }, { commandName: "清理超时 PXD 调色画布" });
+  }
+  await restoreColorizeContextUnlocked(source);
+};
+
+export const placeColorizedResult = (
+  source: ColorizeSource,
+  dataUrl: string,
+  isCurrent: () => boolean,
+  options: PhotoshopOperationOptions = {}
+) => runTransaction(
+  () => placeColorizedResultUnlocked(source, dataUrl, isCurrent),
+  options,
+  async (settlement) => {
+    const layerId = settlement.status === "fulfilled"
+      ? settlement.value.layerId
+      : Number(
+          settlement.reason && typeof settlement.reason === "object"
+            ? (settlement.reason as { placedLayerId?: unknown }).placedLayerId
+            : 0
+        );
+    await cleanupLateColorizedResultUnlocked(source, Number.isInteger(layerId) ? layerId : 0);
+  }
+);
+
+export const restoreColorizeContext = (
+  source: ColorizeSource,
+  options: PhotoshopOperationOptions = {}
+) => runTransaction(() => restoreColorizeContextUnlocked(source), options);

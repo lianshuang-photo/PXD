@@ -99,3 +99,29 @@ test("clearPSLockQueue only rejects pending entries for the selected task", asyn
   const releaseRetained = await retained;
   releaseRetained();
 });
+
+test("a failed late cleanup keeps the Photoshop circuit open", async () => {
+  let settleOperation: (() => void) | undefined;
+  const operation = new Promise<void>((resolve) => {
+    settleOperation = resolve;
+  });
+  const timedOut = runPSExclusive(() => operation, {
+    taskId: "cleanup-failure",
+    timeoutMs: 20,
+    onLateSettlement: () => {
+      throw new Error("cleanup failed");
+    }
+  });
+
+  await expect(timedOut).rejects.toBeInstanceOf(PSOperationTimeoutError);
+  settleOperation?.();
+  await delay(20);
+
+  await expect(runPSExclusive(() => "must stay blocked", {
+    taskId: "after-cleanup-failure",
+    timeoutMs: 1_000
+  })).rejects.toMatchObject({
+    name: PSCircuitOpenError.name,
+    blockingTaskId: "cleanup-failure"
+  });
+});
