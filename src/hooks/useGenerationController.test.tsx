@@ -19,12 +19,14 @@ const boundary = vi.hoisted(() => ({
     cancelAll: vi.fn().mockReturnValue(0)
   },
   photoshop: {
+    captureAtlasRegion: vi.fn(),
     closeDocument: vi.fn(),
     getSelectionPixels: vi.fn(),
     groupLayers: vi.fn(),
     hasActiveSelection: vi.fn(),
     moveActiveLayerToTop: vi.fn(),
     onBatchAddLayer: vi.fn(),
+    placeMultiRegionAtlas: vi.fn(),
     placeImageIntoSelection: vi.fn(),
     setSelectionBounds: vi.fn(),
     switchToDocument: vi.fn()
@@ -33,6 +35,7 @@ const boundary = vi.hoisted(() => ({
     readJsonFile: vi.fn(),
     writeJsonFile: vi.fn()
   },
+  atlasWorkflow: vi.fn(),
   thumbnailDecodeFails: false
 }));
 
@@ -47,6 +50,11 @@ vi.mock("../services/imageModelClient", async (importOriginal) => ({
 }));
 
 vi.mock("../services/photoshop", () => boundary.photoshop);
+
+vi.mock("../services/multiRegionAtlasWorkflow", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/multiRegionAtlasWorkflow")>()),
+  executeMultiRegionAtlasWorkflow: boundary.atlasWorkflow
+}));
 
 vi.mock("../services/presets", () => ({
   deletePresetFile: vi.fn(),
@@ -184,6 +192,28 @@ beforeEach(() => {
   boundary.forgeClient.img2img.mockResolvedValue({ images: ["FORGE_RESULT"] });
   boundary.geminiClient.editImage.mockResolvedValue("GEMINI_RESULT");
   boundary.photoshop.getSelectionPixels.mockResolvedValue(selection(""));
+  boundary.photoshop.captureAtlasRegion.mockResolvedValue({
+    id: "atlas-one",
+    documentId: 7,
+    bounds: { left: 10, top: 20, right: 650, bottom: 500 },
+    sourceWidth: 640,
+    sourceHeight: 480,
+    imageWidth: 640,
+    imageHeight: 480,
+    dataUrl: "data:image/png;base64,INPUT",
+    encodedBytes: 5
+  });
+  boundary.photoshop.placeMultiRegionAtlas.mockResolvedValue({ layerIds: [101], groupId: 50 });
+  boundary.atlasWorkflow.mockImplementation(async ({ regions }: { regions: Array<{ id: string }> }) => ({
+    parts: regions.map((region) => ({
+      regionId: region.id,
+      dataUrl: `data:image/png;base64,${region.id}`,
+      width: 640,
+      height: 480
+    })),
+    layerIds: regions.map((_region, index) => 101 + index),
+    groupId: 50
+  }));
   boundary.photoshop.hasActiveSelection.mockResolvedValue(true);
   boundary.photoshop.placeImageIntoSelection.mockResolvedValue({ layerID: 101 });
   boundary.photoshop.groupLayers.mockResolvedValue(undefined);
@@ -237,6 +267,104 @@ const trackedRender = (options: HarnessOptions = {}) => {
   renderers.push(rendered.renderer);
   return rendered;
 };
+
+describe("useGenerationController multi-region atlas", () => {
+  const geminiSettings: AppSettings = {
+    ...DEFAULT_SETTINGS,
+    imageProvider: "gemini",
+    offlineMode: false,
+    geminiApiKey: "key"
+  };
+
+  it("collects unique same-document selections and commits split previews plus history", async () => {
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    act(() => rendered.getController().setFormValue("positivePrompt", "same treatment"));
+
+    await act(async () => rendered.getController().addAtlasRegion());
+    await act(async () => rendered.getController().addAtlasRegion());
+    expect(rendered.getController().atlasRegions).toHaveLength(1);
+    expect(rendered.getController().toast).toMatchObject({ type: "warning" });
+
+    boundary.photoshop.captureAtlasRegion.mockResolvedValueOnce({
+      ...rendered.getController().atlasRegions[0],
+      id: "atlas-two",
+      bounds: { left: 700, top: 20, right: 1000, bottom: 420 },
+      sourceWidth: 300,
+      sourceHeight: 400,
+      imageWidth: 300,
+      imageHeight: 400
+    });
+    await act(async () => rendered.getController().addAtlasRegion());
+    await act(async () => rendered.getController().runMultiRegionAtlas());
+
+    expect(boundary.atlasWorkflow).toHaveBeenCalledOnce();
+    expect(rendered.getController().status).toBe("success");
+    expect(rendered.getController().atlasRunning).toBe(false);
+    expect(rendered.getController().lastImages).toHaveLength(2);
+    expect(rendered.getController().history).toHaveLength(1);
+  });
+
+  it("serializes rapid add-region requests so the same selection cannot be captured twice", async () => {
+    let resolveCapture!: (value: any) => void;
+    boundary.photoshop.captureAtlasRegion.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveCapture = resolve;
+    }));
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = rendered.getController().addAtlasRegion();
+      second = rendered.getController().addAtlasRegion();
+    });
+    expect(boundary.photoshop.captureAtlasRegion).toHaveBeenCalledOnce();
+    resolveCapture({
+      id: "atlas-one",
+      documentId: 7,
+      bounds: { left: 10, top: 20, right: 650, bottom: 500 },
+      sourceWidth: 640,
+      sourceHeight: 480,
+      imageWidth: 640,
+      imageHeight: 480,
+      dataUrl: "data:image/png;base64,INPUT",
+      encodedBytes: 5
+    });
+    await act(async () => {
+      await Promise.all([first, second]);
+    });
+    expect(rendered.getController().atlasRegions).toHaveLength(1);
+  });
+
+  it("keeps the settlement gate closed until cancellation cleanup finishes", async () => {
+    let rejectWorkflow!: (error: Error) => void;
+    boundary.atlasWorkflow.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      rejectWorkflow = reject;
+    }));
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    act(() => rendered.getController().setFormValue("positivePrompt", "same treatment"));
+    await act(async () => rendered.getController().addAtlasRegion());
+
+    let run!: Promise<void>;
+    act(() => {
+      run = rendered.getController().runMultiRegionAtlas();
+    });
+    await vi.waitFor(() => expect(boundary.atlasWorkflow).toHaveBeenCalledOnce());
+    act(() => rendered.getController().stopGeneration());
+    expect(rendered.getController().atlasStopping).toBe(true);
+    expect(rendered.getController().status).toBe("running");
+
+    await act(async () => rendered.getController().runGeneration());
+    expect(boundary.photoshop.getSelectionPixels).not.toHaveBeenCalled();
+
+    rejectWorkflow(Object.assign(new Error("cancelled"), { code: "ENGINE_STALE" }));
+    await act(async () => run);
+    expect(rendered.getController().atlasStopping).toBe(false);
+    expect(rendered.getController().status).toBe("idle");
+  });
+});
 
 describe("useGenerationController generation history integration", () => {
   it("records a single generation and restores its provider and complete form", async () => {
