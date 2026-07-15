@@ -17,7 +17,8 @@ import {
   groupLayers,
   placeColorizedResult,
   prepareColorizeSource,
-  restoreColorizeContext
+  restoreColorizeContext,
+  validateColorizeSource
 } from "./photoshop";
 
 beforeEach(() => {
@@ -252,7 +253,15 @@ describe("AI colorization Photoshop operations", () => {
       }
     };
     boundary.bridge.photoshop = {
-      app: { batchPlay, activeDocument: { id: 7 } },
+      app: {
+        batchPlay,
+        activeDocument: {
+          id: 7,
+          width: 1200,
+          height: 800,
+          selection: { bounds: { left: 100, top: 80, right: 500, bottom: 380 } }
+        }
+      },
       core: { executeAsModal }
     };
     const source = {
@@ -429,5 +438,159 @@ describe("AI colorization Photoshop operations", () => {
     await restoreColorizeContext(colorizeSource);
 
     expect(batchPlay).not.toHaveBeenCalled();
+  });
+
+  it("captures and restores the whole canvas when there is no selection", async () => {
+    const originalDocument = { id: 7, width: 300, height: 200 };
+    const temporaryDocument = { id: 99, width: 300, height: 200 };
+    const app: any = { activeDocument: originalDocument };
+    const createDocument = vi.fn().mockImplementation(async () => {
+      app.activeDocument = temporaryDocument;
+      return temporaryDocument;
+    });
+    const batchPlay = vi.fn().mockImplementation(async (descriptors) => {
+      const descriptor = descriptors[0];
+      if (descriptor?._obj === "get") {
+        return [{ layerID: 51, bounds: { left: 0, top: 0, right: 300, bottom: 200 } }];
+      }
+      if (descriptor?._obj === "make" && descriptor?._target?.[0]?._ref === "adjustmentLayer") {
+        return [{ layerID: 61 }];
+      }
+      if (descriptor?._obj === "select" && descriptor?._target?.[0]?._ref === "document") {
+        app.activeDocument = originalDocument;
+      }
+      return [];
+    });
+    const encodeImageData = vi.fn()
+      .mockResolvedValueOnce("FULL")
+      .mockResolvedValueOnce("GRAY");
+    boundary.bridge.uxp = colorizeUxp();
+    boundary.bridge.photoshop = {
+      app: Object.assign(app, { createDocument, batchPlay }),
+      imaging: {
+        getPixels: vi.fn().mockResolvedValue({ imageData: { dispose: vi.fn() } }),
+        encodeImageData
+      },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+
+    await expect(prepareColorizeSource()).resolves.toMatchObject({
+      dataUrl: "data:image/png;base64,GRAY",
+      documentId: 7,
+      documentWidth: 300,
+      documentHeight: 200,
+      selectionBounds: null,
+      squareSize: 300
+    });
+    expect(createDocument).toHaveBeenCalledWith(expect.objectContaining({ width: 300, height: 200 }));
+    expect(boundary.bridge.photoshop.imaging.getPixels).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      documentID: 7,
+      sourceBounds: { left: 0, top: 0, right: 300, bottom: 200 }
+    }));
+  });
+
+  it("places whole-canvas colorization and restores an empty selection", async () => {
+    const batchPlay = vi.fn().mockImplementation(async (descriptors) => {
+      if (descriptors[0]?._obj === "get") {
+        return [{ layerID: 96, bounds: { left: 0, top: 0, right: 300, bottom: 300 } }];
+      }
+      return [];
+    });
+    boundary.bridge.uxp = colorizeUxp();
+    boundary.bridge.photoshop = {
+      app: { batchPlay, activeDocument: { id: 7, width: 300, height: 200 } },
+      core: {
+        executeAsModal: vi.fn().mockImplementation(async (callback) => await callback({
+          hostControl: {
+            suspendHistory: vi.fn().mockResolvedValue("history-1"),
+            resumeHistory: vi.fn().mockResolvedValue(undefined)
+          }
+        }))
+      }
+    };
+    const source = {
+      ...colorizeSource,
+      documentWidth: 300,
+      documentHeight: 200,
+      selectionBounds: null,
+      squareSize: 300
+    };
+
+    await expect(placeColorizedResult(source, "data:image/png;base64,Q09MT1I=", () => true))
+      .resolves.toEqual({ layerId: 96 });
+
+    const descriptors = batchPlay.mock.calls.flatMap(([items]) => items);
+    const selectionRestores = descriptors.filter((descriptor) =>
+      descriptor._obj === "set" && descriptor._target?.[0]?._property === "selection"
+    );
+    expect(selectionRestores[selectionRestores.length - 1]?.to).toEqual({
+      _enum: "ordinal",
+      _value: "none"
+    });
+  });
+
+  it("rejects resized source documents before making Photoshop changes", async () => {
+    const batchPlay = vi.fn();
+    boundary.bridge.photoshop = {
+      app: { batchPlay, activeDocument: { id: 7, width: 1000, height: 800 } },
+      core: { executeAsModal: vi.fn() }
+    };
+
+    await expect(validateColorizeSource(colorizeSource)).rejects.toThrow("画布尺寸已变化");
+    expect(batchPlay).not.toHaveBeenCalled();
+    expect(boundary.bridge.photoshop.core.executeAsModal).not.toHaveBeenCalled();
+  });
+
+  it("deletes a color layer that commits after the caller times out", async () => {
+    let finishResume: (() => void) | undefined;
+    const resumeHistory = vi.fn().mockImplementation(() => new Promise<void>((resolve) => {
+      finishResume = resolve;
+    }));
+    const batchPlay = vi.fn().mockImplementation(async (descriptors) => {
+      if (descriptors[0]?._obj === "placeEvent") return [{ layerID: 97 }];
+      if (descriptors[0]?._obj === "get") {
+        return [{ layerID: 97, bounds: { left: 400, top: 400, right: 800, bottom: 800 } }];
+      }
+      return [];
+    });
+    boundary.bridge.uxp = colorizeUxp();
+    boundary.bridge.photoshop = {
+      app: {
+        batchPlay,
+        activeDocument: {
+          id: 7,
+          width: 1200,
+          height: 800,
+          selection: { bounds: { left: 100, top: 80, right: 500, bottom: 380 } }
+        }
+      },
+      core: {
+        executeAsModal: vi.fn().mockImplementation(async (callback) => await callback({
+          hostControl: {
+            suspendHistory: vi.fn().mockResolvedValue("history-1"),
+            resumeHistory
+          }
+        }))
+      }
+    };
+
+    const placement = placeColorizedResult(
+      colorizeSource,
+      "data:image/png;base64,Q09MT1I=",
+      () => true,
+      { taskId: "late-colorize", timeoutMs: 20 }
+    );
+    await expect(placement).rejects.toThrow("timed out");
+    await expect(validateColorizeSource(colorizeSource, { taskId: "blocked-after-timeout" }))
+      .rejects.toThrow("circuit is open");
+
+    finishResume?.();
+    await vi.waitFor(() => expect(batchPlay).toHaveBeenCalledWith([{
+      _obj: "delete",
+      _target: [{ _ref: "layer", _id: 97 }]
+    }], {}));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await expect(validateColorizeSource(colorizeSource, { taskId: "after-late-cleanup" }))
+      .resolves.toBeUndefined();
   });
 });

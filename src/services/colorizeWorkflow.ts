@@ -17,6 +17,7 @@ export interface ColorizeWorkflowTask {
 
 export interface ColorizeWorkflowAdapters {
   prepare: (taskId: string) => Promise<ColorizeSource>;
+  validate: (source: ColorizeSource, taskId: string) => Promise<void>;
   apply: (
     source: ColorizeSource,
     resultDataUrl: string,
@@ -92,6 +93,8 @@ export const executeColorizeWorkflow = async (
         engine.provider
       );
     }
+    await adapters.validate(source, task.taskId);
+    assertCurrent(engine, task);
     task.onPhase?.("applying");
     const placement = await adapters.apply(
       source,

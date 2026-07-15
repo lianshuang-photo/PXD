@@ -22,6 +22,7 @@ const engine = (provider: "forge" | "gemini", generate = vi.fn().mockResolvedVal
 
 const adapters = (overrides: Partial<ColorizeWorkflowAdapters> = {}): ColorizeWorkflowAdapters => ({
   prepare: vi.fn().mockResolvedValue(source),
+  validate: vi.fn().mockResolvedValue(undefined),
   apply: vi.fn().mockResolvedValue({ layerId: 91 }),
   rollback: vi.fn().mockResolvedValue(undefined),
   restore: vi.fn().mockResolvedValue(undefined),
@@ -61,6 +62,7 @@ describe("executeColorizeWorkflow", () => {
       "colorize-1",
       expect.any(Function)
     );
+    expect(photoshop.validate).toHaveBeenCalledWith(source, "colorize-1");
     expect(photoshop.restore).toHaveBeenCalledWith(source, "colorize-1");
     expect(result).toEqual({ image: "COLOR", layerId: 91, source });
   });
@@ -86,6 +88,18 @@ describe("executeColorizeWorkflow", () => {
       task({ isCurrent: () => current }),
       photoshop
     )).rejects.toMatchObject({ code: "CANCELLED" });
+
+    expect(photoshop.apply).not.toHaveBeenCalled();
+    expect(photoshop.restore).toHaveBeenCalledWith(source, "colorize-1");
+  });
+
+  it("does not place when the canvas changes while Gemini is running", async () => {
+    const photoshop = adapters({
+      validate: vi.fn().mockRejectedValue(new Error("等待智能调色期间画布尺寸已变化"))
+    });
+
+    await expect(executeColorizeWorkflow(engine("gemini"), task(), photoshop))
+      .rejects.toThrow("画布尺寸已变化");
 
     expect(photoshop.apply).not.toHaveBeenCalled();
     expect(photoshop.restore).toHaveBeenCalledWith(source, "colorize-1");

@@ -17,6 +17,7 @@ const serviceMocks = vi.hoisted(() => ({
   prepareColorizeSource: vi.fn(),
   placeColorizedResult: vi.fn(),
   restoreColorizeContext: vi.fn(),
+  validateColorizeSource: vi.fn(),
   deleteLayer: vi.fn()
 }));
 
@@ -59,6 +60,7 @@ vi.mock("../services/photoshop", () => ({
   placeImageIntoSelection: vi.fn(),
   prepareColorizeSource: serviceMocks.prepareColorizeSource,
   restoreColorizeContext: serviceMocks.restoreColorizeContext,
+  validateColorizeSource: serviceMocks.validateColorizeSource,
   setSelectionBounds: vi.fn(),
   switchToDocument: vi.fn()
 }));
@@ -113,6 +115,7 @@ beforeEach(() => {
   serviceMocks.geminiEdit.mockResolvedValue("COLOR");
   serviceMocks.placeColorizedResult.mockResolvedValue({ layerId: 41 });
   serviceMocks.restoreColorizeContext.mockResolvedValue(undefined);
+  serviceMocks.validateColorizeSource.mockResolvedValue(undefined);
   serviceMocks.deleteLayer.mockResolvedValue(undefined);
   serviceMocks.img2img.mockImplementation(() => new Promise((_resolve, reject) => {
     serviceMocks.generationRejectors.push(reject);

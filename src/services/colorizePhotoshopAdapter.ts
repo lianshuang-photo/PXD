@@ -3,11 +3,13 @@ import {
   deleteLayer,
   placeColorizedResult,
   prepareColorizeSource,
-  restoreColorizeContext
+  restoreColorizeContext,
+  validateColorizeSource
 } from "./photoshop";
 
 export const COLORIZE_PHOTOSHOP_ADAPTER: ColorizeWorkflowAdapters = {
   prepare: (taskId) => prepareColorizeSource({ taskId }),
+  validate: (source, taskId) => validateColorizeSource(source, { taskId }),
   apply: (source, resultDataUrl, taskId, isCurrent) =>
     placeColorizedResult(source, resultDataUrl, isCurrent, { taskId }),
   rollback: async (source, layerId, taskId) => {

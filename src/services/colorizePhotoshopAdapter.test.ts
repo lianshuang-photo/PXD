@@ -5,7 +5,8 @@ const boundary = vi.hoisted(() => ({
   deleteLayer: vi.fn(),
   placeColorizedResult: vi.fn(),
   prepareColorizeSource: vi.fn(),
-  restoreColorizeContext: vi.fn()
+  restoreColorizeContext: vi.fn(),
+  validateColorizeSource: vi.fn()
 }));
 
 vi.mock("./photoshop", () => boundary);
@@ -19,6 +20,7 @@ beforeEach(() => {
   boundary.prepareColorizeSource.mockResolvedValue(source);
   boundary.placeColorizedResult.mockResolvedValue({ layerId: 41 });
   boundary.restoreColorizeContext.mockResolvedValue(undefined);
+  boundary.validateColorizeSource.mockResolvedValue(undefined);
   boundary.deleteLayer.mockResolvedValue(undefined);
 });
 
@@ -27,12 +29,14 @@ describe("COLORIZE_PHOTOSHOP_ADAPTER", () => {
     const isCurrent = vi.fn().mockReturnValue(true);
 
     await expect(COLORIZE_PHOTOSHOP_ADAPTER.prepare("task-1")).resolves.toBe(source);
+    await expect(COLORIZE_PHOTOSHOP_ADAPTER.validate(source, "task-1")).resolves.toBeUndefined();
     await expect(COLORIZE_PHOTOSHOP_ADAPTER.apply(source, "data:image/png;base64,X", "task-1", isCurrent))
       .resolves.toEqual({ layerId: 41 });
     await COLORIZE_PHOTOSHOP_ADAPTER.rollback(source, 41, "task-1");
     await COLORIZE_PHOTOSHOP_ADAPTER.restore(source, "task-1");
 
     expect(boundary.prepareColorizeSource).toHaveBeenCalledWith({ taskId: "task-1" });
+    expect(boundary.validateColorizeSource).toHaveBeenCalledWith(source, { taskId: "task-1" });
     expect(boundary.placeColorizedResult).toHaveBeenCalledWith(
       source,
       "data:image/png;base64,X",

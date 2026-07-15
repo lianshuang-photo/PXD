@@ -30,6 +30,7 @@ const boundary = vi.hoisted(() => ({
     placeImageIntoSelection: vi.fn(),
     prepareColorizeSource: vi.fn(),
     restoreColorizeContext: vi.fn(),
+    validateColorizeSource: vi.fn(),
     setSelectionBounds: vi.fn(),
     switchToDocument: vi.fn()
   },
@@ -203,6 +204,7 @@ beforeEach(() => {
   });
   boundary.photoshop.placeColorizedResult.mockResolvedValue({ layerId: 301 });
   boundary.photoshop.restoreColorizeContext.mockResolvedValue(undefined);
+  boundary.photoshop.validateColorizeSource.mockResolvedValue(undefined);
   boundary.photoshop.deleteLayer.mockResolvedValue(undefined);
   boundary.photoshop.setSelectionBounds.mockResolvedValue(undefined);
   boundary.photoshop.switchToDocument.mockResolvedValue(undefined);
@@ -303,6 +305,34 @@ describe("useGenerationController generation history integration", () => {
     expect(rendered.getController().history).toHaveLength(0);
     expect(boundary.photoshop.placeColorizedResult).not.toHaveBeenCalled();
     expect(boundary.photoshop.restoreColorizeContext).toHaveBeenCalledOnce();
+  });
+
+  it("commits colorization success before history persistence can be stopped", async () => {
+    let finishHistoryWrite: (() => void) | undefined;
+    boundary.storage.writeJsonFile.mockImplementation(() => new Promise<void>((resolve) => {
+      finishHistoryWrite = resolve;
+    }));
+    const rendered = trackedRender({
+      initialSettings: { ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }
+    });
+    await flush();
+
+    let running!: Promise<void>;
+    act(() => {
+      running = rendered.getController().runColorize();
+    });
+    await flush();
+
+    expect(rendered.getController().colorizeStatus).toBe("success");
+    expect(rendered.getController().status).toBe("success");
+    act(() => rendered.getController().stopGeneration());
+    expect(rendered.getController().colorizeStatus).toBe("success");
+    expect(rendered.getController().status).toBe("success");
+    expect(boundary.photoshop.deleteLayer).not.toHaveBeenCalled();
+
+    finishHistoryWrite?.();
+    await act(async () => running);
+    expect(rendered.getController().history).toHaveLength(1);
   });
 
   it("records a single generation and restores its provider and complete form", async () => {

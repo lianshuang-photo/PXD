@@ -999,6 +999,7 @@ export const useGenerationController = (
     setProgressPreview(null);
     setProgressText("正在准备去色图");
     dismissToast();
+    let photoshopCommitted = false;
     try {
       const result = await executeColorizeWorkflow(
         requestEngine,
@@ -1023,8 +1024,16 @@ export const useGenerationController = (
         COLORIZE_PHOTOSHOP_ADAPTER
       );
       if (!isRunCurrent()) return;
+      photoshopCommitted = true;
+      runGateRef.current.complete(runToken);
+      if (colorizeAbortRef.current === controller) colorizeAbortRef.current = null;
       const resultDataUrl = toDataUrl(result.image);
       setLastImages([resultDataUrl]);
+      setColorizeStatus("success");
+      setStatus("success");
+      setProgress(0);
+      setProgressPreview(null);
+      setProgressText(null);
       const historyRecord = await recordHistory({
         provider: "gemini",
         prompt: colorizePrompt.trim() || "AI 智能调色",
@@ -1035,11 +1044,9 @@ export const useGenerationController = (
         },
         resultDataUrl
       });
-      if (!isRunCurrent()) return;
-      setColorizeStatus("success");
-      setStatus("success");
-      if (historyRecord) pushToast("success", "智能调色完成");
+      if (historyRecord && isEngineCurrent(requestToken)) pushToast("success", "智能调色完成");
     } catch (caught) {
+      if (photoshopCommitted) return;
       if (!isRunCurrent()) return;
       const message = formatGenerationError(caught, "智能调色失败");
       setColorizeStatus("error");
