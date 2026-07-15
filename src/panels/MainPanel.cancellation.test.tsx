@@ -10,9 +10,14 @@ const serviceMocks = vi.hoisted(() => ({
   fetchProgress: vi.fn(),
   forgeCancelAll: vi.fn(),
   imageCancelAll: vi.fn(),
+  geminiEdit: vi.fn(),
   generationRejectors: [] as Array<(error: Error) => void>,
   optionRejectors: [] as Array<(error: Error) => void>,
-  getSelectionPixels: vi.fn()
+  getSelectionPixels: vi.fn(),
+  prepareColorizeSource: vi.fn(),
+  placeColorizedResult: vi.fn(),
+  restoreColorizeContext: vi.fn(),
+  deleteLayer: vi.fn()
 }));
 
 vi.mock("../services/apiClient", async (importOriginal) => {
@@ -36,7 +41,7 @@ vi.mock("../services/imageModelClient", async (importOriginal) => {
   return {
     ...actual,
     createImageModelClient: () => ({
-      editImage: vi.fn(),
+      editImage: serviceMocks.geminiEdit,
       cancel: vi.fn(() => false),
       cancelAll: serviceMocks.imageCancelAll
     })
@@ -44,12 +49,16 @@ vi.mock("../services/imageModelClient", async (importOriginal) => {
 });
 
 vi.mock("../services/photoshop", () => ({
+  deleteLayer: serviceMocks.deleteLayer,
   getSelectionPixels: serviceMocks.getSelectionPixels,
   closeDocument: vi.fn(),
   groupLayers: vi.fn(),
   moveActiveLayerToTop: vi.fn(),
   onBatchAddLayer: vi.fn(),
+  placeColorizedResult: serviceMocks.placeColorizedResult,
   placeImageIntoSelection: vi.fn(),
+  prepareColorizeSource: serviceMocks.prepareColorizeSource,
+  restoreColorizeContext: serviceMocks.restoreColorizeContext,
   setSelectionBounds: vi.fn(),
   switchToDocument: vi.fn()
 }));
@@ -93,6 +102,18 @@ beforeEach(() => {
     height: 64,
     selectionBounds: { left: 0, top: 0, right: 64, bottom: 64 }
   });
+  serviceMocks.prepareColorizeSource.mockResolvedValue({
+    dataUrl: "data:image/png;base64,GRAY",
+    documentId: 7,
+    documentWidth: 100,
+    documentHeight: 80,
+    selectionBounds: { left: 0, top: 0, right: 64, bottom: 64 },
+    squareSize: 64
+  });
+  serviceMocks.geminiEdit.mockResolvedValue("COLOR");
+  serviceMocks.placeColorizedResult.mockResolvedValue({ layerId: 41 });
+  serviceMocks.restoreColorizeContext.mockResolvedValue(undefined);
+  serviceMocks.deleteLayer.mockResolvedValue(undefined);
   serviceMocks.img2img.mockImplementation(() => new Promise((_resolve, reject) => {
     serviceMocks.generationRejectors.push(reject);
   }));
@@ -117,6 +138,40 @@ afterEach(() => {
 });
 
 describe("MainPanel generation controls", () => {
+  it("enables intelligent colorization only for the closed-source engine", async () => {
+    let forgeRenderer: ReactTestRenderer;
+    await act(async () => {
+      forgeRenderer = create(<MainPanel settings={{ ...DEFAULT_SETTINGS, offlineMode: false }} onOpenSettings={vi.fn()} />);
+      await Promise.resolve();
+    });
+    expect(buttonByText(forgeRenderer!, "智能调色").props.disabled).toBe(true);
+    await act(async () => forgeRenderer!.unmount());
+
+    let geminiRenderer: ReactTestRenderer;
+    await act(async () => {
+      geminiRenderer = create(
+        <MainPanel
+          settings={{ ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }}
+          onOpenSettings={vi.fn()}
+        />
+      );
+      await Promise.resolve();
+    });
+    expect(buttonByText(geminiRenderer!, "智能调色").props.disabled).toBe(false);
+    const prompt = geminiRenderer!.root.findByProps({ placeholder: "调色方向，例如：自然暖色、保留肤色" });
+    await act(async () => {
+      prompt.props.onChange({ target: { value: "warm skin tones" } });
+    });
+    await act(async () => {
+      await buttonByText(geminiRenderer!, "智能调色").props.onClick();
+    });
+    expect(serviceMocks.geminiEdit).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: expect.stringContaining("warm skin tones")
+    }));
+    expect(JSON.stringify(geminiRenderer!.toJSON())).toContain("已完成");
+    await act(async () => geminiRenderer!.unmount());
+  });
+
   it("disables refresh while running and the controller rejects direct refresh calls", async () => {
     let renderer: ReactTestRenderer;
     await act(async () => {
