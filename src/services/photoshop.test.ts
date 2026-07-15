@@ -13,10 +13,12 @@ vi.mock("./uxpBridge", () => ({ bridge: boundary.bridge }));
 
 import {
   closeGeneratedDocument,
+  computeSelectionCaptureSize,
   createGeneratedDocument,
   deleteLayersInDocument,
   getDocumentPixels,
   getSelectionMetadata,
+  getSelectionPixels,
   groupLayers,
   isPhotoshopPartialPlacementError,
   placeImageIntoDocumentBounds,
@@ -230,6 +232,64 @@ describe("createGeneratedDocument", () => {
     await expect(groupLayers([101, 102], "Generated", {
       requireGroup: true
     })).rejects.toThrow("Photoshop 未创建预期的图层组");
+  });
+});
+
+describe("Photoshop selection capture", () => {
+  it("requests scaled pixels before encoding a large reference selection", async () => {
+    const getPixels = vi.fn().mockResolvedValue({ imageData: { dispose: vi.fn() } });
+    const encodeImageData = vi.fn().mockResolvedValue("CAPTURED");
+    boundary.bridge.photoshop = {
+      app: {
+        activeDocument: {
+          id: 7,
+          selection: { bounds: { left: 10, top: 20, right: 2010, bottom: 1020 } }
+        }
+      },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) },
+      imaging: { getPixels, encodeImageData }
+    };
+
+    const result = await getSelectionPixels({ maxEdge: 768 });
+
+    expect(getPixels).toHaveBeenCalledWith(expect.objectContaining({
+      documentID: 7,
+      sourceBounds: { left: 10, top: 20, right: 2010, bottom: 1020 },
+      targetSize: { width: 768, height: 384 }
+    }));
+    expect(result).toEqual({
+      dataUrl: "data:image/png;base64,CAPTURED",
+      width: 2000,
+      height: 1000,
+      documentId: 7,
+      selectionBounds: { left: 10, top: 20, right: 2010, bottom: 1020 }
+    });
+  });
+
+  it("does not upscale selections that already fit the requested edge", () => {
+    expect(computeSelectionCaptureSize(320, 200, 768)).toEqual({ width: 320, height: 200 });
+  });
+
+  it("disposes captured image data when encoding fails", async () => {
+    const dispose = vi.fn();
+    boundary.bridge.photoshop = {
+      app: {
+        activeDocument: {
+          id: 7,
+          selection: { bounds: { left: 0, top: 0, right: 100, bottom: 100 } }
+        }
+      },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) },
+      imaging: {
+        getPixels: vi.fn().mockResolvedValue({ imageData: { dispose } }),
+        encodeImageData: vi.fn().mockRejectedValue(new Error("encode failed"))
+      }
+    };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(getSelectionPixels({ maxEdge: 768 })).resolves.toBeNull();
+    expect(dispose).toHaveBeenCalledOnce();
+    errorLog.mockRestore();
   });
 });
 

@@ -4,6 +4,7 @@ import { useGenerationController } from "../hooks/useGenerationController";
 import { useLayoutExperience } from "../hooks/useLayoutExperience";
 import OverlayPortal from "../components/OverlayPortal";
 import PromptParamControls from "../components/PromptParamControls";
+import ReferenceImageStrip from "../components/ReferenceImageStrip";
 import CameraViewControl from "../components/CameraViewControl";
 import TiledUpscaleDialog from "../components/TiledUpscaleDialog";
 import PosterWizard from "../components/PosterWizard";
@@ -82,6 +83,13 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     setCameraView,
     runCameraViewGeneration,
     stopGeneration,
+    referenceImages,
+    referenceCaptureLoading,
+    referenceAspectWarning,
+    captureReferenceImage,
+    removeReferenceImage,
+    moveReferenceImage,
+    clearReferenceImages,
     tiledUpscaleRunning,
     tiledUpscaleStopping,
     tiledUpscaleProgress,
@@ -882,9 +890,21 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   />
                 </div>
               </div>
+
+              {settings.imageProvider === "gemini" && (
+                <ReferenceImageStrip
+                  images={referenceImages}
+                  loading={referenceCaptureLoading}
+                  aspectWarning={referenceAspectWarning}
+                  onCapture={captureReferenceImage}
+                  onRemove={removeReferenceImage}
+                  onMove={moveReferenceImage}
+                  onClear={clearReferenceImages}
+                />
+              )}
               </WorkspaceSection>
                   ),
-              
+
                   controlnet: (
               <WorkspaceSection key="controlnet" {...sectionProps("controlnet")} title="ControlNet">
               <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", marginBottom: "0.12rem" }}>
@@ -1120,7 +1140,11 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                         </div>
                         <div style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>
                           {item.overrideWidth}×{item.overrideHeight} · {item.form.steps}步 · CFG{item.form.cfgScale} · {batchStatusLabelMap[item.status]}
+                          {item.referenceImages.length > 0 ? ` · ${item.referenceImages.length}张参考图` : ""}
                         </div>
+                        {item.referenceAspectWarning && (
+                          <div className="reference-images__warning">{item.referenceAspectWarning}</div>
+                        )}
                         {item.error && <div style={{ color: "#f87171", fontSize: "0.7rem", marginTop: "0.2rem" }}>{item.error}</div>}
                       </li>
                     ))}

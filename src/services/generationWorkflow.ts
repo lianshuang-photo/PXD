@@ -24,7 +24,7 @@ export interface GenerationWorkflowAdapters {
 }
 
 export interface GenerationWorkflowTask {
-  request: EngineGenerateParams;
+  request: EngineGenerateParams | (() => EngineGenerateParams);
   feather: number;
   taskId?: string;
   groupName?: string;
@@ -81,10 +81,11 @@ export const executeGenerationTask = async (
   assertCurrent();
   await task.prepare?.();
   assertCurrent();
+  const request = typeof task.request === "function" ? task.request() : task.request;
   await task.onRequestStart?.();
   let result: EngineResult;
   try {
-    result = await engine.generate(task.request);
+    result = await engine.generate(request);
   } finally {
     await task.onRequestSettled?.();
   }

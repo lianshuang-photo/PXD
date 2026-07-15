@@ -2060,6 +2060,105 @@ select.input::-ms-expand {
   }
 }
 
+.reference-images {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.reference-images__header {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 6px;
+}
+
+.reference-images__title {
+  color: var(--text-primary);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.reference-images__count,
+.reference-images__meta {
+  color: var(--text-tertiary);
+  font-size: 9px;
+}
+
+.reference-images__header-actions {
+  display: flex;
+  min-width: 0;
+  margin-left: auto;
+  gap: 3px;
+}
+
+.reference-images__header-actions .btn {
+  min-width: 0;
+  padding: 3px 6px;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.reference-images__stream {
+  display: flex;
+  width: 100%;
+  gap: 4px;
+  padding-bottom: 3px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.reference-images__item {
+  display: flex;
+  flex: 0 0 92px;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.reference-images__thumbnail {
+  display: block;
+  width: 84px;
+  height: 64px;
+  border-radius: 3px;
+  background: var(--bg-root);
+  object-fit: contain;
+}
+
+.reference-images__meta {
+  display: flex;
+  min-width: 0;
+  justify-content: space-between;
+  gap: 3px;
+  font-size: 8px;
+  white-space: nowrap;
+}
+
+.reference-images__actions {
+  display: grid;
+  grid-template-columns: 20px 20px minmax(0, 1fr);
+  gap: 2px;
+}
+
+.reference-images__actions .btn {
+  min-width: 0;
+  height: 20px;
+  padding: 0 2px;
+  font-size: 9px;
+}
+
+.reference-images__warning {
+  color: #fbbf24;
+  font-size: 9px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 /* UXP 中等面板适配 (380-460px) */
 @media (min-width: 380px) and (max-width: 460px) {
   .form-grid {

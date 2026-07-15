@@ -28,6 +28,10 @@ export interface PhotoshopOperationOptions {
   timeoutMs?: number;
 }
 
+export interface SelectionCaptureOptions extends PhotoshopOperationOptions {
+  maxEdge?: number;
+}
+
 export interface PlaceImageOptions extends PhotoshopOperationOptions {
   feather?: number;
   onLayerPlaced?: (layerId: number) => void | Promise<void>;
@@ -427,7 +431,20 @@ export const hasActiveSelection = (
   options: PhotoshopOperationOptions = {}
 ): Promise<boolean> => runTransaction(hasActiveSelectionUnlocked, options);
 
-const getSelectionPixelsUnlocked = async (): Promise<SelectionPixels | null> => {
+export const computeSelectionCaptureSize = (width: number, height: number, maxEdge?: number) => {
+  if (!maxEdge || !Number.isFinite(maxEdge) || maxEdge <= 0 || Math.max(width, height) <= maxEdge) {
+    return { width, height };
+  }
+  const scale = maxEdge / Math.max(width, height);
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale))
+  };
+};
+
+const getSelectionPixelsUnlocked = async (
+  captureOptions: SelectionCaptureOptions = {}
+): Promise<SelectionPixels | null> => {
   try {
     const photoshop = ensureModule(getPhotoshop, "Photoshop");
     const doc = photoshop.app.activeDocument;
@@ -435,31 +452,38 @@ const getSelectionPixelsUnlocked = async (): Promise<SelectionPixels | null> => 
       return null;
     }
     const bounds = toBounds(doc.selection.bounds);
+    const width = bounds.right - bounds.left;
+    const height = bounds.bottom - bounds.top;
+    const captureSize = computeSelectionCaptureSize(width, height, captureOptions.maxEdge);
     return await executeAsModalUnlocked(
       photoshop,
       async () => {
-        const options = {
+        const options: Record<string, unknown> = {
           documentID: doc.id,
           sourceBounds: bounds,
           applyAlpha: true,
           componentSize: 8,
           colorProfile: "sRGB IEC61966-2.1"
         };
+        if (captureSize.width !== width || captureSize.height !== height) {
+          options.targetSize = captureSize;
+        }
         const pixels = await photoshop.imaging.getPixels(options);
-        const encoded = await photoshop.imaging.encodeImageData({
-          imageData: pixels.imageData,
-          base64: true
-        });
-        pixels.imageData.dispose?.();
-        const width = bounds.right - bounds.left;
-        const height = bounds.bottom - bounds.top;
-        return {
-          dataUrl: `data:image/png;base64,${encoded}`,
-          width,
-          height,
-          documentId: Number(doc.id),
-          selectionBounds: bounds
-        };
+        try {
+          const encoded = await photoshop.imaging.encodeImageData({
+            imageData: pixels.imageData,
+            base64: true
+          });
+          return {
+            dataUrl: `data:image/png;base64,${encoded}`,
+            width,
+            height,
+            documentId: Number(doc.id),
+            selectionBounds: bounds
+          };
+        } finally {
+          pixels.imageData.dispose?.();
+        }
       },
       DEFAULT_MODAL_OPTIONS
     );
@@ -470,8 +494,8 @@ const getSelectionPixelsUnlocked = async (): Promise<SelectionPixels | null> => 
 };
 
 export const getSelectionPixels = (
-  options: PhotoshopOperationOptions = {}
-): Promise<SelectionPixels | null> => runTransaction(getSelectionPixelsUnlocked, options);
+  options: SelectionCaptureOptions = {}
+): Promise<SelectionPixels | null> => runTransaction(() => getSelectionPixelsUnlocked(options), options);
 
 const getSelectionMetadataUnlocked = async (): Promise<SelectionMetadata | null> => {
   try {
