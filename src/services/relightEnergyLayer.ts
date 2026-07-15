@@ -8,6 +8,26 @@ const MAX_CHUNK_PIXELS = 512 * 1024;
 const MEMORY_SAFETY_RESERVE_BYTES = 16 * 1024 * 1024;
 const DECODE_TIMEOUT_MS = 15_000;
 
+export interface RelightEnergyLayerSize {
+  width: number;
+  height: number;
+}
+
+export const relightEnergyEncodedByteLength = (value: string): number | null => {
+  const prefix = value.match(/^data:image\/[a-z0-9.+-]+;base64,/i)?.[0] ?? "";
+  const encoded = value.slice(prefix.length);
+  if (
+    !encoded ||
+    /\s/.test(value) ||
+    encoded.length > RELIGHT_ENERGY_MAX_BASE64_LENGTH ||
+    encoded.length % 4 === 1 ||
+    !/^[a-z0-9+/]*={0,2}$/i.test(encoded) ||
+    (encoded.includes("=") && encoded.length % 4 !== 0)
+  ) return null;
+  const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+  return Math.floor(encoded.length * 3 / 4) - padding;
+};
+
 // Budget for the worst overlap during PNG encoding: UTF-16 input/output data URLs,
 // encoded buffers, decoded image + canvas RGBA surfaces, one ImageData chunk, and reserve.
 export const estimateRelightEnergyPeakBytes = () => {
@@ -83,14 +103,15 @@ const decodeImage = (dataUrl: string, signal: AbortSignal) => new Promise<HTMLIm
 
 export const prepareRelightEnergyLayer = async (
   dataUrl: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  expectedSize?: RelightEnergyLayerSize
 ): Promise<string> => {
   const prefix = dataUrl.match(/^data:image\/[a-z0-9.+-]+;base64,/i)?.[0] ?? "";
   if (!prefix) {
     throw new Error("模型返回的能量层格式无效");
   }
-  const encodedLength = dataUrl.length - prefix.length;
-  if (encodedLength <= 0 || /\s/.test(dataUrl) || encodedLength > RELIGHT_ENERGY_MAX_BASE64_LENGTH) {
+  const encodedBytes = relightEnergyEncodedByteLength(dataUrl);
+  if (encodedBytes === null || encodedBytes > RELIGHT_ENERGY_MAX_ENCODED_BYTES) {
     throw new Error("模型返回的能量层超过安全内存预算");
   }
   if (typeof document === "undefined") throw new Error("当前环境不支持能量层像素校验");
@@ -101,10 +122,17 @@ export const prepareRelightEnergyLayer = async (
   if (width <= 0 || height <= 0 || !Number.isSafeInteger(pixels) || pixels > RELIGHT_ENERGY_MAX_PIXELS) {
     throw new Error("能量层尺寸无效或超过安全内存预算");
   }
+  if (expectedSize && (width !== expectedSize.width || height !== expectedSize.height)) {
+    throw new Error(
+      `能量层尺寸 ${width}×${height} 与捕获区域 ${expectedSize.width}×${expectedSize.height} 不一致`
+    );
+  }
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
+  // Photoshop UXP exposes the baseline Canvas 2D signature used elsewhere in
+  // the plugin, but does not consistently accept browser-only context hints.
+  const context = canvas.getContext("2d");
   if (!context) throw new Error("当前环境无法校验能量层像素");
   context.drawImage(image, 0, 0, width, height);
   image.src = "";

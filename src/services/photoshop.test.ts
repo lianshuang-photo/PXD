@@ -133,7 +133,19 @@ describe("relight Photoshop boundaries", () => {
     documentId: 7,
     documentWidth: 100,
     documentHeight: 80,
-    selectionBounds: null
+    selectionBounds: null,
+    selectionChannelName: null
+  };
+
+  const prepareJsxBoundary = () => {
+    const writes: string[] = [];
+    boundary.bridge.getDataFolder.mockResolvedValue({
+      createFile: vi.fn().mockResolvedValue({
+        write: vi.fn().mockImplementation(async (value: string) => { writes.push(value); })
+      })
+    });
+    boundary.bridge.createSessionToken.mockResolvedValue("jsx-token");
+    return writes;
   };
 
   const preparePlacementBoundary = () => {
@@ -147,6 +159,9 @@ describe("relight Photoshop boundaries", () => {
       }
       if (commands[0]?._obj === "get") {
         return [{ layerID: 42, bounds: { left: 0, top: 0, right: 50, bottom: 40 } }];
+      }
+      if (commands[0]?._obj === "select" && commands[0]?._target?.[0]?._ref === "document") {
+        activeDocument.id = commands[0]._target[0]._id;
       }
       if (commands[0]?._obj === "delete") activeDocument.activeLayer = { id: 5 };
       return [];
@@ -195,13 +210,14 @@ describe("relight Photoshop boundaries", () => {
 
   it("captures only the active selection and disposes on encode failure", async () => {
     const dispose = vi.fn();
+    const jsxWrites = prepareJsxBoundary();
     boundary.bridge.photoshop = {
       app: {
         activeDocument: {
           id: 7, width: 100, height: 80,
           selection: { bounds: { left: 10, top: 12, right: 60, bottom: 52 } }
         },
-        batchPlay: vi.fn()
+        batchPlay: vi.fn().mockResolvedValue([])
       },
       core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) },
       imaging: {
@@ -211,6 +227,8 @@ describe("relight Photoshop boundaries", () => {
     };
     await expect(captureRelightSource()).rejects.toThrow("encode failed");
     expect(dispose).toHaveBeenCalledOnce();
+    expect(jsxWrites.some((jsx) => jsx.includes("selection.store"))).toBe(true);
+    expect(jsxWrites.some((jsx) => jsx.includes("channel.remove"))).toBe(true);
   });
 
   it("rejects a changed source document or canvas", async () => {
@@ -243,20 +261,24 @@ describe("relight Photoshop boundaries", () => {
     });
     expect(descriptors.filter((descriptor) => descriptor._target?.[0]?._ref === "layer" && descriptor._target[0]._id)
       .every((descriptor) => descriptor._target[0]._id === 42)).toBe(true);
-    expect(descriptors).toContainEqual(expect.objectContaining({
-      _obj: "set",
-      to: { _enum: "ordinal", _value: "none" }
-    }));
+    expect(descriptors.some((descriptor) => descriptor._target?.[0]?._property === "selection"))
+      .toBe(false);
     expect(descriptors.some((descriptor) => descriptor._obj === "make")).toBe(false);
   });
 
-  it("masks a selection result, restores its bounds, and deletes the exact layer on cancellation", async () => {
+  it("masks from the exact selection snapshot and cleans it after cancellation", async () => {
     const { activeDocument, batchPlay } = preparePlacementBoundary();
+    const jsxWrites = prepareJsxBoundary();
     const selectionBounds = { left: 10, top: 12, right: 60, bottom: 52 };
     activeDocument.selection = { bounds: selectionBounds };
+    const source = {
+      ...fullSource,
+      selectionBounds,
+      selectionChannelName: "__PXD_RELIGHT_exact"
+    };
     const current = vi.fn().mockReturnValueOnce(true).mockReturnValue(false);
     await expect(placeRelitResult(
-      { ...fullSource, selectionBounds },
+      source,
       "data:image/png;base64,cmVzdWx0",
       70,
       current
@@ -266,14 +288,19 @@ describe("relight Photoshop boundaries", () => {
       _obj: "make",
       using: { _enum: "userMaskEnabled", _value: "revealSelection" }
     }));
-    expect(descriptors).toContainEqual(expect.objectContaining({
+    expect(descriptors).toContainEqual({
       _obj: "set",
-      to: expect.objectContaining({ _obj: "rectangle" })
-    }));
+      _target: [{ _ref: "channel", _property: "selection" }],
+      to: { _ref: "channel", _name: "__PXD_RELIGHT_exact" }
+    });
+    expect(descriptors.some((descriptor) => descriptor.to?._obj === "rectangle")).toBe(false);
     expect(descriptors).toContainEqual({
       _obj: "delete",
       _target: [{ _ref: "layer", _id: 42 }]
     });
+    expect(jsxWrites.some((jsx) => jsx.includes("selection.load"))).toBe(true);
+    expect(jsxWrites.some((jsx) => jsx.includes("channel.remove"))).toBe(true);
+    expect(source.selectionChannelName).toBeNull();
   });
 
   it("deletes an exact layer returned after a Photoshop timeout", async () => {
@@ -309,5 +336,39 @@ describe("relight Photoshop boundaries", () => {
       _target: [{ _ref: "layer", _id: 42 }]
     });
     expect(activeDocument.activeLayer.id).toBe(5);
+  });
+
+  it("restores the exact selection and returns to the user's document during rollback", async () => {
+    const jsxWrites = prepareJsxBoundary();
+    const activeDocument: any = { id: 9, selection: {}, activeLayer: { id: 77 } };
+    const batchPlay = vi.fn().mockImplementation(async (commands: any[]) => {
+      const command = commands[0];
+      if (command?._obj === "select" && command?._target?.[0]?._ref === "document") {
+        activeDocument.id = command._target[0]._id;
+      }
+      return [];
+    });
+    boundary.bridge.photoshop = {
+      app: { activeDocument, batchPlay },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+    const source = {
+      ...fullSource,
+      selectionBounds: { left: 1, top: 2, right: 30, bottom: 40 },
+      selectionChannelName: "__PXD_RELIGHT_lasso"
+    };
+
+    const { rollbackRelitResult } = await import("./photoshop");
+    await rollbackRelitResult(source, 42);
+
+    const selectedDocumentIds = batchPlay.mock.calls
+      .flatMap((call) => call[0])
+      .filter((descriptor) => descriptor._obj === "select" && descriptor._target?.[0]?._ref === "document")
+      .map((descriptor) => descriptor._target[0]._id);
+    expect(selectedDocumentIds).toEqual([7, 9]);
+    expect(activeDocument.id).toBe(9);
+    expect(jsxWrites.some((jsx) => jsx.includes("selection.load"))).toBe(true);
+    expect(jsxWrites.some((jsx) => jsx.includes("channel.remove"))).toBe(true);
+    expect(source.selectionChannelName).toBeNull();
   });
 });

@@ -3,6 +3,8 @@ import {
   clampEnergyLayerPixels,
   estimateRelightEnergyPeakBytes,
   prepareRelightEnergyLayer,
+  relightEnergyEncodedByteLength,
+  RELIGHT_ENERGY_MAX_ENCODED_BYTES,
   RELIGHT_ENERGY_MEMORY_BUDGET_BYTES,
   softLightChannel
 } from "./relightEnergyLayer";
@@ -17,6 +19,15 @@ describe("relight energy layer", () => {
     expect(estimateRelightEnergyPeakBytes()).toBeGreaterThan(80 * 1024 * 1024);
   });
 
+  it("enforces the exact 5 MiB decoded-byte boundary", () => {
+    const exact = "A".repeat(Math.floor(RELIGHT_ENERGY_MAX_ENCODED_BYTES / 3) * 4) + "AAA=";
+    const over = `${exact.slice(0, -1)}A`;
+    expect(relightEnergyEncodedByteLength(exact)).toBe(RELIGHT_ENERGY_MAX_ENCODED_BYTES);
+    expect(relightEnergyEncodedByteLength(over)).toBe(RELIGHT_ENERGY_MAX_ENCODED_BYTES + 1);
+    expect(relightEnergyEncodedByteLength("A===")).toBeNull();
+    expect(relightEnergyEncodedByteLength("A A=")).toBeNull();
+  });
+
   it("clamps every RGB contribution to neutral gray without changing alpha", () => {
     const pixels = new Uint8ClampedArray([
       0, 127, 128, 17,
@@ -29,10 +40,17 @@ describe("relight energy layer", () => {
   });
 
   it("makes neutral-gray Soft Light an identity and every brighter contribution non-decreasing", () => {
-    for (const base of [0, 1, 32, 64, 127, 128, 192, 254, 255]) {
+    for (let base = 0; base <= 255; base += 1) {
       expect(softLightChannel(base, 128)).toBe(base);
-      for (const contribution of [129, 160, 192, 224, 255]) {
-        expect(softLightChannel(base, contribution)).toBeGreaterThanOrEqual(base);
+      for (let contribution = 129; contribution <= 255; contribution += 1) {
+        const blended = softLightChannel(base, contribution);
+        expect(blended).toBeGreaterThanOrEqual(base);
+        for (const alpha of [0, 1 / 255, 0.25, 0.5, 1]) {
+          for (const opacity of [0, 0.25, 0.7, 1]) {
+            expect(Math.round(base + alpha * opacity * (blended - base)))
+              .toBeGreaterThanOrEqual(base);
+          }
+        }
       }
     }
   });
@@ -91,5 +109,28 @@ describe("relight energy layer", () => {
       .rejects.toThrow("格式无效");
     await expect(prepareRelightEnergyLayer("data:image/png;base64,TU9ERUw=", signal.signal))
       .rejects.toThrow("已取消");
+  });
+
+  it("rejects pixels that do not exactly match the captured target", async () => {
+    class TestImage {
+      naturalWidth = 100;
+      naturalHeight = 79;
+      width = 100;
+      height = 79;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      set src(_value: string) {
+        queueMicrotask(() => this.onload?.());
+      }
+    }
+    vi.stubGlobal("Image", TestImage);
+    vi.stubGlobal("document", { createElement: vi.fn() });
+
+    await expect(prepareRelightEnergyLayer(
+      "data:image/png;base64,TU9ERUw=",
+      new AbortController().signal,
+      { width: 100, height: 80 }
+    )).rejects.toThrow("与捕获区域 100×80 不一致");
   });
 });

@@ -20,7 +20,8 @@ const source = {
   documentId: 4,
   documentWidth: 20,
   documentHeight: 10,
-  selectionBounds: null
+  selectionBounds: null,
+  selectionChannelName: null
 };
 
 describe("RELIGHT_PHOTOSHOP_ADAPTER", () => {
@@ -33,7 +34,8 @@ describe("RELIGHT_PHOTOSHOP_ADAPTER", () => {
     await RELIGHT_PHOTOSHOP_ADAPTER.validate(source, "task-a");
     await expect(RELIGHT_PHOTOSHOP_ADAPTER.prepare(
       "data:image/png;base64,eA==",
-      new AbortController().signal
+      new AbortController().signal,
+      { width: 20, height: 10 }
     ))
       .resolves.toBe("data:image/png;base64,eA==");
     const current = () => true;

@@ -196,7 +196,7 @@ beforeEach(() => {
   boundary.forgeClient.fetchOptions.mockResolvedValue(emptyOptions);
   boundary.forgeClient.fetchProgress.mockResolvedValue(null);
   boundary.forgeClient.img2img.mockResolvedValue({ images: ["FORGE_RESULT"] });
-  boundary.geminiClient.editImage.mockResolvedValue("GEMINI_RESULT");
+  boundary.geminiClient.editImage.mockResolvedValue("R0VNSU5JX1JFU1VMVA==");
   boundary.photoshop.getSelectionPixels.mockResolvedValue(selection(""));
   boundary.photoshop.hasActiveSelection.mockResolvedValue(true);
   boundary.photoshop.placeImageIntoSelection.mockResolvedValue({ layerID: 101 });
@@ -205,7 +205,8 @@ beforeEach(() => {
     documentId: 7,
     documentWidth: 640,
     documentHeight: 480,
-    selectionBounds: null
+    selectionBounds: null,
+    selectionChannelName: null
   });
   boundary.photoshop.validateRelightSource.mockResolvedValue(undefined);
   boundary.photoshop.placeRelitResult.mockResolvedValue({ layerId: 303 });
@@ -437,7 +438,7 @@ describe("useGenerationController relight integration", () => {
     }));
     expect(boundary.photoshop.placeRelitResult).toHaveBeenCalledWith(
       expect.objectContaining({ documentId: 7 }),
-      "data:image/png;base64,GEMINI_RESULT",
+      "data:image/png;base64,R0VNSU5JX1JFU1VMVA==",
       70,
       expect.any(Function),
       { taskId: expect.any(String) }

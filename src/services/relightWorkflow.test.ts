@@ -9,7 +9,8 @@ const source = {
   documentId: 7,
   documentWidth: 100,
   documentHeight: 80,
-  selectionBounds: null
+  selectionBounds: null,
+  selectionChannelName: null
 };
 
 const engine = (provider: "gemini" | "forge" = "gemini"): GenerationEngine => ({
@@ -21,7 +22,7 @@ const engine = (provider: "gemini" | "forge" = "gemini"): GenerationEngine => ({
 });
 
 const adapters = (): RelightWorkflowAdapters => ({
-  capture: vi.fn().mockResolvedValue(source),
+  capture: vi.fn().mockImplementation(async () => ({ ...source })),
   validate: vi.fn().mockResolvedValue(undefined),
   prepare: vi.fn().mockImplementation(async (dataUrl) => dataUrl),
   apply: vi.fn().mockResolvedValue({ layerId: 44 }),
@@ -59,9 +60,22 @@ describe("executeRelightWorkflow", () => {
       baseImageBase64: "c291cmNl",
       taskId: "relight-1"
     }));
-    expect(boundary.prepare).toHaveBeenCalledWith("data:image/png;base64,cmVzdWx0", expect.any(AbortSignal));
-    expect(boundary.apply).toHaveBeenCalledWith(source, "data:image/png;base64,cHJlcGFyZWQ=", 63, "relight-1", expect.any(Function));
-    expect(boundary.restore).toHaveBeenCalledWith(source, "relight-1");
+    expect(boundary.prepare).toHaveBeenCalledWith(
+      "data:image/png;base64,cmVzdWx0",
+      expect.any(AbortSignal),
+      { width: 100, height: 80 }
+    );
+    expect(boundary.apply).toHaveBeenCalledWith(
+      expect.objectContaining({ ...source, dataUrl: "" }),
+      "data:image/png;base64,cHJlcGFyZWQ=",
+      63,
+      "relight-1",
+      expect.any(Function)
+    );
+    expect(boundary.restore).toHaveBeenCalledWith(
+      expect.objectContaining({ ...source, dataUrl: "" }),
+      "relight-1"
+    );
     expect(result.layerId).toBe(44);
     expect(result.image).toBe("data:image/png;base64,cHJlcGFyZWQ=");
   });
@@ -103,14 +117,18 @@ describe("executeRelightWorkflow", () => {
       return { layerId: 91 };
     });
     await expect(executeRelightWorkflow(engine(), task(() => current), boundary)).rejects.toMatchObject({ code: "CANCELLED" });
-    expect(boundary.rollback).toHaveBeenCalledWith(source, 91, "relight-1");
+    expect(boundary.rollback).toHaveBeenCalledWith(
+      expect.objectContaining({ ...source, dataUrl: "" }), 91, "relight-1"
+    );
   });
 
   it("rolls back a committed layer if context restoration fails", async () => {
     const boundary = adapters();
     vi.mocked(boundary.restore).mockRejectedValue(new Error("restore failed"));
     await expect(executeRelightWorkflow(engine(), task(), boundary)).rejects.toThrow("restore failed");
-    expect(boundary.rollback).toHaveBeenCalledWith(source, 44, "relight-1");
+    expect(boundary.rollback).toHaveBeenCalledWith(
+      expect.objectContaining({ ...source, dataUrl: "" }), 44, "relight-1"
+    );
   });
 
   it("rejects an empty engine result without applying", async () => {
@@ -137,5 +155,19 @@ describe("executeRelightWorkflow", () => {
     );
     await expect(executeRelightWorkflow(engine(), task(), boundary)).rejects.toThrow("超过安全内存预算");
     expect(boundary.apply).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized capture target before generation", async () => {
+    const boundary = adapters();
+    vi.mocked(boundary.capture).mockResolvedValue({
+      ...source,
+      documentWidth: 2048,
+      documentHeight: 2048
+    });
+    const gemini = engine();
+    await expect(executeRelightWorkflow(gemini, task(), boundary))
+      .rejects.toThrow("超过 2 Mi 像素");
+    expect(gemini.generate).not.toHaveBeenCalled();
+    expect(boundary.restore).toHaveBeenCalledOnce();
   });
 });

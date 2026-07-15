@@ -1,6 +1,11 @@
 import { GenerationEngineError, type GenerationEngine } from "./generationEngine";
 import { buildRelightPrompt, normalizeRelightOpacity, type RelightLight } from "./relight";
-import { RELIGHT_ENERGY_MAX_BASE64_LENGTH } from "./relightEnergyLayer";
+import {
+  RELIGHT_ENERGY_MAX_ENCODED_BYTES,
+  RELIGHT_ENERGY_MAX_PIXELS,
+  relightEnergyEncodedByteLength,
+  type RelightEnergyLayerSize
+} from "./relightEnergyLayer";
 import type { RelightSource } from "./photoshop";
 
 export type RelightPhase = "preparing" | "generating" | "applying";
@@ -19,7 +24,11 @@ export interface RelightWorkflowTask {
 export interface RelightWorkflowAdapters {
   capture: (taskId: string) => Promise<RelightSource>;
   validate: (source: RelightSource, taskId: string) => Promise<void>;
-  prepare: (dataUrl: string, signal: AbortSignal) => Promise<string>;
+  prepare: (
+    dataUrl: string,
+    signal: AbortSignal,
+    expectedSize: RelightEnergyLayerSize
+  ) => Promise<string>;
   apply: (
     source: RelightSource,
     dataUrl: string,
@@ -41,12 +50,21 @@ export interface RelightWorkflowResult {
 const stripDataUrl = (value: string) => value.replace(/^data:image\/[^;]+;base64,/i, "");
 const toDataUrl = (value: string) => value.startsWith("data:") ? value : `data:image/png;base64,${value}`;
 const assertBoundedImage = (value: string) => {
-  const dataUrlPrefix = value.match(/^data:image\/[^;]+;base64,/i)?.[0] ?? "";
-  const encodedLength = value.length - dataUrlPrefix.length;
-  if (encodedLength <= 0 || /\s/.test(value) || encodedLength > RELIGHT_ENERGY_MAX_BASE64_LENGTH) {
+  const encodedLength = value.length - (value.match(/^data:image\/[^;]+;base64,/i)?.[0]?.length ?? 0);
+  const encodedBytes = relightEnergyEncodedByteLength(value);
+  if (encodedBytes === null || encodedBytes <= 0 || encodedBytes > RELIGHT_ENERGY_MAX_ENCODED_BYTES) {
     throw new Error(encodedLength > 0 ? "重新打光返回的能量层超过安全内存预算" : "重新打光未返回有效能量层");
   }
 };
+
+const relightTargetSize = (source: RelightSource): RelightEnergyLayerSize => ({
+  width: source.selectionBounds
+    ? source.selectionBounds.right - source.selectionBounds.left
+    : source.documentWidth,
+  height: source.selectionBounds
+    ? source.selectionBounds.bottom - source.selectionBounds.top
+    : source.documentHeight
+});
 
 const assertCurrent = (engine: GenerationEngine, task: RelightWorkflowTask) => {
   if (!task.isCurrent() || task.signal.aborted) {
@@ -82,20 +100,37 @@ export const executeRelightWorkflow = async (
     task.onPhase?.("preparing");
     source = await adapters.capture(task.taskId);
     assertCurrent(engine, task);
+    const targetSize = relightTargetSize(source);
+    if (
+      targetSize.width <= 0 ||
+      targetSize.height <= 0 ||
+      targetSize.width * targetSize.height > RELIGHT_ENERGY_MAX_PIXELS
+    ) {
+      throw new Error("重新打光区域超过 2 Mi 像素，请缩小画布或建立较小选区后重试");
+    }
     task.onPhase?.("generating");
-    let image = (await engine.generate({
+    let sourceBase64 = stripDataUrl(source.dataUrl);
+    let generation: ReturnType<GenerationEngine["generate"]> | null = engine.generate({
       prompt,
-      baseImageBase64: stripDataUrl(source.dataUrl),
+      baseImageBase64: sourceBase64,
       timeoutMs: task.timeoutMs,
       taskId: task.taskId,
       signal: task.signal
-    })).images[0];
+    });
+    // The adapters only need document metadata after generation. Releasing this
+    // duplicate data URL keeps it out of the Canvas decode/encode peak.
+    source.dataUrl = "";
+    sourceBase64 = "";
+    let generated: Awaited<ReturnType<GenerationEngine["generate"]>> | null = await generation;
+    generation = null;
+    let image = generated.images[0];
+    generated = null;
     assertCurrent(engine, task);
     if (!image) throw new Error("可视化打光未返回图像");
     assertBoundedImage(image);
     let modelDataUrl = toDataUrl(image);
     image = "";
-    const energyLayer = await adapters.prepare(modelDataUrl, task.signal);
+    const energyLayer = await adapters.prepare(modelDataUrl, task.signal, targetSize);
     modelDataUrl = "";
     assertBoundedImage(energyLayer);
     assertCurrent(engine, task);
