@@ -15,8 +15,11 @@ import {
   captureVfxSource,
   closeGeneratedDocument,
   createGeneratedDocument,
+  discardVfxSource,
   groupLayers,
   placeVfxResult,
+  restoreVfxContext,
+  rollbackVfxResult,
   validateVfxSource,
   type VfxSource
 } from "./photoshop";
@@ -133,7 +136,19 @@ describe("vfx Photoshop boundaries", () => {
     documentId: 7,
     documentWidth: 100,
     documentHeight: 80,
-    selectionBounds: null
+    selectionBounds: null,
+    selectionChannelName: null
+  };
+
+  const prepareJsxBoundary = () => {
+    const writes: string[] = [];
+    boundary.bridge.getDataFolder.mockResolvedValue({
+      createFile: vi.fn().mockResolvedValue({
+        write: vi.fn().mockImplementation(async (value: string) => { writes.push(value); })
+      })
+    });
+    boundary.bridge.createSessionToken.mockResolvedValue("jsx-token");
+    return writes;
   };
 
   const preparePlacementBoundary = () => {
@@ -147,6 +162,9 @@ describe("vfx Photoshop boundaries", () => {
       }
       if (commands[0]?._obj === "get") {
         return [{ layerID: 42, bounds: { left: 0, top: 0, right: 50, bottom: 40 } }];
+      }
+      if (commands[0]?._obj === "select" && commands[0]?._target?.[0]?._ref === "document") {
+        activeDocument.id = commands[0]._target[0]._id;
       }
       if (commands[0]?._obj === "delete") activeDocument.activeLayer = { id: 5 };
       return [];
@@ -195,13 +213,14 @@ describe("vfx Photoshop boundaries", () => {
 
   it("captures only the active selection and disposes on encode failure", async () => {
     const dispose = vi.fn();
+    const jsxWrites = prepareJsxBoundary();
     boundary.bridge.photoshop = {
       app: {
         activeDocument: {
           id: 7, width: 100, height: 80,
           selection: { bounds: { left: 10, top: 12, right: 60, bottom: 52 } }
         },
-        batchPlay: vi.fn()
+        batchPlay: vi.fn().mockResolvedValue([])
       },
       core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) },
       imaging: {
@@ -211,6 +230,8 @@ describe("vfx Photoshop boundaries", () => {
     };
     await expect(captureVfxSource()).rejects.toThrow("encode failed");
     expect(dispose).toHaveBeenCalledOnce();
+    expect(jsxWrites.some((jsx) => jsx.includes("selection.store"))).toBe(true);
+    expect(jsxWrites.some((jsx) => jsx.includes("channel.remove"))).toBe(true);
   });
 
   it("rejects a changed source document or canvas", async () => {
@@ -221,6 +242,13 @@ describe("vfx Photoshop boundaries", () => {
     await expect(validateVfxSource(fullSource)).rejects.toThrow("活动文档已切换");
     boundary.bridge.photoshop.app.activeDocument = { id: 7, width: 101, height: 80 };
     await expect(validateVfxSource(fullSource)).rejects.toThrow("画布尺寸已变化");
+    boundary.bridge.photoshop.app.activeDocument = {
+      id: 7,
+      width: 100,
+      height: 80,
+      selection: { bounds: { left: 1, top: 2, right: 30, bottom: 40 } }
+    };
+    await expect(validateVfxSource(fullSource)).rejects.toThrow("选区已变化");
   });
 
   it("places a full-canvas result in one history step and restores no selection", async () => {
@@ -235,10 +263,9 @@ describe("vfx Photoshop boundaries", () => {
     expect(suspendHistory).toHaveBeenCalledWith({ documentID: 7, name: "AI VFX 特效" });
     expect(resumeHistory).toHaveBeenCalledWith("history-token");
     const descriptors = batchPlay.mock.calls.flatMap((call) => call[0]);
-    expect(descriptors).toContainEqual(expect.objectContaining({
-      _obj: "set",
-      to: { _enum: "ordinal", _value: "none" }
-    }));
+    expect(descriptors.some((descriptor) =>
+      descriptor._target?.[0]?._property === "selection"
+    )).toBe(false);
     expect(descriptors.some((descriptor) => descriptor._obj === "make")).toBe(false);
     expect(descriptors).toContainEqual(expect.objectContaining({
       _obj: "set",
@@ -249,13 +276,15 @@ describe("vfx Photoshop boundaries", () => {
     }));
   });
 
-  it("masks a selection result, restores its bounds, and deletes the exact layer on cancellation", async () => {
+  it("masks from the exact selection snapshot without replacing it with bounds", async () => {
     const { activeDocument, batchPlay } = preparePlacementBoundary();
+    const jsxWrites = prepareJsxBoundary();
     const selectionBounds = { left: 10, top: 12, right: 60, bottom: 52 };
     activeDocument.selection = { bounds: selectionBounds };
+    const source = { ...fullSource, selectionBounds, selectionChannelName: "__PXD_VFX_exact" };
     const current = vi.fn().mockReturnValueOnce(true).mockReturnValue(false);
     await expect(placeVfxResult(
-      { ...fullSource, selectionBounds },
+      source,
       "data:image/png;base64,cmVzdWx0",
       { blendMode: "linearDodge", useSelectionMask: true },
       current
@@ -265,10 +294,12 @@ describe("vfx Photoshop boundaries", () => {
       _obj: "make",
       using: { _enum: "userMaskEnabled", _value: "revealSelection" }
     }));
-    expect(descriptors).toContainEqual(expect.objectContaining({
+    expect(descriptors).toContainEqual({
       _obj: "set",
-      to: expect.objectContaining({ _obj: "rectangle" })
-    }));
+      _target: [{ _ref: "channel", _property: "selection" }],
+      to: { _ref: "channel", _name: "__PXD_VFX_exact" }
+    });
+    expect(descriptors.some((descriptor) => descriptor.to?._obj === "rectangle")).toBe(false);
     expect(descriptors).toContainEqual({
       _obj: "delete",
       _target: [{ _ref: "layer", _id: 42 }]
@@ -279,10 +310,39 @@ describe("vfx Photoshop boundaries", () => {
         mode: { _enum: "blendMode", _value: "linearDodge" }
       })
     }));
+    expect(jsxWrites.some((jsx) => jsx.includes("selection.load"))).toBe(true);
+    expect(jsxWrites.some((jsx) => jsx.includes("channel.remove"))).toBe(true);
+    expect(source.selectionChannelName).toBeNull();
+  });
+
+  it("restores and removes the exact selection snapshot after a successful placement", async () => {
+    const { activeDocument, batchPlay } = preparePlacementBoundary();
+    const jsxWrites = prepareJsxBoundary();
+    const selectionBounds = { left: 10, top: 12, right: 60, bottom: 52 };
+    activeDocument.selection = { bounds: selectionBounds };
+    const source = { ...fullSource, selectionBounds, selectionChannelName: "__PXD_VFX_success" };
+
+    await expect(placeVfxResult(
+      source,
+      "data:image/png;base64,cmVzdWx0",
+      { blendMode: "screen", useSelectionMask: true },
+      () => true
+    )).resolves.toEqual({ layerId: 42 });
+    await restoreVfxContext(source);
+
+    const descriptors = batchPlay.mock.calls.flatMap((call) => call[0]);
+    expect(descriptors.some((descriptor) => descriptor.to?._obj === "rectangle")).toBe(false);
+    expect(jsxWrites.some((jsx) => jsx.includes("selection.load"))).toBe(true);
+    expect(jsxWrites.some((jsx) => jsx.includes("channel.remove"))).toBe(true);
+    expect(source.selectionChannelName).toBeNull();
   });
 
   it("deletes an exact layer returned after a Photoshop timeout", async () => {
     const { activeDocument, batchPlay } = preparePlacementBoundary();
+    const jsxWrites = prepareJsxBoundary();
+    const selectionBounds = { left: 10, top: 12, right: 60, bottom: 52 };
+    activeDocument.selection = { bounds: selectionBounds };
+    const source = { ...fullSource, selectionBounds, selectionChannelName: "__PXD_VFX_late" };
     let releaseModal!: () => void;
     const modalGate = new Promise<void>((resolve) => { releaseModal = resolve; });
     boundary.bridge.photoshop.core.executeAsModal.mockImplementation(async (callback: any, options: any) => {
@@ -296,7 +356,7 @@ describe("vfx Photoshop boundaries", () => {
       return result;
     });
     const timedOut = placeVfxResult(
-      fullSource,
+      source,
       "data:image/png;base64,cmVzdWx0",
       { blendMode: "screen", useSelectionMask: true },
       () => true,
@@ -304,6 +364,7 @@ describe("vfx Photoshop boundaries", () => {
     );
     await expect(timedOut).rejects.toMatchObject({ name: "PSOperationTimeoutError" });
     expect(activeDocument.activeLayer.id).toBe(42);
+    activeDocument.id = 9;
     releaseModal();
     await new Promise((resolve) => setTimeout(resolve, 200));
     const deletes = batchPlay.mock.calls
@@ -314,5 +375,84 @@ describe("vfx Photoshop boundaries", () => {
       _target: [{ _ref: "layer", _id: 42 }]
     });
     expect(activeDocument.activeLayer.id).toBe(5);
+    expect(activeDocument.id).toBe(9);
+    expect(jsxWrites.some((jsx) => jsx.includes("selection.load"))).toBe(true);
+    expect(jsxWrites.some((jsx) => jsx.includes("channel.remove"))).toBe(true);
+    expect(source.selectionChannelName).toBeNull();
+  });
+
+  it("returns to the user's active document after rolling back a source layer", async () => {
+    const activeDocument: any = { id: 9, selection: {}, activeLayer: { id: 77 } };
+    const batchPlay = vi.fn().mockImplementation(async (commands: any[]) => {
+      const command = commands[0];
+      if (command?._obj === "select" && command?._target?.[0]?._ref === "document") {
+        activeDocument.id = command._target[0]._id;
+      }
+      return [];
+    });
+    boundary.bridge.photoshop = {
+      app: { activeDocument, batchPlay },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+
+    await rollbackVfxResult(fullSource, 42);
+
+    const selectedDocumentIds = batchPlay.mock.calls
+      .flatMap((call) => call[0])
+      .filter((descriptor) => descriptor._obj === "select" && descriptor._target?.[0]?._ref === "document")
+      .map((descriptor) => descriptor._target[0]._id);
+    expect(selectedDocumentIds).toEqual([7, 9]);
+    expect(activeDocument.id).toBe(9);
+  });
+
+  it("restores an exact selection snapshot and returns to the user's document even when layer deletion fails", async () => {
+    const jsxWrites = prepareJsxBoundary();
+    const activeDocument: any = { id: 9, selection: {}, activeLayer: { id: 77 } };
+    const batchPlay = vi.fn().mockImplementation(async (commands: any[]) => {
+      const command = commands[0];
+      if (command?._obj === "select" && command?._target?.[0]?._ref === "document") {
+        activeDocument.id = command._target[0]._id;
+      }
+      if (command?._obj === "delete" && command?._target?.[0]?._ref === "layer") {
+        throw new Error("delete failed");
+      }
+      return [];
+    });
+    boundary.bridge.photoshop = {
+      app: { activeDocument, batchPlay },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+    const source = {
+      ...fullSource,
+      selectionBounds: { left: 1, top: 2, right: 30, bottom: 40 },
+      selectionChannelName: "__PXD_VFX_lasso"
+    };
+
+    await expect(rollbackVfxResult(source, 42)).rejects.toThrow("delete failed");
+
+    expect(jsxWrites.some((jsx) => jsx.includes("selection.load"))).toBe(true);
+    expect(jsxWrites.some((jsx) => jsx.includes("channel.remove"))).toBe(true);
+    expect(source.selectionChannelName).toBeNull();
+    expect(activeDocument.id).toBe(9);
+  });
+
+  it("discards a captured selection channel without restoring user selection", async () => {
+    const jsxWrites = prepareJsxBoundary();
+    const activeDocument: any = { id: 7, selection: { bounds: { left: 5, top: 5, right: 8, bottom: 8 } } };
+    boundary.bridge.photoshop = {
+      app: { activeDocument, batchPlay: vi.fn().mockResolvedValue([]) },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+    const source = {
+      ...fullSource,
+      selectionBounds: { left: 1, top: 2, right: 30, bottom: 40 },
+      selectionChannelName: "__PXD_VFX_discard"
+    };
+
+    await discardVfxSource(source);
+
+    expect(jsxWrites.some((jsx) => jsx.includes("channel.remove"))).toBe(true);
+    expect(jsxWrites.some((jsx) => jsx.includes("selection.load"))).toBe(false);
+    expect(source.selectionChannelName).toBeNull();
   });
 });

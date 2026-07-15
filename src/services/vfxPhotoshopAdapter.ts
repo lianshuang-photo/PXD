@@ -1,5 +1,6 @@
 import {
   captureVfxSource,
+  discardVfxSource,
   placeVfxResult,
   restoreVfxContext,
   rollbackVfxResult,
@@ -19,5 +20,6 @@ export const VFX_PHOTOSHOP_ADAPTER: VfxWorkflowAdapters = {
       { taskId }
     ),
   rollback: (source, layerId, taskId) => rollbackVfxResult(source, layerId, { taskId }),
-  restore: (source, taskId) => restoreVfxContext(source, { taskId })
+  restore: (source, taskId) => restoreVfxContext(source, { taskId }),
+  discard: (source, taskId) => discardVfxSource(source, { taskId })
 };

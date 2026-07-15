@@ -488,7 +488,6 @@ export const useGenerationController = (
   }, [settings]);
   const runGateRef = useRef(new GenerationRunGate());
   const vfxAbortRef = useRef<AbortController | null>(null);
-  const vfxHistoryTailCountRef = useRef(0);
   const stoppedByEngineChangeRef = useRef(false);
 
   useLayoutEffect(() => {
@@ -522,10 +521,7 @@ export const useGenerationController = (
     loading: historyLoading,
     error: historyError,
     record: recordHistory
-  } = useGenerationHistory<GenerationForm>((message) => {
-    if (vfxHistoryTailCountRef.current > 0) return;
-    pushToast("warning", message);
-  });
+  } = useGenerationHistory<GenerationForm>((message) => pushToast("warning", message));
   const dismissToast = useCallback(() => {
     clearToastTimer();
     setToast(null);
@@ -1065,21 +1061,16 @@ export const useGenerationController = (
       setProgressPreview(null);
       setProgressText(null);
       pushToast("success", "VFX 特效生成完成");
-      vfxHistoryTailCountRef.current += 1;
-      try {
-        await recordHistory({
-          provider: "gemini",
-          prompt: result.prompt,
-          params: {
-            ...form,
-            positivePrompt: promptSnapshot,
-            vfxConfig: configSnapshot
-          },
-          resultDataUrl
-        });
-      } finally {
-        vfxHistoryTailCountRef.current -= 1;
-      }
+      await recordHistory({
+        provider: "gemini",
+        prompt: result.prompt,
+        params: {
+          ...form,
+          positivePrompt: promptSnapshot,
+          vfxConfig: configSnapshot
+        },
+        resultDataUrl
+      });
     } catch (caught) {
       if (photoshopCommitted || !isRunCurrent()) return;
       const message = formatGenerationError(caught, "VFX 特效生成失败");

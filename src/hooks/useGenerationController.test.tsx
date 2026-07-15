@@ -27,6 +27,7 @@ const boundary = vi.hoisted(() => ({
     onBatchAddLayer: vi.fn(),
     placeImageIntoSelection: vi.fn(),
     captureVfxSource: vi.fn(),
+    discardVfxSource: vi.fn(),
     validateVfxSource: vi.fn(),
     placeVfxResult: vi.fn(),
     rollbackVfxResult: vi.fn(),
@@ -201,12 +202,14 @@ beforeEach(() => {
     documentId: 7,
     documentWidth: 640,
     documentHeight: 480,
-    selectionBounds: null
+    selectionBounds: null,
+    selectionChannelName: null
   });
   boundary.photoshop.validateVfxSource.mockResolvedValue(undefined);
   boundary.photoshop.placeVfxResult.mockResolvedValue({ layerId: 303 });
   boundary.photoshop.rollbackVfxResult.mockResolvedValue(undefined);
   boundary.photoshop.restoreVfxContext.mockResolvedValue(undefined);
+  boundary.photoshop.discardVfxSource.mockResolvedValue(undefined);
   boundary.photoshop.groupLayers.mockResolvedValue(undefined);
   boundary.photoshop.moveActiveLayerToTop.mockResolvedValue(undefined);
   boundary.photoshop.onBatchAddLayer.mockResolvedValue(null);
@@ -460,6 +463,19 @@ describe("useGenerationController VFX integration", () => {
       intensity: 0.88,
       blendMode: "linearDodge"
     });
+  });
+
+  it("keeps the placed VFX successful but reports history processing failures", async () => {
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    boundary.thumbnailDecodeFails = true;
+
+    await act(async () => rendered.getController().runVfx());
+
+    expect(rendered.getController().status).toBe("success");
+    expect(rendered.getController().vfxStatus).toBe("success");
+    expect(rendered.getController().historyError).toContain("缩略图创建失败");
+    expect(rendered.getController().toast).toMatchObject({ type: "warning" });
   });
 
   it("rejects Forge before Photoshop capture", async () => {

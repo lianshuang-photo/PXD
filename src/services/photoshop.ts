@@ -34,6 +34,7 @@ export interface VfxSource {
   documentWidth: number;
   documentHeight: number;
   selectionBounds: SelectionBounds | null;
+  selectionChannelName: string | null;
 }
 
 export interface VfxPlacement {
@@ -847,14 +848,6 @@ const pixelValue = (value: unknown) => {
   return Number(value);
 };
 
-const vfxSelectionDescriptor = (bounds: SelectionBounds | null) => ({
-  _obj: "set",
-  _target: [{ _ref: "channel", _property: "selection" }],
-  to: bounds
-    ? selectionToRectangle(bounds)
-    : { _enum: "ordinal", _value: "none" }
-});
-
 const selectionBoundsEqual = (left: SelectionBounds, right: SelectionBounds) =>
   left.left === right.left &&
   left.top === right.top &&
@@ -870,6 +863,12 @@ const activeLayerIdUnlocked = () => {
   return Number.isInteger(layerId) && layerId > 0 ? layerId : 0;
 };
 
+const activeDocumentIdUnlocked = () => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const documentId = Number(photoshop.app.activeDocument?.id);
+  return Number.isInteger(documentId) && documentId > 0 ? documentId : 0;
+};
+
 const vfxErrorMessage = (error: unknown, fallback: string) =>
   error instanceof Error ? error.message : fallback;
 
@@ -878,6 +877,34 @@ const appendVfxCleanupError = (error: unknown, label: string, cleanupError: unkn
     `${vfxErrorMessage(error, "VFX 特效贴回失败")}；${label}：` +
     vfxErrorMessage(cleanupError, "未知错误")
   );
+
+const runInVfxSourceDocumentUnlocked = async <T>(
+  source: VfxSource,
+  operation: () => Promise<T>
+): Promise<T> => {
+  const previousDocumentId = activeDocumentIdUnlocked();
+  if (previousDocumentId !== source.documentId) {
+    await switchToDocumentUnlocked(source.documentId);
+  }
+  let result!: T;
+  let operationError: unknown;
+  try {
+    result = await operation();
+  } catch (error) {
+    operationError = error;
+  }
+  if (previousDocumentId > 0 && previousDocumentId !== source.documentId) {
+    try {
+      await switchToDocumentUnlocked(previousDocumentId);
+    } catch (error) {
+      operationError = operationError
+        ? appendVfxCleanupError(operationError, "活动文档恢复失败", error)
+        : error;
+    }
+  }
+  if (operationError) throw operationError;
+  return result;
+};
 
 const deleteLayerUnlocked = async (layerId: number) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
@@ -894,11 +921,41 @@ export const deleteLayer = (
   options: PhotoshopOperationOptions = {}
 ) => runTransaction(() => deleteLayerUnlocked(layerId), options);
 
-const setVfxSelectionUnlocked = async (bounds: SelectionBounds | null) => {
-  const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  await executeAsModalUnlocked(photoshop, async () => {
-    await photoshop.app.batchPlay([vfxSelectionDescriptor(bounds)], {});
-  }, { commandName: "恢复 PXD 特效选区" });
+const vfxSelectionChannelName = (documentId: number) =>
+  `__PXD_VFX_${documentId}_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+
+const storeVfxSelectionUnlocked = async (name: string) => {
+  const result = await runJsxCodeUnlocked(`
+    var doc = app.activeDocument;
+    var channel = doc.channels.add();
+    channel.name = ${JSON.stringify(name)};
+    doc.selection.store(channel, SelectionType.REPLACE);
+    true;
+  `);
+  if (!result) throw new Error("Photoshop 未能保存 VFX 原始选区");
+};
+
+const loadVfxSelectionUnlocked = async (name: string) => {
+  const result = await runJsxCodeUnlocked(`
+    var doc = app.activeDocument;
+    var channel = doc.channels.getByName(${JSON.stringify(name)});
+    doc.selection.load(channel, SelectionType.REPLACE);
+    true;
+  `);
+  if (!result) throw new Error("Photoshop 未能恢复 VFX 原始选区");
+};
+
+const removeVfxSelectionChannelUnlocked = async (source: VfxSource) => {
+  const name = source.selectionChannelName;
+  if (!name) return;
+  const result = await runJsxCodeUnlocked(`
+    var doc = app.activeDocument;
+    var channel = doc.channels.getByName(${JSON.stringify(name)});
+    channel.remove();
+    true;
+  `);
+  if (!result) throw new Error("Photoshop 未能清理 VFX 选区通道");
+  source.selectionChannelName = null;
 };
 
 const validateVfxSourceUnlocked = async (source: VfxSource) => {
@@ -912,6 +969,13 @@ const validateVfxSourceUnlocked = async (source: VfxSource) => {
   if (width !== source.documentWidth || height !== source.documentHeight) {
     throw new Error("等待生成特效期间画布尺寸已变化，请重新发起");
   }
+  const currentBounds = document?.selection?.bounds ? toBounds(document.selection.bounds) : null;
+  const selectionMatches = source.selectionBounds
+    ? currentBounds !== null && selectionBoundsEqual(currentBounds, source.selectionBounds)
+    : currentBounds === null;
+  if (!selectionMatches) {
+    throw new Error("等待生成特效期间选区已变化，请重新发起");
+  }
 };
 
 export const validateVfxSource = (
@@ -919,24 +983,39 @@ export const validateVfxSource = (
   options: PhotoshopOperationOptions = {}
 ) => runTransaction(() => validateVfxSourceUnlocked(source), options);
 
-const restoreVfxContextUnlocked = async (source: VfxSource) => {
-  const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  if (Number(photoshop.app.activeDocument?.id) !== source.documentId) {
-    await switchToDocumentUnlocked(source.documentId);
+const restoreVfxSelectionUnlocked = async (source: VfxSource) => {
+  if (!source.selectionChannelName) return;
+  let cleanupError: unknown;
+  try {
+    await loadVfxSelectionUnlocked(source.selectionChannelName);
+  } catch (error) {
+    cleanupError = error;
   }
-  const currentBounds = photoshop.app.activeDocument?.selection?.bounds
-    ? toBounds(photoshop.app.activeDocument.selection.bounds)
-    : null;
-  const matches = source.selectionBounds
-    ? currentBounds !== null && selectionBoundsEqual(currentBounds, source.selectionBounds)
-    : currentBounds === null;
-  if (!matches) await setVfxSelectionUnlocked(source.selectionBounds);
+  try {
+    await removeVfxSelectionChannelUnlocked(source);
+  } catch (error) {
+    cleanupError = cleanupError
+      ? appendVfxCleanupError(cleanupError, "选区通道清理失败", error)
+      : error;
+  }
+  if (cleanupError) throw cleanupError;
 };
+
+const restoreVfxContextUnlocked = async (source: VfxSource) =>
+  runInVfxSourceDocumentUnlocked(source, () => restoreVfxSelectionUnlocked(source));
 
 export const restoreVfxContext = (
   source: VfxSource,
   options: PhotoshopOperationOptions = {}
 ) => runTransaction(() => restoreVfxContextUnlocked(source), options);
+
+const discardVfxSourceUnlocked = async (source: VfxSource) =>
+  runInVfxSourceDocumentUnlocked(source, () => removeVfxSelectionChannelUnlocked(source));
+
+export const discardVfxSource = (
+  source: VfxSource,
+  options: PhotoshopOperationOptions = {}
+) => runTransaction(() => discardVfxSourceUnlocked(source), options);
 
 const captureDocumentPixelsUnlocked = async (
   documentId: number,
@@ -997,23 +1076,38 @@ const captureVfxSourceUnlocked = async (): Promise<VfxSource> => {
     throw new Error("没有可用于生成特效的 Photoshop 文档");
   }
   const selectionBounds = document?.selection?.bounds ? toBounds(document.selection.bounds) : null;
-  const selection = selectionBounds
-    ? await captureSelectionPixelsStrictUnlocked(documentId, selectionBounds)
-    : null;
-  const encoded = selection
-    ? selection.dataUrl
-    : `data:image/png;base64,${await captureDocumentPixelsUnlocked(
-        documentId,
-        documentWidth,
-        documentHeight
-      )}`;
-  return {
-    dataUrl: encoded,
+  const source: VfxSource = {
+    dataUrl: "",
     documentId,
     documentWidth,
     documentHeight,
-    selectionBounds: selection?.selectionBounds ?? null
+    selectionBounds,
+    selectionChannelName: null
   };
+  if (selectionBounds) {
+    source.selectionChannelName = vfxSelectionChannelName(documentId);
+    await storeVfxSelectionUnlocked(source.selectionChannelName);
+  }
+  try {
+    const selection = selectionBounds
+      ? await captureSelectionPixelsStrictUnlocked(documentId, selectionBounds)
+      : null;
+    source.dataUrl = selection
+      ? selection.dataUrl
+      : `data:image/png;base64,${await captureDocumentPixelsUnlocked(
+          documentId,
+          documentWidth,
+          documentHeight
+        )}`;
+    return source;
+  } catch (error) {
+    try {
+      await removeVfxSelectionChannelUnlocked(source);
+    } catch (cleanupError) {
+      throw appendVfxCleanupError(error, "选区通道清理失败", cleanupError);
+    }
+    throw error;
+  }
 };
 
 export const captureVfxSource = (
@@ -1096,8 +1190,15 @@ const placeVfxResultUnlocked = async (
           height: { _unit: "percentUnit", _value: (target.bottom - target.top) / (bottom - top) * 100 }
         }];
         if (source.selectionBounds && placement.useSelectionMask) {
+          if (!source.selectionChannelName) {
+            throw new Error("VFX 原始选区快照已丢失，请重新发起");
+          }
           commands.push(
-            vfxSelectionDescriptor(source.selectionBounds),
+            {
+              _obj: "set",
+              _target: [{ _ref: "channel", _property: "selection" }],
+              to: { _ref: "channel", _name: source.selectionChannelName }
+            },
             {
               _obj: "make",
               new: { _class: "channel" },
@@ -1120,8 +1221,7 @@ const placeVfxResultUnlocked = async (
             _obj: "move",
             _target: [{ _ref: "layer", _id: layerId }],
             to: { _ref: "layer", _enum: "ordinal", _value: "front" }
-          },
-          vfxSelectionDescriptor(source.selectionBounds)
+          }
         );
         await photoshop.app.batchPlay(commands, {});
         if (!isCurrent()) throw new Error("VFX_CANCELLED");
@@ -1142,9 +1242,6 @@ const placeVfxResultUnlocked = async (
             operationError = appendVfxCleanupError(operationError, "自动清理失败", cleanupError);
           }
         }
-        await photoshop.app.batchPlay([vfxSelectionDescriptor(source.selectionBounds)], {}).catch((cleanupError: unknown) => {
-          operationError = appendVfxCleanupError(operationError, "选区恢复失败", cleanupError);
-        });
       } finally {
         try {
           await executionContext.hostControl.resumeHistory(suspension);
@@ -1190,33 +1287,41 @@ const placeVfxResultUnlocked = async (
 };
 
 const cleanupLateVfxResultUnlocked = async (source: VfxSource, layerId: number) => {
-  const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  if (Number(photoshop.app.activeDocument?.id) !== source.documentId) {
-    await switchToDocumentUnlocked(source.documentId);
-  }
-  if (layerId > 0) await deleteLayerUnlocked(layerId);
-  await restoreVfxContextUnlocked(source);
+  let cleanupError: unknown;
+  await runInVfxSourceDocumentUnlocked(source, async () => {
+    try {
+      if (layerId > 0) await deleteLayerUnlocked(layerId);
+    } catch (error) {
+      cleanupError = error;
+    }
+    try {
+      await restoreVfxSelectionUnlocked(source);
+    } catch (error) {
+      cleanupError = cleanupError
+        ? appendVfxCleanupError(cleanupError, "上下文恢复失败", error)
+        : error;
+    }
+    if (cleanupError) throw cleanupError;
+  });
 };
 
 const rollbackVfxResultUnlocked = async (source: VfxSource, layerId: number) => {
   let cleanupError: unknown;
-  const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  try {
-    if (Number(photoshop.app.activeDocument?.id) !== source.documentId) {
-      await switchToDocumentUnlocked(source.documentId);
+  await runInVfxSourceDocumentUnlocked(source, async () => {
+    try {
+      if (layerId > 0) await deleteLayerUnlocked(layerId);
+    } catch (error) {
+      cleanupError = error;
     }
-    if (layerId > 0) await deleteLayerUnlocked(layerId);
-  } catch (error) {
-    cleanupError = error;
-  }
-  try {
-    await restoreVfxContextUnlocked(source);
-  } catch (error) {
-    cleanupError = cleanupError
-      ? appendVfxCleanupError(cleanupError, "上下文恢复失败", error)
-      : error;
-  }
-  if (cleanupError) throw cleanupError;
+    try {
+      await restoreVfxSelectionUnlocked(source);
+    } catch (error) {
+      cleanupError = cleanupError
+        ? appendVfxCleanupError(cleanupError, "上下文恢复失败", error)
+        : error;
+    }
+    if (cleanupError) throw cleanupError;
+  });
 };
 
 export const rollbackVfxResult = (

@@ -26,6 +26,7 @@ export interface VfxWorkflowAdapters {
   ) => Promise<{ layerId: number }>;
   rollback: (source: VfxSource, layerId: number, taskId: string) => Promise<void>;
   restore: (source: VfxSource, taskId: string) => Promise<void>;
+  discard: (source: VfxSource, taskId: string) => Promise<void>;
 }
 
 export interface VfxWorkflowResult {
@@ -64,6 +65,7 @@ export const executeVfxWorkflow = async (
   }
   let source: VfxSource | null = null;
   let placedLayerId = 0;
+  let applyCompleted = false;
   let workflowError: unknown;
   let workflowResult: VfxWorkflowResult | null = null;
   const prompt = buildVfxPrompt(task.config, task.prompt);
@@ -88,6 +90,7 @@ export const executeVfxWorkflow = async (
     const placed = await adapters.apply(source, toDataUrl(image), task.config, task.taskId, () =>
       task.isCurrent() && !task.signal.aborted
     );
+    applyCompleted = true;
     placedLayerId = placed.layerId;
     assertCurrent(engine, task);
     workflowResult = { image, layerId: placedLayerId, prompt, source };
@@ -107,15 +110,17 @@ export const executeVfxWorkflow = async (
   } finally {
     if (source) {
       try {
-        await adapters.restore(source, task.taskId);
-      } catch (restoreError) {
+        if (applyCompleted) await adapters.restore(source, task.taskId);
+        else await adapters.discard(source, task.taskId);
+      } catch (cleanupError) {
         workflowError = workflowError
           ? new Error(
               `${workflowError instanceof Error ? workflowError.message : "VFX 特效生成失败"}；` +
-              `恢复 Photoshop 上下文失败：${restoreError instanceof Error ? restoreError.message : "未知错误"}`
+              `${applyCompleted ? "恢复 Photoshop 上下文" : "释放 Photoshop 选区资源"}失败：` +
+              `${cleanupError instanceof Error ? cleanupError.message : "未知错误"}`
             )
-          : restoreError;
-        if (placedLayerId > 0) {
+          : cleanupError;
+        if (applyCompleted && placedLayerId > 0) {
           try {
             await adapters.rollback(source, placedLayerId, task.taskId);
             placedLayerId = 0;

@@ -9,7 +9,8 @@ const source: VfxSource = {
   documentId: 7,
   documentWidth: 100,
   documentHeight: 80,
-  selectionBounds: null
+  selectionBounds: null,
+  selectionChannelName: null
 };
 
 const engine = (provider: "gemini" | "forge" = "gemini"): GenerationEngine => ({
@@ -25,7 +26,8 @@ const adapters = (): VfxWorkflowAdapters => ({
   validate: vi.fn().mockResolvedValue(undefined),
   apply: vi.fn().mockResolvedValue({ layerId: 44 }),
   rollback: vi.fn().mockResolvedValue(undefined),
-  restore: vi.fn().mockResolvedValue(undefined)
+  restore: vi.fn().mockResolvedValue(undefined),
+  discard: vi.fn().mockResolvedValue(undefined)
 });
 
 const task = (isCurrent = () => true) => ({
@@ -66,6 +68,7 @@ describe("executeVfxWorkflow", () => {
     );
     expect(result.layerId).toBe(44);
     expect(boundary.restore).toHaveBeenCalledWith(source, "vfx-1");
+    expect(boundary.discard).not.toHaveBeenCalled();
   });
 
   it("prevents apply when cancellation wins after generation", async () => {
@@ -78,6 +81,27 @@ describe("executeVfxWorkflow", () => {
     const boundary = adapters();
     await expect(executeVfxWorkflow(gemini, task(() => current), boundary)).rejects.toMatchObject({ code: "CANCELLED" });
     expect(boundary.apply).not.toHaveBeenCalled();
+    expect(boundary.restore).not.toHaveBeenCalled();
+    expect(boundary.discard).toHaveBeenCalledWith(source, "vfx-1");
+  });
+
+  it("does not restore Photoshop context when validation rejects a user document change", async () => {
+    const boundary = adapters();
+    vi.mocked(boundary.validate).mockRejectedValue(new Error("document changed"));
+    await expect(executeVfxWorkflow(engine(), task(), boundary)).rejects.toThrow("document changed");
+    expect(boundary.apply).not.toHaveBeenCalled();
+    expect(boundary.restore).not.toHaveBeenCalled();
+    expect(boundary.discard).toHaveBeenCalledWith(source, "vfx-1");
+  });
+
+  it("discards only the snapshot when apply rejects before committing", async () => {
+    const boundary = adapters();
+    vi.mocked(boundary.apply).mockRejectedValue(new Error("apply rejected"));
+
+    await expect(executeVfxWorkflow(engine(), task(), boundary)).rejects.toThrow("apply rejected");
+
+    expect(boundary.restore).not.toHaveBeenCalled();
+    expect(boundary.discard).toHaveBeenCalledWith(source, "vfx-1");
   });
 
   it("rolls back the exact placed layer after a cancellation race", async () => {

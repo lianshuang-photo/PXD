@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const photoshop = vi.hoisted(() => ({
   captureVfxSource: vi.fn(),
+  discardVfxSource: vi.fn(),
   validateVfxSource: vi.fn(),
   placeVfxResult: vi.fn(),
   rollbackVfxResult: vi.fn(),
@@ -18,7 +19,8 @@ const source = {
   documentId: 4,
   documentWidth: 20,
   documentHeight: 10,
-  selectionBounds: null
+  selectionBounds: null,
+  selectionChannelName: null
 };
 
 describe("VFX_PHOTOSHOP_ADAPTER", () => {
@@ -33,6 +35,7 @@ describe("VFX_PHOTOSHOP_ADAPTER", () => {
     await VFX_PHOTOSHOP_ADAPTER.apply(source, "data:image/png;base64,eA==", DEFAULT_VFX_CONFIG, "task-a", current);
     await VFX_PHOTOSHOP_ADAPTER.rollback(source, 8, "task-a");
     await VFX_PHOTOSHOP_ADAPTER.restore(source, "task-a");
+    await VFX_PHOTOSHOP_ADAPTER.discard(source, "task-a");
     expect(photoshop.captureVfxSource).toHaveBeenCalledWith({ taskId: "task-a" });
     expect(photoshop.validateVfxSource).toHaveBeenCalledWith(source, { taskId: "task-a" });
     expect(photoshop.placeVfxResult).toHaveBeenCalledWith(
@@ -44,5 +47,6 @@ describe("VFX_PHOTOSHOP_ADAPTER", () => {
     );
     expect(photoshop.rollbackVfxResult).toHaveBeenCalledWith(source, 8, { taskId: "task-a" });
     expect(photoshop.restoreVfxContext).toHaveBeenCalledWith(source, { taskId: "task-a" });
+    expect(photoshop.discardVfxSource).toHaveBeenCalledWith(source, { taskId: "task-a" });
   });
 });
