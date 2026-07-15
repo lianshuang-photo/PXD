@@ -24,6 +24,7 @@ import {
   closeDocument,
   closeGeneratedDocument,
   createGeneratedDocument,
+  captureAtlasRegion,
   getSelectionPixels,
   groupLayers,
   hasActiveSelection,
@@ -31,6 +32,8 @@ import {
   onBatchAddLayer,
   placeImageIntoDocument,
   placeImageIntoSelection,
+  placeMultiRegionAtlas,
+  releaseAtlasRegions,
   setSelectionBounds,
   switchToDocument,
   type GeneratedDocumentSession,
@@ -50,6 +53,17 @@ import { translateText } from "../services/translator";
 import { useGenerationHistory } from "./useGenerationHistory";
 import type { GenerationHistoryEntry } from "../services/generationHistory";
 import { normalizePromptParams, sanitizePrompt } from "../services/promptParams";
+import {
+  DEFAULT_ATLAS_MAX_WORKING_BYTES,
+  MAX_ATLAS_REGIONS,
+  type AtlasRegionCapture
+} from "../services/multiRegionAtlas";
+import {
+  composeMultiRegionAtlas,
+  normalizeMultiRegionAtlasResult,
+  splitMultiRegionAtlas
+} from "../services/multiRegionAtlasImage";
+import { executeMultiRegionAtlasWorkflow } from "../services/multiRegionAtlasWorkflow";
 
 export type GenerationStatus = "idle" | "running" | "success" | "error";
 export type ToastType = "info" | "success" | "warning" | "error";
@@ -395,6 +409,13 @@ export interface GenerationControllerState {
   removeFromBatch: (id: string) => Promise<void>;
   clearBatch: () => Promise<void>;
   runBatch: () => Promise<void>;
+  atlasRegions: AtlasRegionCapture[];
+  atlasRunning: boolean;
+  atlasStopping: boolean;
+  addAtlasRegion: () => Promise<void>;
+  removeAtlasRegion: (id: string) => Promise<void>;
+  clearAtlasRegions: () => Promise<void>;
+  runMultiRegionAtlas: () => Promise<void>;
   toast: ToastState | null;
   dismissToast: () => void;
   presets: PresetMeta[];
@@ -450,6 +471,9 @@ export const useGenerationController = (
   const [optionsLoading, setOptionsLoading] = useState(false);
   const [optionsError, setOptionsError] = useState<string | null>(null);
   const [batchItems, setBatchItems] = useState<BatchItem[]>([]);
+  const [atlasRegions, setAtlasRegions] = useState<AtlasRegionCapture[]>([]);
+  const [atlasRunning, setAtlasRunning] = useState(false);
+  const [atlasStopping, setAtlasStopping] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [presets, setPresets] = useState<PresetMeta[]>([]);
   const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
@@ -468,6 +492,8 @@ export const useGenerationController = (
     settingsRef.current = settings;
   }, [settings]);
   const runGateRef = useRef(new GenerationRunGate());
+  const atlasSettlingRef = useRef(false);
+  const atlasCapturePendingRef = useRef(false);
   const stoppedByEngineChangeRef = useRef(false);
 
   useLayoutEffect(() => {
@@ -729,7 +755,7 @@ export const useGenerationController = (
   }, [history, pushToast]);
 
   const refreshOptions = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (runGateRef.current.current || atlasSettlingRef.current) return;
     const requestToken = engineToken;
     const fetchOptions = requestToken.engine.fetchOptions;
     if (!fetchOptions) {
@@ -812,6 +838,7 @@ export const useGenerationController = (
   const stopGeneration = useCallback(() => {
     const activeRun = runGateRef.current.current;
     if (!activeRun) return;
+    const settlingAtlas = activeRun.kind === "atlas";
     runGateRef.current.stop();
     engine.cancelAll();
     stopPolling(engineToken);
@@ -824,16 +851,18 @@ export const useGenerationController = (
         )
       );
     }
-    setStatus("idle");
+    setStatus(settlingAtlas ? "running" : "idle");
+    setAtlasRunning(settlingAtlas);
+    setAtlasStopping(settlingAtlas);
     setProgress(0);
     setProgressPreview(null);
     setProgressText(null);
     setError(null);
-    pushToast("info", "已停止");
+    pushToast("info", settlingAtlas ? "正在停止并恢复 Photoshop 文档" : "已停止");
   }, [engine, engineToken, pushToast, stopPolling]);
 
   const runGeneration = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (runGateRef.current.current || atlasSettlingRef.current) return;
     const requestToken = engineToken;
     const requestEngine = requestToken.engine;
     const taskId = generateId();
@@ -994,6 +1023,179 @@ export const useGenerationController = (
     }
   }, [batchItems.length, form, pushToast]);
 
+  const addAtlasRegion = useCallback(async () => {
+    if (runGateRef.current.current || atlasSettlingRef.current || atlasCapturePendingRef.current) return;
+    if (atlasRegions.length >= MAX_ATLAS_REGIONS) {
+      pushToast("warning", `最多只能添加 ${MAX_ATLAS_REGIONS} 个选区`);
+      return;
+    }
+    atlasCapturePendingRef.current = true;
+    const taskId = generateId();
+    try {
+      const capture = await captureAtlasRegion(clampNumber(form.resolution, 128, 2048), { taskId });
+      const duplicate = atlasRegions.some((region) =>
+        region.documentId === capture.documentId &&
+        region.bounds.left === capture.bounds.left &&
+        region.bounds.top === capture.bounds.top &&
+        region.bounds.right === capture.bounds.right &&
+        region.bounds.bottom === capture.bounds.bottom
+      );
+      if (duplicate) {
+        await releaseAtlasRegions([capture], { taskId });
+        pushToast("warning", "这个选区已经添加过了");
+        return;
+      }
+      if (atlasRegions.length && atlasRegions[0].documentId !== capture.documentId) {
+        await releaseAtlasRegions([capture], { taskId });
+        pushToast("warning", "多区拼接只支持同一个 Photoshop 文档");
+        return;
+      }
+      setAtlasRegions((current) => [...current, capture]);
+      pushToast("success", `已添加选区 ${atlasRegions.length + 1}/${MAX_ATLAS_REGIONS}`);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "选区读取失败";
+      pushToast("error", message);
+    } finally {
+      atlasCapturePendingRef.current = false;
+    }
+  }, [atlasRegions, form.resolution, pushToast]);
+
+  const removeAtlasRegion = useCallback(async (id: string) => {
+    if (runGateRef.current.current || atlasSettlingRef.current || atlasCapturePendingRef.current) return;
+    const target = atlasRegions.find((region) => region.id === id);
+    if (target) await releaseAtlasRegions([target], { taskId: generateId() });
+    setAtlasRegions((current) => current.filter((region) => region.id !== id));
+  }, [atlasRegions]);
+
+  const clearAtlasRegions = useCallback(async () => {
+    if (runGateRef.current.current || atlasSettlingRef.current || atlasCapturePendingRef.current) return;
+    await releaseAtlasRegions(atlasRegions, { taskId: generateId() });
+    setAtlasRegions([]);
+  }, [atlasRegions]);
+
+  const runMultiRegionAtlas = useCallback(async () => {
+    if (runGateRef.current.current || atlasSettlingRef.current) return;
+    const requestToken = engineToken;
+    const requestEngine = requestToken.engine;
+    if (requestEngine.provider !== "gemini") {
+      const message = "多区拼接仅支持 Gemini 图像引擎，请先在设置中切换引擎";
+      setError(message);
+      pushToast("warning", message);
+      return;
+    }
+    if (!atlasRegions.length) {
+      pushToast("warning", "请先添加至少一个 Photoshop 选区");
+      return;
+    }
+    const prompt = effectivePromptFor(form);
+    if (!prompt) {
+      pushToast("warning", "请输入用于多区统一处理的提示词");
+      return;
+    }
+    const taskId = generateId();
+    atlasSettlingRef.current = true;
+    const { token: runToken } = runGateRef.current.begin("atlas", taskId);
+    const isRunCurrent = () => isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken);
+    setAtlasRunning(true);
+    setAtlasStopping(false);
+    setStatus("running");
+    setError(null);
+    setProgress(0);
+    setProgressPreview(null);
+    setProgressText("正在准备多区 Atlas");
+    dismissToast();
+    let committed = false;
+    let photoshopCommitted = false;
+    try {
+      const result = await executeMultiRegionAtlasWorkflow({
+        engine: requestEngine,
+        regions: atlasRegions,
+        prompt: sanitizePrompt(prompt),
+        targetMaxEdge: clampNumber(form.resolution, 128, 2048),
+        timeoutMs: Math.max(
+          5_000,
+          Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)
+        ),
+        taskId,
+        maxWorkingBytes: DEFAULT_ATLAS_MAX_WORKING_BYTES,
+        isCurrent: isRunCurrent,
+        onProgress: (value, message) => {
+          if (!isRunCurrent()) return;
+          setProgress(value);
+          setProgressText(message);
+        },
+        adapters: {
+          compose: composeMultiRegionAtlas,
+          normalize: normalizeMultiRegionAtlasResult,
+          split: splitMultiRegionAtlas,
+          place: async (documentId, regions, parts, options) => {
+            const placement = await placeMultiRegionAtlas(documentId, regions, parts, {
+              ...options,
+              groupName: "PXD 多区拼接",
+              feather: form.maskFeather
+            });
+            photoshopCommitted = true;
+            return placement;
+          }
+        }
+      });
+      if (!photoshopCommitted) return;
+      committed = true;
+      runGateRef.current.complete(runToken);
+      atlasSettlingRef.current = false;
+      setAtlasRegions([]);
+      setLastImages([result.previewDataUrl]);
+      setStatus("success");
+      setAtlasRunning(false);
+      setAtlasStopping(false);
+      setProgress(0);
+      setProgressPreview(null);
+      setProgressText(null);
+      pushToast("success", `多区拼接完成，已生成 ${result.layerIds.length} 个非破坏图层`);
+      await recordHistory({
+        provider: "gemini",
+        prompt,
+        params: { ...form },
+        resultDataUrl: result.previewDataUrl
+      });
+    } catch (caught) {
+      setAtlasRegions((current) => current.filter((region) => region.selectionChannelName));
+      if (
+        caught && typeof caught === "object" &&
+        (caught as { name?: unknown }).name === "AtlasPlacementError" &&
+        (caught as { recoveryFailed?: unknown }).recoveryFailed === true
+      ) {
+        const message = formatGenerationError(caught, "多区拼接恢复失败");
+        setStatus("error");
+        setError(message);
+        pushToast("error", message);
+        return;
+      }
+      if (!isRunCurrent()) return;
+      if (isGenerationCancelledError(caught) || (caught as { code?: unknown })?.code === "ENGINE_STALE") {
+        setStatus("idle");
+        setError(null);
+        pushToast("info", "已停止");
+        return;
+      }
+      const message = formatGenerationError(caught, "多区拼接失败");
+      setStatus("error");
+      setError(message);
+      pushToast("error", message);
+    } finally {
+      if (!committed) {
+        if (runGateRef.current.isCurrent(runToken)) runGateRef.current.complete(runToken);
+        atlasSettlingRef.current = false;
+        setAtlasRunning(false);
+        setAtlasStopping(false);
+        setProgress(0);
+        setProgressPreview(null);
+        setProgressText(null);
+        setStatus((current) => current === "running" ? "idle" : current);
+      }
+    }
+  }, [atlasRegions, dismissToast, engineToken, form, isEngineCurrent, pushToast, recordHistory, settings.timeoutMaxSeconds, settings.timeoutMultiplier]);
+
   const removeFromBatch = useCallback(
     async (id: string) => {
       const target = batchItems.find((item) => item.id === id);
@@ -1034,7 +1236,7 @@ export const useGenerationController = (
   }, [batchItems, engine, pushToast, stopGeneration]);
 
   const runBatch = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (runGateRef.current.current || atlasSettlingRef.current) return;
     const runnableItems = batchItems.filter((item) => item.status !== "success");
     if (!runnableItems.length) {
       if (batchItems.length) {
@@ -1237,6 +1439,13 @@ export const useGenerationController = (
     removeFromBatch,
     clearBatch,
     runBatch,
+    atlasRegions,
+    atlasRunning,
+    atlasStopping,
+    addAtlasRegion,
+    removeAtlasRegion,
+    clearAtlasRegions,
+    runMultiRegionAtlas,
     toast,
     dismissToast,
     presets,

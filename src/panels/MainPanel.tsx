@@ -3,6 +3,7 @@ import type { AppSettings } from "../context/types";
 import { useGenerationController } from "../hooks/useGenerationController";
 import OverlayPortal from "../components/OverlayPortal";
 import PromptParamControls from "../components/PromptParamControls";
+import MultiRegionAtlasControls from "../components/MultiRegionAtlasControls";
 
 interface Props {
   settings: AppSettings;
@@ -79,6 +80,13 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     removeFromBatch,
     clearBatch,
     runBatch,
+    atlasRegions,
+    atlasRunning,
+    atlasStopping,
+    addAtlasRegion,
+    removeAtlasRegion,
+    clearAtlasRegions,
+    runMultiRegionAtlas,
     toast,
     dismissToast,
     presets,
@@ -418,6 +426,18 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
           {optionsLoading ? "同步中" : "刷新"}
         </button>
       </div>
+
+      <MultiRegionAtlasControls
+        provider={settings.imageProvider}
+        regions={atlasRegions}
+        disabled={status === "running" && !atlasRunning}
+        running={atlasRunning}
+        stopping={atlasStopping}
+        onAdd={addAtlasRegion}
+        onRemove={removeAtlasRegion}
+        onClear={clearAtlasRegions}
+        onRun={runMultiRegionAtlas}
+      />
       
       {/* 进度条和错误提示 */}
       {status === "running" && (
