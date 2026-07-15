@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GenerationEngine } from "./generationEngine";
 import { createGlobalPartitionPlan } from "./globalPartition";
 import { executeGlobalPartitionWorkflow } from "./globalPartitionWorkflow";
@@ -18,21 +18,33 @@ const createEngine = () => ({
   cancelAll: vi.fn().mockReturnValue(0)
 }) as unknown as GenerationEngine;
 
+const normalizeImageImplementation = async (
+  image: string,
+  _options: { retainedBytes: number }
+) => ({
+  base64: image,
+  dataUrl: `data:image/png;base64,${image}`,
+  width: 768,
+  height: 384,
+  encodedBytes: image.length,
+  estimatedWorkingBytes: image.length
+});
+const normalizeImage = vi.fn(normalizeImageImplementation);
+
 describe("global partition workflow", () => {
-  it("generates all captures concurrently with one prompt and places them in plan order", async () => {
+  beforeEach(() => {
+    normalizeImage.mockReset().mockImplementation(normalizeImageImplementation);
+  });
+
+  it("generates and normalizes captures sequentially with one prompt and places them in plan order", async () => {
     const engine = createEngine();
     const currentPlan = plan();
     let inFlight = 0;
     let maxInFlight = 0;
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
     (engine.generate as ReturnType<typeof vi.fn>).mockImplementation(async ({ taskId, prompt }) => {
       inFlight += 1;
       maxInFlight = Math.max(maxInFlight, inFlight);
-      if (inFlight === currentPlan.tiles.length) release();
-      await gate;
+      await Promise.resolve();
       inFlight -= 1;
       return { images: [`RESULT_${taskId}_${prompt}`] };
     });
@@ -48,21 +60,26 @@ describe("global partition workflow", () => {
       taskId: "partition",
       maskContract: 12,
       maskFeather: 24,
+      maxWorkingBytes: 96 * 1024 * 1024,
       isCurrent: () => true,
       onProgress: (value) => progress.push(value),
       adapters: {
-        captureRegions: vi.fn().mockResolvedValue(currentPlan.tiles.map((tile) => ({
+        captureRegion: vi.fn().mockImplementation(async (_documentId, tile) => ({
           tileId: tile.id,
           dataUrl: `data:image/png;base64,${tile.id}`,
           width: tile.targetWidth,
           height: tile.targetHeight
-        }))),
+        })),
+        normalizeImage,
         placeImages
       }
     });
 
-    expect(maxInFlight).toBe(2);
+    expect(maxInFlight).toBe(1);
     expect(engine.generate).toHaveBeenCalledTimes(2);
+    expect(normalizeImage).toHaveBeenCalledTimes(2);
+    expect(normalizeImage.mock.calls[0][1]).toMatchObject({ retainedBytes: 0 });
+    expect(normalizeImage.mock.calls[1][1].retainedBytes).toBeGreaterThan(0);
     expect(engine.generate).toHaveBeenNthCalledWith(1, expect.objectContaining({
       prompt: "same global style",
       baseImageBase64: "left",
@@ -74,7 +91,7 @@ describe("global partition workflow", () => {
         tile,
         dataUrl: `data:image/png;base64,RESULT_partition:tile:${index}_same global style`
       })),
-      expect.objectContaining({ maskContract: 12, maskFeather: 24, taskId: "partition" })
+      expect.objectContaining({ overlap: currentPlan.overlap, maskContract: 12, maskFeather: 24, taskId: "partition" })
     );
     expect(result).toMatchObject({ layerIds: [41, 42], groupId: 50 });
     expect(progress[progress.length - 1]).toBe(1);
@@ -98,14 +115,16 @@ describe("global partition workflow", () => {
       taskId: "partition",
       maskContract: 12,
       maskFeather: 24,
+      maxWorkingBytes: 96 * 1024 * 1024,
       isCurrent: () => true,
       adapters: {
-        captureRegions: vi.fn().mockResolvedValue(currentPlan.tiles.map((tile) => ({
+        captureRegion: vi.fn().mockImplementation(async (_documentId, tile) => ({
           tileId: tile.id,
           dataUrl: `data:image/png;base64,${tile.id}`,
           width: tile.targetWidth,
           height: tile.targetHeight
-        }))),
+        })),
+        normalizeImage,
         placeImages
       }
     })).rejects.toThrow("model failed");
@@ -138,14 +157,16 @@ describe("global partition workflow", () => {
       taskId: "partition",
       maskContract: 12,
       maskFeather: 24,
+      maxWorkingBytes: 96 * 1024 * 1024,
       isCurrent: () => current,
       adapters: {
-        captureRegions: vi.fn().mockResolvedValue([{
+        captureRegion: vi.fn().mockResolvedValue({
           tileId: "whole",
           dataUrl: "data:image/png;base64,whole",
           width: 768,
           height: 768
-        }]),
+        }),
+        normalizeImage,
         placeImages
       }
     });

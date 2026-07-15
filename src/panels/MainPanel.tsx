@@ -71,6 +71,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     runGeneration,
     globalPartitionOptions,
     globalPartitionRunning,
+    globalPartitionStopping,
     setGlobalPartitionOptions,
     runGlobalPartition,
     stopGeneration,
@@ -385,7 +386,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
           type="button"
           className="btn btn--secondary"
           onClick={stopGeneration}
-          disabled={status !== "running"}
+          disabled={status !== "running" || globalPartitionStopping}
           style={{
             ...compactTopActionButtonStyle,
             color: "#fca5a5",
@@ -393,7 +394,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
             borderBottomColor: "rgba(239, 68, 68, 0.45)"
           }}
         >
-          停止
+          {globalPartitionStopping ? "停止中" : "停止"}
         </button>
         <button 
           type="button" 

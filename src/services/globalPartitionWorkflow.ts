@@ -7,25 +7,37 @@ import type {
   PartitionPlacementInput,
   PartitionPlacementResult
 } from "./photoshop";
-import type { GlobalPartitionPlan } from "./globalPartition";
+import type { GlobalPartitionPlan, GlobalPartitionTile } from "./globalPartition";
+import type { NormalizedGlobalPartitionImage } from "./globalPartitionImage";
 
 export interface GlobalPartitionWorkflowAdapters {
-  captureRegions: (
+  captureRegion: (
     documentId: number,
-    plan: GlobalPartitionPlan,
+    tile: GlobalPartitionTile,
     options: { taskId: string }
-  ) => Promise<CapturedDocumentRegion[]>;
+  ) => Promise<CapturedDocumentRegion>;
   placeImages: (
     documentId: number,
     placements: PartitionPlacementInput[],
     options: {
       taskId: string;
+      overlap: number;
       maskContract: number;
       maskFeather: number;
       isCurrent: () => boolean;
       onProgress: (completed: number, total: number) => void | Promise<void>;
     }
   ) => Promise<PartitionPlacementResult>;
+  normalizeImage: (
+    image: string,
+    options: {
+      targetWidth: number;
+      targetHeight: number;
+      retainedBytes: number;
+      maxWorkingBytes: number;
+      isCurrent: () => boolean;
+    }
+  ) => Promise<NormalizedGlobalPartitionImage>;
 }
 
 export interface GlobalPartitionWorkflowInput {
@@ -37,6 +49,7 @@ export interface GlobalPartitionWorkflowInput {
   taskId: string;
   maskContract: number;
   maskFeather: number;
+  maxWorkingBytes: number;
   isCurrent: () => boolean;
   onProgress?: (value: number, message: string) => void;
   adapters: GlobalPartitionWorkflowAdapters;
@@ -65,29 +78,30 @@ export const executeGlobalPartitionWorkflow = async (
   };
   assertCurrent();
   input.onProgress?.(0.05, "正在读取大图分区");
-  const captures = await input.adapters.captureRegions(input.documentId, input.plan, {
-    taskId: input.taskId
-  });
-  assertCurrent();
-  const capturesById = new Map(captures.map((capture) => [capture.tileId, capture]));
-  if (capturesById.size !== input.plan.tiles.length) {
-    throw new Error("Photoshop 未返回完整的分区截图");
-  }
-  input.onProgress?.(0.2, "分区截图完成");
 
   const tileTaskIds = input.plan.tiles.map((tile) => `${input.taskId}:tile:${tile.index}`);
   let completed = 0;
-  let images: string[];
+  const images: string[] = [];
+  const placements: PartitionPlacementInput[] = [];
+  let retainedBytes = 0;
+  let largestPlacementBinaryBytes = 0;
   try {
-    images = await Promise.all(input.plan.tiles.map(async (tile, index) => {
-      const capture = capturesById.get(tile.id);
-      if (!capture?.dataUrl) throw new Error(`缺少分区 ${tile.id} 的截图`);
+    for (let index = 0; index < input.plan.tiles.length; index += 1) {
+      const tile = input.plan.tiles[index];
+      const capture = await input.adapters.captureRegion(input.documentId, tile, {
+        taskId: input.taskId
+      });
+      assertCurrent();
+      if (capture.tileId !== tile.id || !capture.dataUrl) {
+        throw new Error(`缺少分区 ${tile.id} 的截图`);
+      }
       const result = await input.engine.generate({
         prompt: input.prompt,
         baseImageBase64: dataUrlToBase64(capture.dataUrl),
         timeoutMs: input.timeoutMs,
         taskId: tileTaskIds[index]
       });
+      capture.dataUrl = "";
       assertCurrent();
       const image = result.images[0];
       if (!image) {
@@ -98,25 +112,36 @@ export const executeGlobalPartitionWorkflow = async (
           input.engine.provider
         );
       }
+      const normalized = await input.adapters.normalizeImage(image, {
+        targetWidth: tile.targetWidth,
+        targetHeight: tile.targetHeight,
+        retainedBytes,
+        maxWorkingBytes: input.maxWorkingBytes,
+        isCurrent: input.isCurrent
+      });
+      assertCurrent();
+      retainedBytes += normalized.base64.length;
+      largestPlacementBinaryBytes = Math.max(largestPlacementBinaryBytes, normalized.encodedBytes);
+      images.push(normalized.base64);
+      placements.push({ tile, dataUrl: normalized.dataUrl });
       completed += 1;
       input.onProgress?.(
-        0.2 + 0.5 * (completed / input.plan.tiles.length),
+        0.05 + 0.65 * (completed / input.plan.tiles.length),
         `已生成 ${completed}/${input.plan.tiles.length} 个分区`
       );
-      return image;
-    }));
+    }
   } catch (error) {
     for (const taskId of tileTaskIds) input.engine.cancel(taskId);
     throw error;
   }
   assertCurrent();
+  if (retainedBytes + largestPlacementBinaryBytes * 2 > input.maxWorkingBytes) {
+    throw new Error("分区结果贴回所需内存超过 96 MiB 工作内存上限");
+  }
 
-  const placements = input.plan.tiles.map((tile, index) => ({
-    tile,
-    dataUrl: `data:image/png;base64,${images[index]}`
-  }));
   const placement = await input.adapters.placeImages(input.documentId, placements, {
     taskId: input.taskId,
+    overlap: input.plan.overlap,
     maskContract: input.maskContract,
     maskFeather: input.maskFeather,
     isCurrent: input.isCurrent,

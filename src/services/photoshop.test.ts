@@ -182,11 +182,20 @@ describe("global partition Photoshop primitives", () => {
   });
 
   const setupPartitionPlacement = (
-    configuration: { failGroupGet?: boolean; selectionReadFails?: boolean } = {}
+    configuration: {
+      failGroupGet?: boolean;
+      selectionReadFails?: boolean;
+      failTransform?: boolean;
+      failMask?: boolean;
+      failSelectionRestore?: boolean;
+      failDocumentRestore?: boolean;
+    } = {}
   ) => {
     let activeDocumentId = 20;
     let activeLayerId = 5;
     let activeLayerIsGroup = false;
+    let activeLayerHasMask = false;
+    let activeLayerBounds = { left: 0, top: 0, right: 768, bottom: 384 };
     let sourceSelection: any = { left: 3, top: 4, right: 50, bottom: 60 };
     let lastJsx = "";
     const deleted: number[] = [];
@@ -214,16 +223,42 @@ describe("global partition Photoshop primitives", () => {
     const batchPlay = vi.fn().mockImplementation(async (descriptors: any[]) => {
       const descriptor = descriptors[0];
       if (descriptor?._obj === "select" && descriptor._target?.[0]?._ref === "document") {
+        if (configuration.failDocumentRestore && descriptor._target[0]._id === 20) {
+          throw new Error("document restore failed");
+        }
         activeDocumentId = descriptor._target[0]._id;
       } else if (descriptor?._obj === "placeEvent") {
         activeLayerId = nextPlacedLayerId++;
         activeLayerIsGroup = false;
+        activeLayerHasMask = false;
+        activeLayerBounds = { left: 0, top: 0, right: 768, bottom: 384 };
+      } else if (descriptor?._obj === "transform") {
+        if (configuration.failTransform) throw new Error("strict transform failed");
+        const oldWidth = activeLayerBounds.right - activeLayerBounds.left;
+        const oldHeight = activeLayerBounds.bottom - activeLayerBounds.top;
+        const centerX = (activeLayerBounds.left + activeLayerBounds.right) / 2 + descriptor.offset.horizontal._value;
+        const centerY = (activeLayerBounds.top + activeLayerBounds.bottom) / 2 + descriptor.offset.vertical._value;
+        const width = oldWidth * descriptor.width._value / 100;
+        const height = oldHeight * descriptor.height._value / 100;
+        activeLayerBounds = {
+          left: centerX - width / 2,
+          top: centerY - height / 2,
+          right: centerX + width / 2,
+          bottom: centerY + height / 2
+        };
+      } else if (descriptors.some((item) => item?._obj === "make")) {
+        if (configuration.failMask) throw new Error("strict mask failed");
+        activeLayerHasMask = true;
       } else if (descriptor?._obj === "AdobeScriptAutomation Scripts") {
         if (lastJsx.includes("layerSection")) {
           activeLayerId = 50;
           activeLayerIsGroup = true;
         }
       } else if (descriptor?._obj === "set" && descriptor._target?.[0]?._property === "selection") {
+        if (configuration.failSelectionRestore && descriptor.to?._obj === "rectangle" &&
+            descriptor.to.left?._value === 3) {
+          throw new Error("selection restore failed");
+        }
         sourceSelection = descriptor.to?._obj === "rectangle"
           ? {
               left: descriptor.to.left._value,
@@ -239,6 +274,8 @@ describe("global partition Photoshop primitives", () => {
         if (activeLayerIsGroup && configuration.failGroupGet) throw new Error("group get failed");
         return [{
           layerID: activeLayerId,
+          bounds: activeLayerBounds,
+          hasUserMask: activeLayerHasMask,
           layerSection: { _value: activeLayerIsGroup ? "layerSectionStart" : "layerSectionContent" }
         }];
       }
@@ -291,6 +328,7 @@ describe("global partition Photoshop primitives", () => {
       plan.tiles.map((tile) => ({ tile, dataUrl: "data:image/png;base64,QQ==" })),
       {
         taskId: "partition",
+        overlap: plan.overlap,
         maskContract: 12,
         maskFeather: 24,
         isCurrent: () => true
@@ -301,9 +339,9 @@ describe("global partition Photoshop primitives", () => {
     expect(harness.deleted).toEqual([]);
     expect(harness.getActiveDocumentId()).toBe(20);
     expect(harness.getSelection()).toEqual(originalSelection);
-    expect(harness.file.write.mock.calls.some(([jsx]) => String(jsx).includes("selection.contract(12)")))
+    expect(harness.file.write.mock.calls.some(([jsx]) => String(jsx).includes('var edges = ["right"]')))
       .toBe(true);
-    expect(harness.file.write.mock.calls.some(([jsx]) => String(jsx).includes("selection.feather(24)")))
+    expect(harness.file.write.mock.calls.some(([jsx]) => String(jsx).includes('var edges = ["left"]')))
       .toBe(true);
   });
 
@@ -322,6 +360,7 @@ describe("global partition Photoshop primitives", () => {
       [{ tile: plan.tiles[0], dataUrl: "data:image/png;base64,QQ==" }],
       {
         taskId: "partition",
+        overlap: plan.overlap,
         maskContract: 12,
         maskFeather: 24,
         isCurrent: () => current,
@@ -349,6 +388,7 @@ describe("global partition Photoshop primitives", () => {
       [{ tile: plan.tiles[0], dataUrl: "data:image/png;base64,QQ==" }],
       {
         taskId: "partition",
+        overlap: plan.overlap,
         maskContract: 12,
         maskFeather: 24,
         isCurrent: () => true
@@ -373,6 +413,7 @@ describe("global partition Photoshop primitives", () => {
       [{ tile: plan.tiles[0], dataUrl: "data:image/png;base64,QQ==" }],
       {
         taskId: "partition",
+        overlap: plan.overlap,
         maskContract: 12,
         maskFeather: 24,
         isCurrent: () => true
@@ -380,5 +421,85 @@ describe("global partition Photoshop primitives", () => {
     )).rejects.toThrow("selection unavailable");
 
     expect(harness.deleted).toEqual([]);
+  });
+
+  it("does not create a mask for a single whole-document tile", async () => {
+    const harness = setupPartitionPlacement();
+    const plan = createGlobalPartitionPlan({
+      width: 1000,
+      height: 1000,
+      overlap: 80,
+      targetMaxEdge: 768
+    });
+
+    await placePartitionedImages(
+      10,
+      [{ tile: plan.tiles[0], dataUrl: "data:image/png;base64,QQ==" }],
+      {
+        taskId: "partition",
+        overlap: plan.overlap,
+        maskContract: 0,
+        maskFeather: 0,
+        isCurrent: () => true
+      }
+    );
+
+    expect(harness.file.write.mock.calls.some(([jsx]) => String(jsx).includes("fillMaskRect"))).toBe(false);
+    expect(harness.deleted).toEqual([]);
+  });
+
+  it.each([
+    ["transform", { failTransform: true }, "strict transform failed"],
+    ["mask", { failMask: true }, "strict mask failed"]
+  ])("rolls back the landed layer when strict %s fails", async (_label, configuration, message) => {
+    const harness = setupPartitionPlacement(configuration);
+    const plan = createGlobalPartitionPlan({
+      width: 2000,
+      height: 1000,
+      overlap: 80,
+      targetMaxEdge: 768
+    });
+
+    await expect(placePartitionedImages(
+      10,
+      [{ tile: plan.tiles[0], dataUrl: "data:image/png;base64,QQ==" }],
+      {
+        taskId: "partition",
+        overlap: plan.overlap,
+        maskContract: 12,
+        maskFeather: 24,
+        isCurrent: () => true
+      }
+    )).rejects.toThrow(message);
+
+    expect(harness.deleted).toEqual([41]);
+    expect(harness.getActiveDocumentId()).toBe(20);
+  });
+
+  it.each([
+    ["selection", { failSelectionRestore: true }, "selection restore failed"],
+    ["document", { failDocumentRestore: true }, "document restore failed"]
+  ])("rolls back a completed group when %s restoration fails", async (_label, configuration, message) => {
+    const harness = setupPartitionPlacement(configuration);
+    const plan = createGlobalPartitionPlan({
+      width: 1000,
+      height: 1000,
+      overlap: 80,
+      targetMaxEdge: 768
+    });
+
+    await expect(placePartitionedImages(
+      10,
+      [{ tile: plan.tiles[0], dataUrl: "data:image/png;base64,QQ==" }],
+      {
+        taskId: "partition",
+        overlap: plan.overlap,
+        maskContract: 0,
+        maskFeather: 0,
+        isCurrent: () => true
+      }
+    )).rejects.toThrow(message);
+
+    expect(harness.deleted).toEqual([50]);
   });
 });

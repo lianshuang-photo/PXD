@@ -850,6 +850,7 @@ export interface PartitionPlacementInput {
 }
 
 export interface PartitionPlacementOptions extends PhotoshopOperationOptions {
+  overlap: number;
   maskContract: number;
   maskFeather: number;
   groupName?: string;
@@ -860,6 +861,20 @@ export interface PartitionPlacementOptions extends PhotoshopOperationOptions {
 export interface PartitionPlacementResult {
   layerIds: number[];
   groupId: number;
+}
+
+export class PartitionOperationError extends Error {
+  readonly issues: Array<{ phase: string; error: unknown }>;
+  readonly recoveryFailed: boolean;
+
+  constructor(issues: Array<{ phase: string; error: unknown }>) {
+    super(issues.map(({ phase, error }) =>
+      `${phase}：${error instanceof Error ? error.message : String(error)}`
+    ).join("；"));
+    this.name = "PartitionOperationError";
+    this.issues = issues;
+    this.recoveryFailed = issues.some(({ phase }) => phase !== "分区贴回" && phase !== "分区截图");
+  }
 }
 
 const documentPixelValue = (value: unknown) => {
@@ -929,6 +944,190 @@ const restoreSelectionUnlocked = async (bounds: SelectionBounds | null) => {
   }, DEFAULT_MODAL_OPTIONS);
 };
 
+const partitionUnitValue = (value: unknown) => {
+  if (typeof value === "number") return value;
+  if (value && typeof value === "object") {
+    const record = value as { _value?: unknown; value?: unknown };
+    const candidate = Number(record._value ?? record.value);
+    if (Number.isFinite(candidate)) return candidate;
+  }
+  return Number(value);
+};
+
+const resizePartitionLayerUnlocked = async (
+  layerId: number,
+  layerBounds: unknown,
+  target: PixelBounds
+) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const record = layerBounds as Record<string, unknown> | null;
+  const left = partitionUnitValue(record?.left);
+  const top = partitionUnitValue(record?.top);
+  const right = partitionUnitValue(record?.right);
+  const bottom = partitionUnitValue(record?.bottom);
+  const width = right - left;
+  const height = bottom - top;
+  const targetWidth = target.right - target.left;
+  const targetHeight = target.bottom - target.top;
+  if (![left, top, right, bottom, width, height, targetWidth, targetHeight].every(Number.isFinite) ||
+      width <= 0 || height <= 0 || targetWidth <= 0 || targetHeight <= 0) {
+    throw new Error("Photoshop 未返回可严格定位的分区图层");
+  }
+  await executeAsModalUnlocked(photoshop, async () => {
+    await photoshop.app.batchPlay([{
+      _obj: "transform",
+      _target: [{ _ref: "layer", _id: layerId }],
+      freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
+      width: { _unit: "percentUnit", _value: targetWidth / width * 100 },
+      height: { _unit: "percentUnit", _value: targetHeight / height * 100 },
+      offset: {
+        _obj: "offset",
+        horizontal: { _unit: "pixelsUnit", _value: (target.left + target.right - left - right) / 2 },
+        vertical: { _unit: "pixelsUnit", _value: (target.top + target.bottom - top - bottom) / 2 }
+      }
+    }], { synchronousExecution: true });
+  }, { commandName: "严格定位 PXD 分区图层" });
+  const verified = await executeAsModalUnlocked(photoshop, async () => {
+    const result = await photoshop.app.batchPlay(
+      [{ _obj: "get", _target: [{ _ref: "layer", _id: layerId }] }],
+      { synchronousExecution: true }
+    );
+    return result[0];
+  }, DEFAULT_MODAL_OPTIONS);
+  const verifiedBounds = verified?.bounds ?? verified?.boundsNoEffects;
+  const actual = {
+    left: partitionUnitValue(verifiedBounds?.left),
+    top: partitionUnitValue(verifiedBounds?.top),
+    right: partitionUnitValue(verifiedBounds?.right),
+    bottom: partitionUnitValue(verifiedBounds?.bottom)
+  };
+  if (Object.keys(actual).some((key) =>
+    Math.abs(actual[key as keyof typeof actual] - target[key as keyof PixelBounds]) > 1.5
+  )) {
+    throw new Error("Photoshop 未将分区图层严格定位到目标范围");
+  }
+};
+
+const partitionMaskBandsJsx = (
+  bounds: PixelBounds,
+  edges: GlobalPartitionTile["seamEdges"],
+  contract: number,
+  feather: number
+) => {
+  const steps = Math.max(1, Math.min(64, Math.ceil(feather / 4)));
+  return `
+    var doc = app.activeDocument;
+    var maskRef = new ActionReference();
+    maskRef.putEnumerated(charIDToTypeID("Chnl"), charIDToTypeID("Chnl"), charIDToTypeID("Msk "));
+    var selectMask = new ActionDescriptor();
+    selectMask.putReference(charIDToTypeID("null"), maskRef);
+    executeAction(charIDToTypeID("slct"), selectMask, DialogModes.NO);
+    function fillMaskRect(left, top, right, bottom, gray) {
+      if (right <= left || bottom <= top) return;
+      doc.selection.select([[left, top], [right, top], [right, bottom], [left, bottom]]);
+      var color = new SolidColor();
+      color.rgb.red = gray;
+      color.rgb.green = gray;
+      color.rgb.blue = gray;
+      doc.selection.fill(color, ColorBlendMode.NORMAL, 100, false);
+    }
+    var left = ${JSON.stringify(bounds.left)};
+    var top = ${JSON.stringify(bounds.top)};
+    var right = ${JSON.stringify(bounds.right)};
+    var bottom = ${JSON.stringify(bounds.bottom)};
+    var contract = ${JSON.stringify(contract)};
+    var feather = ${JSON.stringify(feather)};
+    var steps = ${JSON.stringify(steps)};
+    var edges = ${JSON.stringify(edges)};
+    for (var edgeIndex = 0; edgeIndex < edges.length; edgeIndex++) {
+      var edge = edges[edgeIndex];
+      if (contract > 0) {
+        if (edge === "left") fillMaskRect(left, top, Math.min(right, left + contract), bottom, 0);
+        if (edge === "right") fillMaskRect(Math.max(left, right - contract), top, right, bottom, 0);
+        if (edge === "top") fillMaskRect(left, top, right, Math.min(bottom, top + contract), 0);
+        if (edge === "bottom") fillMaskRect(left, Math.max(top, bottom - contract), right, bottom, 0);
+      }
+      for (var step = 0; step < steps && feather > 0; step++) {
+        var start = contract + feather * step / steps;
+        var end = contract + feather * (step + 1) / steps;
+        var progress = (step + 0.5) / steps;
+        var gray = Math.round((0.5 - 0.5 * Math.cos(Math.PI * progress)) * 255);
+        if (edge === "left") fillMaskRect(left + start, top, Math.min(right, left + end), bottom, gray);
+        if (edge === "right") fillMaskRect(Math.max(left, right - end), top, right - start, bottom, gray);
+        if (edge === "top") fillMaskRect(left, top + start, right, Math.min(bottom, top + end), gray);
+        if (edge === "bottom") fillMaskRect(left, Math.max(top, bottom - end), right, bottom - start, gray);
+      }
+    }
+    doc.selection.deselect();
+    true;
+  `;
+};
+
+const createPartitionSeamMaskUnlocked = async (
+  layerId: number,
+  tile: GlobalPartitionTile,
+  overlap: number,
+  contract: number,
+  feather: number
+) => {
+  if (!tile.seamEdges.length || contract + feather <= 0) return;
+  if (contract < 0 || feather < 0 || contract + feather > overlap) {
+    throw new Error(`分区 ${tile.id} 的内缝蒙版超出 overlap`);
+  }
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  await executeAsModalUnlocked(photoshop, async () => {
+    await photoshop.app.batchPlay([
+      { _obj: "select", _target: [{ _ref: "layer", _id: layerId }] },
+      {
+        _obj: "make",
+        at: { _ref: "channel", _enum: "channel", _value: "mask" },
+        new: { _class: "channel" },
+        using: { _enum: "userMaskEnabled", _value: "revealAll" }
+      }
+    ], { synchronousExecution: true });
+  }, { commandName: "创建 PXD 分区内缝蒙版" });
+  const result = await runJsxCodeUnlocked(
+    partitionMaskBandsJsx(tile.captureBounds, tile.seamEdges, contract, feather)
+  );
+  if (!result) throw new Error(`Photoshop 未能写入分区 ${tile.id} 的内缝蒙版`);
+  const maskInfo = await executeAsModalUnlocked(photoshop, async () => {
+    const response = await photoshop.app.batchPlay(
+      [{ _obj: "get", _target: [{ _ref: "layer", _id: layerId }] }],
+      { synchronousExecution: true }
+    );
+    return response[0];
+  }, DEFAULT_MODAL_OPTIONS);
+  if (maskInfo?.hasUserMask !== true) {
+    throw new Error(`Photoshop 未保留分区 ${tile.id} 的方向性图层蒙版`);
+  }
+};
+
+const placePartitionImageUnlocked = async (
+  documentId: number,
+  placement: PartitionPlacementInput,
+  index: number,
+  options: PartitionPlacementOptions
+) => {
+  const info = await placeImageIntoDocumentUnlocked(placement.dataUrl, index + 1, documentId);
+  const record = info as Record<string, unknown> | null;
+  const layerId = Number(record?.layerID ?? record?.layerId ?? record?.targetLayerID ?? record?.targetLayerId);
+  if (!Number.isInteger(layerId) || layerId <= 0) {
+    throw new Error(`Photoshop 未返回分区 ${placement.tile.id} 的图层 ID`);
+  }
+  await resizePartitionLayerUnlocked(layerId, record?.bounds ?? record?.boundsNoEffects, placement.tile.captureBounds);
+  await createPartitionSeamMaskUnlocked(
+    layerId,
+    placement.tile,
+    options.overlap,
+    options.maskContract,
+    options.maskFeather
+  );
+  return { info, layerId };
+};
+
+const combinePartitionErrors = (errors: Array<{ phase: string; error: unknown }>) =>
+  new PartitionOperationError(errors);
+
 export const getActiveDocumentInfo = (
   options: PhotoshopOperationOptions = {}
 ): Promise<ActiveDocumentInfo> => runTransaction(async () => {
@@ -954,7 +1153,7 @@ export const captureDocumentRegions = (
   if (!Number.isInteger(sourceDocumentId) || sourceDocumentId <= 0 || !tiles.length) {
     throw new Error("分区截图参数无效");
   }
-  let operationError: unknown;
+  const errors: Array<{ phase: string; error: unknown }> = [];
   const captures: CapturedDocumentRegion[] = [];
   try {
     if (restoreDocumentId !== sourceDocumentId) await switchToDocumentUnlocked(sourceDocumentId);
@@ -992,17 +1191,17 @@ export const captureDocumentRegions = (
       });
     }
   } catch (error) {
-    operationError = error;
+    errors.push({ phase: "分区截图", error });
   } finally {
     if (restoreDocumentId && restoreDocumentId !== sourceDocumentId) {
       try {
         await switchToDocumentUnlocked(restoreDocumentId);
       } catch (error) {
-        operationError ??= error;
+        errors.push({ phase: "恢复文档", error });
       }
     }
   }
-  if (operationError) throw operationError;
+  if (errors.length) throw combinePartitionErrors(errors);
   return captures;
 }, options);
 
@@ -1025,7 +1224,26 @@ export const placePartitionedImages = (
   let groupingStarted = false;
   let sourceSelection: SelectionBounds | null = null;
   let sourceSelectionCaptured = false;
-  let operationError: unknown;
+  const errors: Array<{ phase: string; error: unknown }> = [];
+  const restoreState = async (phase: string) => {
+    if (sourceSelectionCaptured) {
+      try {
+        if (Number(photoshop.app.activeDocument?.id) !== sourceDocumentId) {
+          await switchToDocumentUnlocked(sourceDocumentId);
+        }
+        await restoreSelectionUnlocked(sourceSelection);
+      } catch (error) {
+        errors.push({ phase: `${phase}选区`, error });
+      }
+    }
+    if (restoreDocumentId && restoreDocumentId !== sourceDocumentId) {
+      try {
+        await switchToDocumentUnlocked(restoreDocumentId);
+      } catch (error) {
+        errors.push({ phase: `${phase}文档`, error });
+      }
+    }
+  };
   try {
     if (restoreDocumentId !== sourceDocumentId) await switchToDocumentUnlocked(sourceDocumentId);
     const sourceDocument = photoshop.app.activeDocument;
@@ -1036,15 +1254,10 @@ export const placePartitionedImages = (
     for (let index = 0; index < placements.length; index += 1) {
       assertCurrent();
       const placement = placements[index];
-      await setSelectionBoundsUnlocked(placement.tile.captureBounds);
       const previousLayerId = await activeLayerIdUnlocked().catch(() => null);
-      let info: unknown;
       try {
-        info = await placeImageIntoSelectionUnlocked(placement.dataUrl, index + 1, {
-          feather: options.maskFeather,
-          contract: options.maskContract,
-          taskId: options.taskId
-        });
+        const placed = await placePartitionImageUnlocked(sourceDocumentId, placement, index, options);
+        if (!layerIds.includes(placed.layerId)) layerIds.push(placed.layerId);
       } catch (error) {
         const landedLayerId = await activeLayerIdUnlocked().catch(() => null);
         if (landedLayerId && landedLayerId !== previousLayerId && !layerIds.includes(landedLayerId)) {
@@ -1052,16 +1265,7 @@ export const placePartitionedImages = (
         }
         throw error;
       }
-      const layerId = Number(
-        (info as Record<string, unknown> | null)?.layerID ??
-        (info as Record<string, unknown> | null)?.layerId ??
-        (info as Record<string, unknown> | null)?.targetLayerID ??
-        (info as Record<string, unknown> | null)?.targetLayerId
-      );
-      if (!Number.isInteger(layerId) || layerId <= 0) {
-        throw new Error(`Photoshop 未返回分区 ${placement.tile.id} 的图层 ID`);
-      }
-      if (!layerIds.includes(layerId)) layerIds.push(layerId);
+      const layerId = layerIds[layerIds.length - 1];
       await renameLayerUnlocked(layerId, `PXD 分区 ${index + 1} · ${placement.tile.id}`);
       await options.onProgress?.(index + 1, placements.length);
       assertCurrent();
@@ -1076,8 +1280,15 @@ export const placePartitionedImages = (
     await moveActiveLayerToTopUnlocked(groupId);
     assertCurrent();
   } catch (error) {
-    operationError = error;
+    errors.push({ phase: "分区贴回", error });
+  }
+
+  await restoreState("恢复");
+  if (errors.length) {
     try {
+      if (Number(photoshop.app.activeDocument?.id) !== sourceDocumentId) {
+        await switchToDocumentUnlocked(sourceDocumentId);
+      }
       const possibleGroupId = await activeLayerIdUnlocked().catch(() => null);
       const cleanupIds = groupId
         ? [groupId]
@@ -1086,27 +1297,10 @@ export const placePartitionedImages = (
           : layerIds;
       await deleteLayersUnlocked(cleanupIds);
     } catch (cleanupError) {
-      operationError = new Error(
-        `${error instanceof Error ? error.message : "分区贴回失败"}；自动清理失败：${cleanupError instanceof Error ? cleanupError.message : "未知错误"}`
-      );
+      errors.push({ phase: "自动清理", error: cleanupError });
     }
-  } finally {
-    try {
-      if (sourceSelectionCaptured && Number(photoshop.app.activeDocument?.id) !== sourceDocumentId) {
-        await switchToDocumentUnlocked(sourceDocumentId);
-      }
-      if (sourceSelectionCaptured) await restoreSelectionUnlocked(sourceSelection);
-    } catch (error) {
-      operationError ??= error;
-    }
-    if (restoreDocumentId && restoreDocumentId !== sourceDocumentId) {
-      try {
-        await switchToDocumentUnlocked(restoreDocumentId);
-      } catch (error) {
-        operationError ??= error;
-      }
-    }
+    await restoreState("补偿后恢复");
+    throw combinePartitionErrors(errors);
   }
-  if (operationError) throw operationError;
   return { layerIds, groupId: groupId as number };
 }, options);

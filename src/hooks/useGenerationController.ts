@@ -55,10 +55,12 @@ import type { GenerationHistoryEntry } from "../services/generationHistory";
 import { normalizePromptParams, sanitizePrompt } from "../services/promptParams";
 import {
   createGlobalPartitionPlan,
+  DEFAULT_GLOBAL_PARTITION_MAX_WORKING_BYTES,
   DEFAULT_GLOBAL_PARTITION_OPTIONS,
   resolveGlobalPartitionMask,
   type GlobalPartitionOptions
 } from "../services/globalPartition";
+import { normalizeGlobalPartitionImage } from "../services/globalPartitionImage";
 import { executeGlobalPartitionWorkflow } from "../services/globalPartitionWorkflow";
 
 export type GenerationStatus = "idle" | "running" | "success" | "error";
@@ -396,6 +398,7 @@ export interface GenerationControllerState {
   runGeneration: () => Promise<void>;
   globalPartitionOptions: GlobalPartitionOptions;
   globalPartitionRunning: boolean;
+  globalPartitionStopping: boolean;
   setGlobalPartitionOptions: (next: Partial<GlobalPartitionOptions>) => void;
   runGlobalPartition: () => Promise<void>;
   stopGeneration: () => void;
@@ -464,6 +467,7 @@ export const useGenerationController = (
     DEFAULT_GLOBAL_PARTITION_OPTIONS
   );
   const [globalPartitionRunning, setGlobalPartitionRunning] = useState(false);
+  const [globalPartitionStopping, setGlobalPartitionStopping] = useState(false);
   const [options, setOptions] = useState<SdOptions>(EMPTY_OPTIONS);
   const [optionsLoading, setOptionsLoading] = useState(false);
   const [optionsError, setOptionsError] = useState<string | null>(null);
@@ -478,6 +482,7 @@ export const useGenerationController = (
   const [sourceLanguage, setSourceLanguage] = useState("zh");
   const [targetLanguage, setTargetLanguage] = useState("en");
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const globalPartitionSettlingRef = useRef(false);
   const presetsLoadGateRef = useRef(new LatestLoadGate());
   const settingsRef = useRef(settings);
   const historyRestoreGenerationRef = useRef(0);
@@ -489,9 +494,11 @@ export const useGenerationController = (
   const stoppedByEngineChangeRef = useRef(false);
 
   useLayoutEffect(() => {
+    const partitionSettling = globalPartitionSettlingRef.current;
     setProgress(0);
-    setGlobalPartitionRunning(false);
-    setStatus((current) => current === "running" ? "idle" : current);
+    setGlobalPartitionRunning(partitionSettling);
+    setGlobalPartitionStopping(partitionSettling);
+    setStatus((current) => current === "running" && !partitionSettling ? "idle" : current);
   }, [engineToken]);
 
   useEffect(() => () => {
@@ -835,9 +842,10 @@ export const useGenerationController = (
   const stopGeneration = useCallback(() => {
     const activeRun = runGateRef.current.current;
     if (!activeRun) return;
+    const partitionStopping = activeRun.kind === "partition";
     runGateRef.current.stop();
     engine.cancelAll();
-    if (activeRun.taskId) clearPSLockQueue(activeRun.taskId);
+    if (activeRun.taskId && !partitionStopping) clearPSLockQueue(activeRun.taskId);
     stopPolling(engineToken);
     if (activeRun.kind === "batch" && activeRun.taskId) {
       setBatchItems((items) =>
@@ -848,17 +856,18 @@ export const useGenerationController = (
         )
       );
     }
-    setStatus("idle");
-    setGlobalPartitionRunning(false);
+    setStatus(partitionStopping ? "running" : "idle");
+    setGlobalPartitionRunning(partitionStopping);
+    setGlobalPartitionStopping(partitionStopping);
     setProgress(0);
     setProgressPreview(null);
     setProgressText(null);
     setError(null);
-    pushToast("info", "已停止");
+    pushToast("info", partitionStopping ? "正在停止并恢复 Photoshop 文档" : "已停止");
   }, [engine, engineToken, pushToast, stopPolling]);
 
   const runGlobalPartition = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (runGateRef.current.current || globalPartitionSettlingRef.current) return;
     const requestToken = engineToken;
     const requestEngine = requestToken.engine;
     if (requestEngine.provider !== "gemini") {
@@ -873,9 +882,11 @@ export const useGenerationController = (
       return;
     }
     const taskId = generateId();
+    globalPartitionSettlingRef.current = true;
     const { token: runToken } = runGateRef.current.begin("partition", taskId);
     const isRunCurrent = () => isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken);
     setGlobalPartitionRunning(true);
+    setGlobalPartitionStopping(false);
     setStatus("running");
     setError(null);
     setProgress(0);
@@ -904,6 +915,7 @@ export const useGenerationController = (
         taskId,
         maskContract: mask.contract,
         maskFeather: mask.feather,
+        maxWorkingBytes: DEFAULT_GLOBAL_PARTITION_MAX_WORKING_BYTES,
         isCurrent: isRunCurrent,
         onProgress: (value, message) => {
           if (!isRunCurrent()) return;
@@ -911,8 +923,12 @@ export const useGenerationController = (
           setProgressText(message);
         },
         adapters: {
-          captureRegions: (documentId, partitionPlan, options) =>
-            captureDocumentRegions(documentId, partitionPlan.tiles, options),
+          captureRegion: async (documentId, tile, options) => {
+            const [capture] = await captureDocumentRegions(documentId, [tile], options);
+            if (!capture) throw new Error(`Photoshop 未返回分区 ${tile.id} 的截图`);
+            return capture;
+          },
+          normalizeImage: normalizeGlobalPartitionImage,
           placeImages: (documentId, placements, options) =>
             placePartitionedImages(documentId, placements, {
               ...options,
@@ -935,6 +951,18 @@ export const useGenerationController = (
         pushToast("success", `大图分区完成，已生成 ${result.layerIds.length} 个非破坏图层`);
       }
     } catch (caught) {
+      if (
+        caught &&
+        typeof caught === "object" &&
+        (caught as { name?: unknown }).name === "PartitionOperationError" &&
+        (caught as { recoveryFailed?: unknown }).recoveryFailed === true
+      ) {
+        const message = formatGenerationError(caught, "大图分区恢复失败");
+        setStatus("error");
+        setError(message);
+        pushToast("error", message);
+        return;
+      }
       if (!isRunCurrent()) return;
       if (isGenerationCancelledError(caught)) {
         setStatus("idle");
@@ -947,18 +975,19 @@ export const useGenerationController = (
       setError(message);
       pushToast("error", message);
     } finally {
-      if (runGateRef.current.isCurrent(runToken)) {
-        runGateRef.current.complete(runToken);
-        setGlobalPartitionRunning(false);
-        setProgress(0);
-        setProgressPreview(null);
-        setProgressText(null);
-      }
+      if (runGateRef.current.isCurrent(runToken)) runGateRef.current.complete(runToken);
+      globalPartitionSettlingRef.current = false;
+      setGlobalPartitionRunning(false);
+      setGlobalPartitionStopping(false);
+      setProgress(0);
+      setProgressPreview(null);
+      setProgressText(null);
+      setStatus((current) => current === "running" ? "idle" : current);
     }
   }, [dismissToast, engineToken, form, globalPartitionOptions, isEngineCurrent, pushToast, recordHistory, settings.timeoutMaxSeconds, settings.timeoutMultiplier]);
 
   const runGeneration = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (runGateRef.current.current || globalPartitionSettlingRef.current) return;
     const requestToken = engineToken;
     const requestEngine = requestToken.engine;
     const taskId = generateId();
@@ -1159,7 +1188,7 @@ export const useGenerationController = (
   }, [batchItems, engine, pushToast, stopGeneration]);
 
   const runBatch = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (runGateRef.current.current || globalPartitionSettlingRef.current) return;
     const runnableItems = batchItems.filter((item) => item.status !== "success");
     if (!runnableItems.length) {
       if (batchItems.length) {
@@ -1353,6 +1382,7 @@ export const useGenerationController = (
     runGeneration,
     globalPartitionOptions,
     globalPartitionRunning,
+    globalPartitionStopping,
     setGlobalPartitionOptions,
     runGlobalPartition,
     stopGeneration,

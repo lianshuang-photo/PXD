@@ -4,6 +4,7 @@ import {
   boundsHeight,
   boundsWidth,
   createGlobalPartitionPlan,
+  partitionSeamAlpha,
   resolveGlobalPartitionMask
 } from "./globalPartition";
 
@@ -86,13 +87,17 @@ describe("global partition geometry", () => {
         expect(relativeRatioError).toBeLessThanOrEqual(
           2 / Math.min(tile.targetWidth, tile.targetHeight)
         );
+        expect(tile.targetWidth).toBe(Math.max(1, Math.floor(boundsWidth(tile.captureBounds) * plan.scale)));
+        expect(tile.targetHeight).toBe(Math.max(1, Math.floor(boundsHeight(tile.captureBounds) * plan.scale)));
       }
       if (plan.orientation === "horizontal") {
         expect(plan.tiles[0].coreBounds.right).toBe(plan.tiles[1].coreBounds.left);
         expect(boundsWidth(plan.tiles[0].coreBounds) + boundsWidth(plan.tiles[1].coreBounds)).toBe(width);
+        expect(plan.tiles[0].targetHeight).toBe(plan.tiles[1].targetHeight);
       } else if (plan.orientation === "vertical") {
         expect(plan.tiles[0].coreBounds.bottom).toBe(plan.tiles[1].coreBounds.top);
         expect(boundsHeight(plan.tiles[0].coreBounds) + boundsHeight(plan.tiles[1].coreBounds)).toBe(height);
+        expect(plan.tiles[0].targetWidth).toBe(plan.tiles[1].targetWidth);
       } else {
         expect(plan.tiles[0].coreBounds).toEqual({ left: 0, top: 0, right: width, bottom: height });
       }
@@ -118,5 +123,39 @@ describe("global partition geometry", () => {
       .toEqual({ contract: 48, feather: 16 });
     expect(resolveGlobalPartitionMask(plan, { maskContract: 100, maskFeather: 100 }))
       .toEqual({ contract: 64, feather: 0 });
+    const single = createGlobalPartitionPlan({
+      width: 1000,
+      height: 1000,
+      overlap: 64,
+      targetMaxEdge: 768
+    });
+    expect(resolveGlobalPartitionMask(single, { maskContract: 48, maskFeather: 48 }))
+      .toEqual({ contract: 0, feather: 0 });
+  });
+
+  it("fades only declared internal seams and leaves exterior edges opaque", () => {
+    const horizontal = createGlobalPartitionPlan({
+      width: 2000,
+      height: 1000,
+      overlap: 80,
+      targetMaxEdge: 768
+    });
+    const [left, right] = horizontal.tiles;
+    expect(partitionSeamAlpha(left, 0, 0, 12, 24)).toBe(1);
+    expect(partitionSeamAlpha(left, boundsWidth(left.captureBounds), 500, 12, 24)).toBe(0);
+    expect(partitionSeamAlpha(right, 0, 500, 12, 24)).toBe(0);
+    expect(partitionSeamAlpha(right, boundsWidth(right.captureBounds), 999, 12, 24)).toBe(1);
+
+    const vertical = createGlobalPartitionPlan({
+      width: 1000,
+      height: 2000,
+      overlap: 80,
+      targetMaxEdge: 768
+    });
+    const [top, bottom] = vertical.tiles;
+    expect(partitionSeamAlpha(top, 0, 0, 12, 24)).toBe(1);
+    expect(partitionSeamAlpha(top, 500, boundsHeight(top.captureBounds), 12, 24)).toBe(0);
+    expect(partitionSeamAlpha(bottom, 500, 0, 12, 24)).toBe(0);
+    expect(partitionSeamAlpha(bottom, 999, boundsHeight(bottom.captureBounds), 12, 24)).toBe(1);
   });
 });

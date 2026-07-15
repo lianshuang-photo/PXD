@@ -36,7 +36,8 @@ const boundary = vi.hoisted(() => ({
     readJsonFile: vi.fn(),
     writeJsonFile: vi.fn()
   },
-  thumbnailDecodeFails: false
+  thumbnailDecodeFails: false,
+  normalizePartitionImage: vi.fn()
 }));
 
 vi.mock("../services/apiClient", async (importOriginal) => ({
@@ -50,6 +51,10 @@ vi.mock("../services/imageModelClient", async (importOriginal) => ({
 }));
 
 vi.mock("../services/photoshop", () => boundary.photoshop);
+
+vi.mock("../services/globalPartitionImage", () => ({
+  normalizeGlobalPartitionImage: boundary.normalizePartitionImage
+}));
 
 vi.mock("../services/presets", () => ({
   deletePresetFile: vi.fn(),
@@ -205,6 +210,14 @@ beforeEach(() => {
     layerIds: [301, 302],
     groupId: 303
   });
+  boundary.normalizePartitionImage.mockImplementation(async (image: string) => ({
+    base64: image,
+    dataUrl: `data:image/png;base64,${image}`,
+    width: 768,
+    height: 384,
+    encodedBytes: image.length,
+    estimatedWorkingBytes: image.length
+  }));
   boundary.photoshop.hasActiveSelection.mockResolvedValue(true);
   boundary.photoshop.placeImageIntoSelection.mockResolvedValue({ layerID: 101 });
   boundary.photoshop.groupLayers.mockResolvedValue(undefined);
@@ -267,7 +280,7 @@ describe("useGenerationController global partition", () => {
     geminiApiKey: "key"
   };
 
-  it("runs the shared engine concurrently, places into the source document, and records history once", async () => {
+  it("runs the shared engine sequentially, places into the source document, and records history once", async () => {
     const rendered = trackedRender({ initialSettings: geminiSettings });
     await flush();
     act(() => rendered.getController().setFormValue("positivePrompt", "unified editorial style"));
@@ -324,6 +337,67 @@ describe("useGenerationController global partition", () => {
     expect(rendered.getController().status).toBe("idle");
     expect(rendered.getController().globalPartitionRunning).toBe(false);
     expect(rendered.getController().history).toHaveLength(0);
+  });
+
+  it("keeps the partition settlement gate closed until the stopped placement finishes", async () => {
+    let resolvePlacement!: (value: { layerIds: number[]; groupId: number }) => void;
+    boundary.photoshop.placePartitionedImages.mockImplementationOnce(() => new Promise((resolve) => {
+      resolvePlacement = resolve;
+    }));
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    act(() => rendered.getController().setFormValue("positivePrompt", "unified style"));
+
+    let oldRun!: Promise<void>;
+    act(() => {
+      oldRun = rendered.getController().runGlobalPartition();
+    });
+    await vi.waitFor(() => expect(boundary.photoshop.placePartitionedImages).toHaveBeenCalledOnce());
+    act(() => rendered.getController().stopGeneration());
+
+    expect(rendered.getController().globalPartitionRunning).toBe(true);
+    expect(rendered.getController().globalPartitionStopping).toBe(true);
+    await act(async () => {
+      await rendered.getController().runGlobalPartition();
+      await rendered.getController().runGeneration();
+    });
+    expect(boundary.photoshop.getActiveDocumentInfo).toHaveBeenCalledOnce();
+    expect(boundary.photoshop.getSelectionPixels).not.toHaveBeenCalled();
+
+    resolvePlacement({ layerIds: [401, 402], groupId: 403 });
+    await act(async () => oldRun);
+    expect(rendered.getController().globalPartitionStopping).toBe(false);
+    expect(rendered.getController().status).toBe("idle");
+
+    await act(async () => rendered.getController().runGlobalPartition());
+    expect(boundary.photoshop.getActiveDocumentInfo).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces Photoshop recovery failure after stop invalidates the run token", async () => {
+    let rejectPlacement!: (error: Error) => void;
+    boundary.photoshop.placePartitionedImages.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      rejectPlacement = reject;
+    }));
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    act(() => rendered.getController().setFormValue("positivePrompt", "unified style"));
+
+    let run!: Promise<void>;
+    act(() => {
+      run = rendered.getController().runGlobalPartition();
+    });
+    await vi.waitFor(() => expect(boundary.photoshop.placePartitionedImages).toHaveBeenCalledOnce());
+    act(() => rendered.getController().stopGeneration());
+    const recoveryError = Object.assign(new Error("selection restore failed"), {
+      name: "PartitionOperationError",
+      recoveryFailed: true
+    });
+    rejectPlacement(recoveryError);
+    await act(async () => run);
+
+    expect(rendered.getController().status).toBe("error");
+    expect(rendered.getController().error).toContain("selection restore failed");
+    expect(rendered.getController().globalPartitionStopping).toBe(false);
   });
 
   it("does not switch providers when the partition command is unavailable", async () => {
