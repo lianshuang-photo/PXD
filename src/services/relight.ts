@@ -131,18 +131,41 @@ export const createDefaultRelightLights = (): RelightLight[] => [
 const LIGHT_TYPES = new Set<RelightLightType>(["softbox", "spot", "area", "sun"]);
 const LIGHT_ROLES = new Set<RelightRole>(["key", "fill", "rim", "back", "side"]);
 
-export const normalizeRelightConfig = (value: unknown): RelightConfig | null => {
+export const normalizeRelightConfig = (
+  value: unknown,
+  options: { strict?: boolean } = {}
+): RelightConfig | null => {
   if (!value || typeof value !== "object" || !Array.isArray((value as RelightConfig).lights)) {
     return null;
   }
-  const lights = (value as { lights: unknown[] }).lights.flatMap((candidate, index) => {
-    if (!candidate || typeof candidate !== "object") return [];
+  const candidates = (value as { lights: unknown[] }).lights;
+  if (options.strict && (candidates.length === 0 || candidates.length > 8)) return null;
+  const ids = new Set<string>();
+  const lights: RelightLight[] = [];
+  for (const [index, candidate] of candidates.entries()) {
+    if (!candidate || typeof candidate !== "object") {
+      if (options.strict) return null;
+      continue;
+    }
     const light = candidate as Partial<RelightLight>;
     if (!LIGHT_TYPES.has(light.type as RelightLightType) || !LIGHT_ROLES.has(light.role as RelightRole)) {
-      return [];
+      if (options.strict) return null;
+      continue;
     }
-    return [normalizeRelightLight({
-      id: typeof light.id === "string" && light.id ? light.id : `light-${index + 1}`,
+    const numericValues = [light.x, light.y, light.direction, light.intensity, light.temperature];
+    if (options.strict && numericValues.some((number) => typeof number !== "number" || !Number.isFinite(number))) {
+      return null;
+    }
+    const suppliedId = typeof light.id === "string" ? light.id.trim() : "";
+    if (options.strict && !suppliedId) return null;
+    let id = suppliedId || `light-${index + 1}`;
+    if (ids.has(id)) {
+      if (options.strict) return null;
+      id = `${id}-${index + 1}`;
+    }
+    ids.add(id);
+    lights.push(normalizeRelightLight({
+      id,
       type: light.type as RelightLightType,
       role: light.role as RelightRole,
       x: Number(light.x),
@@ -150,8 +173,8 @@ export const normalizeRelightConfig = (value: unknown): RelightConfig | null => 
       direction: Number(light.direction),
       intensity: Number(light.intensity),
       temperature: Number(light.temperature)
-    })];
-  });
+    }));
+  }
   return lights.length ? { lights: lights.slice(0, 8) } : null;
 };
 

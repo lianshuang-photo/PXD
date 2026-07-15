@@ -1368,6 +1368,12 @@ export const useGenerationController = (
       if (!file) {
         throw new Error("预设文件格式不正确");
       }
+      const presetRelightConfig = file.preset.kind === "gemini" && file.preset.relightConfig !== undefined
+        ? normalizeRelightConfig(file.preset.relightConfig, { strict: true })
+        : undefined;
+      if (file.preset.kind === "gemini" && file.preset.relightConfig !== undefined && !presetRelightConfig) {
+        throw new Error("预设中的灯光计划格式不正确");
+      }
       const apply = presetApplyQueueRef.current
         .catch(() => undefined)
         .then(async () => {
@@ -1387,6 +1393,11 @@ export const useGenerationController = (
               positivePrompt: content,
               extraPrompt: ""
             }));
+            if (presetRelightConfig) {
+              setRelightLights(presetRelightConfig.lights);
+              setSelectedRelightId(presetRelightConfig.lights[0]?.id ?? null);
+              setRelightStatus("idle");
+            }
           } else {
             setForm(normalizeFormPrompts(mapForgeDataToForm(file.preset.data)));
           }
@@ -1427,7 +1438,8 @@ export const useGenerationController = (
         ? {
             ...shared,
             kind: "gemini",
-            content: [normalizedForm.positivePrompt, normalizedForm.extraPrompt].filter(Boolean).join("\n").trim()
+            content: [normalizedForm.positivePrompt, normalizedForm.extraPrompt].filter(Boolean).join("\n").trim(),
+            relightConfig: { lights: relightLights.map((light) => ({ ...light })) }
           } satisfies GeminiPreset
         : {
             ...shared,
@@ -1441,7 +1453,7 @@ export const useGenerationController = (
       await loadPresets();
       pushToast("success", `预设「${name}」已保存`);
     },
-    [form, loadPresets, presets, pushToast, selectedPreset]
+    [form, loadPresets, presets, pushToast, relightLights, selectedPreset]
   );
 
   const deletePreset = useCallback(

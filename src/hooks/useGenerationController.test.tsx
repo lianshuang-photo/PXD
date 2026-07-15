@@ -584,13 +584,51 @@ describe("useGenerationController preset schemas", () => {
     });
     const rendered = trackedRender();
     await flush();
+    act(() => rendered.getController().updateRelightLight("key-1", { intensity: 0.31 }));
 
     await act(async () => rendered.getController().applyPreset("factory:natural.json"));
 
     expect(rendered.updateSettings).toHaveBeenCalledWith({ imageProvider: "gemini" });
     expect(rendered.getController().form.positivePrompt).toBe("natural relight");
     expect(rendered.getController().form.extraPrompt).toBe("");
+    expect(rendered.getController().relightLights.find(({ id }) => id === "key-1")?.intensity).toBe(0.31);
     expect(rendered.getController().selectedPreset).toBe("factory:natural.json");
+  });
+
+  it("applies a structured factory relight plan with its prompt", async () => {
+    const relightConfig = {
+      lights: [
+        { id: "factory-key", type: "area" as const, role: "key" as const, x: 0.15, y: 0.2, direction: 25, intensity: 0.9, temperature: 4800 },
+        { id: "factory-rim", type: "spot" as const, role: "rim" as const, x: 0.88, y: 0.18, direction: 155, intensity: 0.4, temperature: 7300 }
+      ]
+    };
+    boundary.loadPresetFile.mockResolvedValueOnce({
+      meta: {
+        name: "叠加式可视化打光",
+        fileName: "factory:additive-relight.json",
+        createdAt: "",
+        kind: "gemini",
+        isFactory: true
+      },
+      preset: {
+        kind: "gemini",
+        title: "叠加式可视化打光",
+        content: "additive factory prompt",
+        relightConfig
+      },
+      version: 2
+    });
+    const rendered = trackedRender({
+      initialSettings: { ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }
+    });
+    await flush();
+    act(() => rendered.getController().setFormValue("positivePrompt", "old prompt"));
+
+    await act(async () => rendered.getController().applyPreset("factory:additive-relight.json"));
+
+    expect(rendered.getController().form.positivePrompt).toBe("additive factory prompt");
+    expect(rendered.getController().relightLights).toEqual(relightConfig.lights);
+    expect(rendered.getController().selectedRelightId).toBe("factory-key");
   });
 
   it("keeps the form unchanged when the Gemini provider patch fails", async () => {
@@ -730,7 +768,13 @@ describe("useGenerationController preset schemas", () => {
       expect.objectContaining({
         kind: "gemini",
         category: "智能修图",
-        content: "prompt\nextra"
+        content: "prompt\nextra",
+        relightConfig: {
+          lights: expect.arrayContaining([
+            expect.objectContaining({ role: "key", direction: 35, temperature: 5200 }),
+            expect.objectContaining({ role: "rim", direction: 145, temperature: 7000 })
+          ])
+        }
       })
     );
 
@@ -741,6 +785,43 @@ describe("useGenerationController preset schemas", () => {
     });
     expect(caught).toBeInstanceOf(Error);
     expect(boundary.deletePresetFile).not.toHaveBeenCalled();
+  });
+
+  it("round-trips a user relight plan through save, reload, and apply", async () => {
+    let persisted: any;
+    boundary.savePresetFile.mockImplementationOnce(async (name, preset) => {
+      persisted = {
+        meta: { name, fileName: "portrait-relight.json", createdAt: "", kind: "gemini", isFactory: false },
+        preset: { ...preset, title: name },
+        version: 2
+      };
+      return persisted;
+    });
+    const rendered = trackedRender({
+      initialSettings: { ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }
+    });
+    await flush();
+    act(() => {
+      rendered.getController().setFormValue("positivePrompt", "saved portrait prompt");
+      rendered.getController().updateRelightLight("key-1", {
+        type: "area", x: 0.11, y: 0.34, direction: 72, intensity: 0.83, temperature: 4300
+      });
+      rendered.getController().updateRelightLight("rim-1", {
+        role: "back", x: 0.91, y: 0.16, direction: 166, intensity: 0.36, temperature: 8100
+      });
+    });
+    const expectedLights = rendered.getController().relightLights.map((light) => ({ ...light }));
+
+    await act(async () => rendered.getController().savePreset("人像双灯"));
+    boundary.loadPresetFile.mockResolvedValueOnce(persisted);
+    act(() => {
+      rendered.getController().setFormValue("positivePrompt", "changed");
+      rendered.getController().updateRelightLight("key-1", { intensity: 0.1 });
+    });
+    await act(async () => rendered.getController().applyPreset("portrait-relight.json"));
+
+    expect(rendered.getController().form.positivePrompt).toBe("saved portrait prompt");
+    expect(rendered.getController().relightLights).toEqual(expectedLights);
   });
 
   it("preserves the selected user file name when overwriting a custom title", async () => {

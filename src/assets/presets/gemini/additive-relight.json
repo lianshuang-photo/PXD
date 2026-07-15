@@ -3,5 +3,29 @@
   "title": "叠加式可视化打光",
   "category": "智能修图",
   "subCategory": "光影",
-  "content": "Use additive relighting only. Preserve identity, pose, composition, materials, global HSL, gamma and white balance. Respect scene depth and occlusion. Do not generate visible fixtures or annotation marks."
+  "content": "Use additive relighting only. Preserve identity, pose, composition, materials, global HSL, gamma and white balance. Respect scene depth and occlusion. Do not generate visible fixtures or annotation marks.",
+  "relightConfig": {
+    "lights": [
+      {
+        "id": "key-1",
+        "type": "softbox",
+        "role": "key",
+        "x": 0.22,
+        "y": 0.25,
+        "direction": 35,
+        "intensity": 0.75,
+        "temperature": 5200
+      },
+      {
+        "id": "rim-1",
+        "type": "spot",
+        "role": "rim",
+        "x": 0.82,
+        "y": 0.22,
+        "direction": 145,
+        "intensity": 0.45,
+        "temperature": 7000
+      }
+    ]
+  }
 }

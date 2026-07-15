@@ -46,6 +46,18 @@ describe("preset catalog", () => {
     const loaded = await loadPresetFile(metas[0].fileName);
     expect(loaded?.meta).toEqual(metas[0]);
     expect(loaded?.preset.kind).toBe(metas[0].kind);
+    const relightMeta = metas.find(({ name }) => name === "叠加式可视化打光");
+    expect(relightMeta).toBeTruthy();
+    const relight = await loadPresetFile(relightMeta!.fileName);
+    expect(relight?.preset).toMatchObject({
+      kind: "gemini",
+      relightConfig: {
+        lights: [
+          expect.objectContaining({ role: "key", type: "softbox", direction: 35 }),
+          expect.objectContaining({ role: "rim", type: "spot", temperature: 7000 })
+        ]
+      }
+    });
   });
 
   it("merges users after factory presets and migrates legacy form envelopes", async () => {
@@ -99,7 +111,13 @@ describe("preset catalog", () => {
       title: "ignored",
       category: "智能修图",
       content: "replace the background",
-      refImages: ["data:image/png;base64,REF"]
+      refImages: ["data:image/png;base64,REF"],
+      relightConfig: {
+        lights: [{
+          id: "key", type: "softbox", role: "key", x: 0.2, y: 0.3,
+          direction: 45, intensity: 0.8, temperature: 5200
+        }]
+      }
     };
     const forge: ForgePreset = {
       kind: "forge",
@@ -117,7 +135,12 @@ describe("preset catalog", () => {
       1,
       folder,
       "场景替换.json",
-      expect.objectContaining({ version: 2, kind: "gemini", content: gemini.content })
+      expect.objectContaining({
+        version: 2,
+        kind: "gemini",
+        content: gemini.content,
+        relightConfig: gemini.relightConfig
+      })
     );
     expect(storage.writeJsonEntry).toHaveBeenNthCalledWith(
       2,
@@ -125,6 +148,34 @@ describe("preset catalog", () => {
       "精细重绘.json",
       expect.objectContaining({ version: 2, kind: "forge", data: forge.data })
     );
+  });
+
+  it("round-trips a complete Gemini relight plan through writable storage", async () => {
+    const files = new Map<string, unknown>();
+    storage.writeJsonEntry.mockImplementation(async (_folder, fileName, payload) => {
+      files.set(fileName, payload);
+    });
+    storage.readJsonEntry.mockImplementation(async (_folder, fileName, fallback) =>
+      files.get(fileName) ?? fallback
+    );
+    const relightConfig = {
+      lights: [
+        { id: "key", type: "softbox" as const, role: "key" as const, x: 0.18, y: 0.27, direction: 32, intensity: 0.82, temperature: 5100 },
+        { id: "rim", type: "spot" as const, role: "rim" as const, x: 0.84, y: 0.21, direction: 148, intensity: 0.44, temperature: 7200 }
+      ]
+    };
+    const saved = await savePresetFile("双灯人像", {
+      kind: "gemini",
+      title: "ignored",
+      content: "portrait relight",
+      relightConfig
+    });
+    const loaded = await loadPresetFile(saved.meta.fileName);
+    expect(loaded?.preset).toEqual(expect.objectContaining({
+      kind: "gemini",
+      content: "portrait relight",
+      relightConfig
+    }));
   });
 
   it("overwrites an external file name in place and keeps save-as separate", async () => {
@@ -196,6 +247,27 @@ describe("preset catalog", () => {
     });
     expect(normalized?.preset.kind).toBe("gemini");
     if (normalized?.preset.kind === "gemini") expect(normalized.preset.refImages).toHaveLength(8);
+    expect(normalizePresetDocument({
+      version: 2,
+      kind: "gemini",
+      title: "bad lights",
+      content: "prompt",
+      relightConfig: {
+        lights: [{ id: "bad", type: "softbox", role: "key", x: "0.2" }]
+      }
+    })).toBeNull();
+    expect(normalizePresetDocument({
+      version: 2,
+      kind: "gemini",
+      title: "duplicate lights",
+      content: "prompt",
+      relightConfig: {
+        lights: [
+          { id: "same", type: "softbox", role: "key", x: 0, y: 0, direction: 0, intensity: 1, temperature: 5000 },
+          { id: "same", type: "spot", role: "rim", x: 1, y: 1, direction: 180, intensity: 0.5, temperature: 7000 }
+        ]
+      }
+    })).toBeNull();
   });
 
   it("refuses future schemas without rewriting them as v2", async () => {
@@ -206,6 +278,9 @@ describe("preset catalog", () => {
       title: "未来预设",
       category: "未来分类",
       content: "future content",
+      relightConfig: {
+        lights: [{ id: "future", type: "sun", role: "side", x: 1, y: 0, direction: 180, intensity: 1, temperature: 6500 }]
+      },
       futureField: { mustSurvive: true }
     });
 
