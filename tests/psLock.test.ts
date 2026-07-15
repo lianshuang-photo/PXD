@@ -99,3 +99,40 @@ test("clearPSLockQueue only rejects pending entries for the selected task", asyn
   const releaseRetained = await retained;
   releaseRetained();
 });
+
+test("a late fulfilled operation runs cleanup before the circuit recovers", async () => {
+  let settle: ((value: number) => void) | undefined;
+  const operation = new Promise<number>((resolve) => { settle = resolve; });
+  const cleaned: number[] = [];
+  const timedOut = runPSExclusive(() => operation, {
+    taskId: "late-cleanup",
+    timeoutMs: 20,
+    onLateSettlement: async (result) => {
+      if (result.status === "fulfilled") cleaned.push(result.value);
+    }
+  });
+  await expect(timedOut).rejects.toBeInstanceOf(PSOperationTimeoutError);
+  settle?.(42);
+  await delay(200);
+  expect(cleaned).toEqual([42]);
+  await expect(runPSExclusive(() => "ready", { timeoutMs: 1000 })).resolves.toBe("ready");
+});
+
+test("a failed late cleanup keeps the Photoshop circuit open", async () => {
+  let settle: (() => void) | undefined;
+  const operation = new Promise<void>((resolve) => { settle = resolve; });
+  const timedOut = runPSExclusive(() => operation, {
+    taskId: "cleanup-failed",
+    timeoutMs: 20,
+    onLateSettlement: async () => {
+      throw new Error("cleanup failed");
+    }
+  });
+  await expect(timedOut).rejects.toBeInstanceOf(PSOperationTimeoutError);
+  settle?.();
+  await delay(40);
+  await expect(runPSExclusive(() => "must not run", {
+    taskId: "after-cleanup-failure",
+    timeoutMs: 1000
+  })).rejects.toBeInstanceOf(PSCircuitOpenError);
+});

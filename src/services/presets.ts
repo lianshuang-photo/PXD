@@ -1,5 +1,6 @@
 import { bridge } from "./uxpBridge";
 import { deletePresetEntries } from "./presetDeletion";
+import { parseVfxConfig, type VfxConfig } from "./vfx";
 
 const PRESET_FOLDER = "presets";
 const PRESET_SCHEMA_VERSION = 2;
@@ -29,6 +30,7 @@ export interface GeminiPreset extends PresetBase {
   kind: "gemini";
   content: string;
   refImages?: string[];
+  vfxConfig?: VfxConfig;
 }
 
 export interface ForgePreset<TData = Record<string, unknown>> extends PresetBase {
@@ -51,6 +53,7 @@ interface PersistedPresetDocument<TData = Record<string, unknown>> {
   subCategory?: string;
   content?: string;
   refImages?: string[];
+  vfxConfig?: VfxConfig;
   data?: TData;
 }
 
@@ -100,6 +103,10 @@ const normalizeNewDocument = <TData>(value: Record<string, unknown>, fallbackTit
   if (kind === "gemini") {
     const content = typeof value.content === "string" ? value.content.trim() : "";
     if (!content) return null;
+    const vfxConfig = value.vfxConfig === undefined
+      ? undefined
+      : parseVfxConfig(value.vfxConfig, { strict: true });
+    if (value.vfxConfig !== undefined && !vfxConfig) return null;
     return {
       preset: {
         kind,
@@ -107,7 +114,8 @@ const normalizeNewDocument = <TData>(value: Record<string, unknown>, fallbackTit
         category,
         subCategory,
         content,
-        refImages: normalizeRefImages(value.refImages)
+        refImages: normalizeRefImages(value.refImages),
+        vfxConfig: vfxConfig ?? undefined
       },
       createdAt,
       migrated: value.version !== PRESET_SCHEMA_VERSION
@@ -169,7 +177,7 @@ const toPersistedDocument = <TData>(normalized: NormalizedDocument<TData>): Pers
     category: preset.category,
     subCategory: preset.subCategory,
     ...(preset.kind === "gemini"
-      ? { content: preset.content, refImages: preset.refImages }
+      ? { content: preset.content, refImages: preset.refImages, vfxConfig: preset.vfxConfig }
       : { data: preset.data })
   };
 };

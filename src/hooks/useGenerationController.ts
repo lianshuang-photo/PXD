@@ -53,6 +53,14 @@ import { translateText } from "../services/translator";
 import { useGenerationHistory } from "./useGenerationHistory";
 import type { GenerationHistoryEntry } from "../services/generationHistory";
 import { normalizePromptParams, sanitizePrompt } from "../services/promptParams";
+import {
+  DEFAULT_VFX_CONFIG,
+  normalizeVfxConfig,
+  parseVfxConfig,
+  type VfxConfig
+} from "../services/vfx";
+import { executeVfxWorkflow, type VfxPhase } from "../services/vfxWorkflow";
+import { VFX_PHOTOSHOP_ADAPTER } from "../services/vfxPhotoshopAdapter";
 
 export type GenerationStatus = "idle" | "running" | "success" | "error";
 export type ToastType = "info" | "success" | "warning" | "error";
@@ -85,6 +93,7 @@ export interface GenerationForm {
   clipSkip: number;
   restoreFaces: boolean;
   tiling: boolean;
+  vfxConfig?: VfxConfig;
 }
 
 export interface BatchItem {
@@ -387,6 +396,10 @@ export interface GenerationControllerState {
   refreshOptions: () => Promise<void>;
   runGeneration: () => Promise<void>;
   stopGeneration: () => void;
+  vfxConfig: VfxConfig;
+  vfxStatus: "idle" | VfxPhase | "success" | "error";
+  updateVfxConfig: (patch: Partial<VfxConfig>) => void;
+  runVfx: () => Promise<void>;
   history: GenerationHistoryEntry<GenerationForm>[];
   historyLoading: boolean;
   historyError: string | null;
@@ -442,6 +455,8 @@ export const useGenerationController = (
     stopPolling
   } = useEngineLifecycle(engine);
   const [form, setForm] = useState<GenerationForm>(DEFAULT_FORM);
+  const [vfxConfig, setVfxConfig] = useState<VfxConfig>({ ...DEFAULT_VFX_CONFIG });
+  const [vfxStatus, setVfxStatus] = useState<"idle" | VfxPhase | "success" | "error">("idle");
   const [status, setStatus] = useState<GenerationStatus>("idle");
   const [progress, setProgress] = useState(0);
   const [progressPreview, setProgressPreview] = useState<string | null>(null);
@@ -472,6 +487,8 @@ export const useGenerationController = (
     settingsRef.current = settings;
   }, [settings]);
   const runGateRef = useRef(new GenerationRunGate());
+  const vfxAbortRef = useRef<AbortController | null>(null);
+  const vfxHistoryTailCountRef = useRef(0);
   const stoppedByEngineChangeRef = useRef(false);
 
   useLayoutEffect(() => {
@@ -480,7 +497,13 @@ export const useGenerationController = (
   }, [engineToken]);
 
   useEffect(() => () => {
-    if (runGateRef.current.stop()) {
+    const stopped = runGateRef.current.stop();
+    if (stopped) {
+      if (stopped.taskId) clearPSLockQueue(stopped.taskId);
+      if (stopped.kind === "vfx") {
+        vfxAbortRef.current?.abort();
+        vfxAbortRef.current = null;
+      }
       engine.cancelAll();
       stoppedByEngineChangeRef.current = true;
     }
@@ -499,7 +522,10 @@ export const useGenerationController = (
     loading: historyLoading,
     error: historyError,
     record: recordHistory
-  } = useGenerationHistory<GenerationForm>((message) => pushToast("warning", message));
+  } = useGenerationHistory<GenerationForm>((message) => {
+    if (vfxHistoryTailCountRef.current > 0) return;
+    pushToast("warning", message);
+  });
   const dismissToast = useCallback(() => {
     clearToastTimer();
     setToast(null);
@@ -527,6 +553,7 @@ export const useGenerationController = (
         item.status === "running" ? { ...item, status: "stopped", error: undefined } : item
       )
     );
+    setVfxStatus("idle");
     setError(null);
     pushToast("info", "设置已更新，当前生成已停止");
   }, [engine, pushToast]);
@@ -543,6 +570,8 @@ export const useGenerationController = (
 
   const resetForm = useCallback(() => {
     setForm(DEFAULT_FORM);
+    setVfxConfig({ ...DEFAULT_VFX_CONFIG });
+    setVfxStatus("idle");
   }, []);
 
   const setResolution = useCallback(
@@ -697,6 +726,15 @@ export const useGenerationController = (
         }
         if (generation !== historyRestoreGenerationRef.current) return;
         setForm(restoredForm);
+        const restoredVfx = parseVfxConfig(
+          entry.params && typeof entry.params === "object"
+            ? (entry.params as { vfxConfig?: unknown }).vfxConfig
+            : undefined
+        );
+        if (restoredVfx) {
+          setVfxConfig(restoredVfx);
+          setVfxStatus("idle");
+        }
         pushToast("success", "已回填历史配置与生成引擎");
       });
     historyRestoreQueueRef.current = restore;
@@ -813,10 +851,20 @@ export const useGenerationController = (
     );
   }, [engineToken, startPolling]);
 
+  const updateVfxConfig = useCallback((patch: Partial<VfxConfig>) => {
+    setVfxConfig((current) => normalizeVfxConfig({ ...current, ...patch }));
+  }, []);
+
   const stopGeneration = useCallback(() => {
     const activeRun = runGateRef.current.current;
     if (!activeRun) return;
     runGateRef.current.stop();
+    if (activeRun.taskId) clearPSLockQueue(activeRun.taskId);
+    if (activeRun.kind === "vfx") {
+      vfxAbortRef.current?.abort();
+      vfxAbortRef.current = null;
+      setVfxStatus("idle");
+    }
     engine.cancelAll();
     stopPolling(engineToken);
     if (activeRun.kind === "batch" && activeRun.taskId) {
@@ -955,6 +1003,105 @@ export const useGenerationController = (
       });
     }
   }, [commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pollProgress, pushToast, recordHistory, settings, stopPolling]);
+
+  const runVfx = useCallback(async () => {
+    if (runGateRef.current.current) return;
+    const requestToken = engineToken;
+    const requestEngine = requestToken.engine;
+    const taskId = generateId();
+    const { token: runToken } = runGateRef.current.begin("vfx", taskId);
+    const abortController = new AbortController();
+    vfxAbortRef.current = abortController;
+    const configSnapshot = { ...vfxConfig };
+    const promptSnapshot = form.positivePrompt;
+    const isRunCurrent = () =>
+      isEngineCurrent(requestToken) &&
+      runGateRef.current.isCurrent(runToken) &&
+      !abortController.signal.aborted;
+    setStatus("running");
+    setError(null);
+    setVfxStatus("preparing");
+    setProgress(0);
+    setProgressPreview(null);
+    setProgressText("正在读取特效参考画面");
+    dismissToast();
+    let photoshopCommitted = false;
+    try {
+      const result = await executeVfxWorkflow(
+        requestEngine,
+        {
+          config: configSnapshot,
+          prompt: promptSnapshot,
+          taskId,
+          timeoutMs: Math.max(
+            5_000,
+            Math.round(settings.timeoutMaxSeconds * settings.timeoutMultiplier * 1_000)
+          ),
+          signal: abortController.signal,
+          isCurrent: isRunCurrent,
+          onPhase: (phase) => {
+            if (!isRunCurrent()) return;
+            setVfxStatus(phase);
+            setProgressText(
+              phase === "preparing"
+                ? "正在读取特效参考画面"
+                : phase === "generating"
+                  ? "闭源引擎正在生成 VFX"
+                  : "正在以特效图层贴回"
+            );
+          }
+        },
+        VFX_PHOTOSHOP_ADAPTER
+      );
+      if (!isRunCurrent()) return;
+      photoshopCommitted = true;
+      runGateRef.current.complete(runToken);
+      if (vfxAbortRef.current === abortController) vfxAbortRef.current = null;
+      const resultDataUrl = result.image.startsWith("data:") ? result.image : toDataUrl(result.image);
+      setLastImages([resultDataUrl]);
+      setVfxStatus("success");
+      setStatus("success");
+      setProgress(0);
+      setProgressPreview(null);
+      setProgressText(null);
+      pushToast("success", "VFX 特效生成完成");
+      vfxHistoryTailCountRef.current += 1;
+      try {
+        await recordHistory({
+          provider: "gemini",
+          prompt: result.prompt,
+          params: {
+            ...form,
+            positivePrompt: promptSnapshot,
+            vfxConfig: configSnapshot
+          },
+          resultDataUrl
+        });
+      } finally {
+        vfxHistoryTailCountRef.current -= 1;
+      }
+    } catch (caught) {
+      if (photoshopCommitted || !isRunCurrent()) return;
+      const message = formatGenerationError(caught, "VFX 特效生成失败");
+      setVfxStatus("error");
+      setStatus("error");
+      setError(message);
+      pushToast("error", message);
+    } finally {
+      if (!photoshopCommitted) {
+        const runIsCurrent = runGateRef.current.isCurrent(runToken);
+        if (vfxAbortRef.current === abortController) vfxAbortRef.current = null;
+        if (runIsCurrent) {
+          runGateRef.current.complete(runToken);
+          commitIfCurrent(requestToken, () => {
+            setProgress(0);
+            setProgressPreview(null);
+            setProgressText(null);
+          });
+        }
+      }
+    }
+  }, [commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pushToast, recordHistory, settings, vfxConfig]);
 
   const addToBatch = useCallback(async () => {
     const taskId = generateId();
@@ -1183,6 +1330,12 @@ export const useGenerationController = (
       if (!file) {
         throw new Error("预设文件格式不正确");
       }
+      const presetVfxConfig = file.preset.kind === "gemini" && file.preset.vfxConfig !== undefined
+        ? parseVfxConfig(file.preset.vfxConfig, { strict: true })
+        : undefined;
+      if (file.preset.kind === "gemini" && file.preset.vfxConfig !== undefined && !presetVfxConfig) {
+        throw new Error("预设中的 VFX 参数格式不正确");
+      }
       const apply = presetApplyQueueRef.current
         .catch(() => undefined)
         .then(async () => {
@@ -1202,6 +1355,10 @@ export const useGenerationController = (
               positivePrompt: content,
               extraPrompt: ""
             }));
+            if (presetVfxConfig) {
+              setVfxConfig(presetVfxConfig);
+              setVfxStatus("idle");
+            }
           } else {
             setForm(normalizeFormPrompts(mapForgeDataToForm(file.preset.data)));
           }
@@ -1242,7 +1399,8 @@ export const useGenerationController = (
         ? {
             ...shared,
             kind: "gemini",
-            content: [normalizedForm.positivePrompt, normalizedForm.extraPrompt].filter(Boolean).join("\n").trim()
+            content: [normalizedForm.positivePrompt, normalizedForm.extraPrompt].filter(Boolean).join("\n").trim(),
+            vfxConfig: { ...vfxConfig }
           } satisfies GeminiPreset
         : {
             ...shared,
@@ -1256,7 +1414,7 @@ export const useGenerationController = (
       await loadPresets();
       pushToast("success", `预设「${name}」已保存`);
     },
-    [form, loadPresets, presets, pushToast, selectedPreset]
+    [form, loadPresets, presets, pushToast, selectedPreset, vfxConfig]
   );
 
   const deletePreset = useCallback(
@@ -1292,6 +1450,10 @@ export const useGenerationController = (
     refreshOptions,
     runGeneration,
     stopGeneration,
+    vfxConfig,
+    vfxStatus,
+    updateVfxConfig,
+    runVfx,
     history,
     historyLoading,
     historyError,

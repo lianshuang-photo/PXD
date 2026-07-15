@@ -4,6 +4,7 @@ import { useGenerationController } from "../hooks/useGenerationController";
 import OverlayPortal from "../components/OverlayPortal";
 import PromptParamControls from "../components/PromptParamControls";
 import PresetCatalogSelect from "../components/PresetCatalogSelect";
+import VfxEditor from "../components/VfxEditor";
 
 interface Props {
   settings: AppSettings;
@@ -70,6 +71,10 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     refreshOptions,
     runGeneration,
     stopGeneration,
+    vfxConfig,
+    vfxStatus,
+    updateVfxConfig,
+    runVfx,
     history,
     historyLoading,
     historyError,
@@ -457,6 +462,16 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
         <div style={{ maxWidth: "100%", width: "100%", boxSizing: "border-box" }}>
           <article style={{ width: "100%", padding: "0.25rem", background: "var(--bg-panel)", borderRadius: "4px", boxSizing: "border-box" }}>
             <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: "0.2rem", boxSizing: "border-box" }}>
+              <VfxEditor
+                config={vfxConfig}
+                prompt={form.positivePrompt}
+                disabled={status === "running"}
+                providerSupported={settings.imageProvider === "gemini"}
+                status={vfxStatus}
+                onConfigChange={updateVfxConfig}
+                onPromptChange={(value) => setFormValue("positivePrompt", value)}
+                onRun={() => void runVfx()}
+              />
               {/* 预设 */}
               <div>
                 <div style={{ display: "flex", gap: "0.12rem", marginBottom: "0.12rem" }}>

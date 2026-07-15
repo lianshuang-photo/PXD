@@ -1060,3 +1060,88 @@ select.input::-ms-expand {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+
+.vfx-editor {
+  display: grid;
+  gap: 6px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.vfx-editor__header,
+.vfx-editor__options,
+.vfx-editor__color {
+  display: flex;
+  align-items: center;
+}
+
+.vfx-editor__header {
+  justify-content: space-between;
+  color: var(--text-primary);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.vfx-editor__swatch {
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+
+.vfx-editor__selects,
+.vfx-editor__weights {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 8px;
+}
+
+.vfx-editor__selects label,
+.vfx-editor__weight,
+.vfx-editor__direction {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  color: var(--text-secondary);
+  font-size: 0.62rem;
+}
+
+.vfx-editor input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+}
+
+.vfx-editor__options {
+  min-height: 26px;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-size: 0.62rem;
+  flex-wrap: wrap;
+}
+
+.vfx-editor__options label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.vfx-editor__color input[type="color"] {
+  width: 30px;
+  height: 22px;
+  padding: 1px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: transparent;
+}
+
+.vfx-editor__prompt {
+  min-height: 46px;
+  resize: vertical;
+}
+
+.vfx-editor__run {
+  width: 100%;
+  min-height: 28px;
+}

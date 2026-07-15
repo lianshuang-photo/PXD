@@ -26,6 +26,11 @@ const boundary = vi.hoisted(() => ({
     moveActiveLayerToTop: vi.fn(),
     onBatchAddLayer: vi.fn(),
     placeImageIntoSelection: vi.fn(),
+    captureVfxSource: vi.fn(),
+    validateVfxSource: vi.fn(),
+    placeVfxResult: vi.fn(),
+    rollbackVfxResult: vi.fn(),
+    restoreVfxContext: vi.fn(),
     setSelectionBounds: vi.fn(),
     switchToDocument: vi.fn()
   },
@@ -191,6 +196,17 @@ beforeEach(() => {
   boundary.photoshop.getSelectionPixels.mockResolvedValue(selection(""));
   boundary.photoshop.hasActiveSelection.mockResolvedValue(true);
   boundary.photoshop.placeImageIntoSelection.mockResolvedValue({ layerID: 101 });
+  boundary.photoshop.captureVfxSource.mockResolvedValue({
+    dataUrl: "data:image/png;base64,VFX_SOURCE",
+    documentId: 7,
+    documentWidth: 640,
+    documentHeight: 480,
+    selectionBounds: null
+  });
+  boundary.photoshop.validateVfxSource.mockResolvedValue(undefined);
+  boundary.photoshop.placeVfxResult.mockResolvedValue({ layerId: 303 });
+  boundary.photoshop.rollbackVfxResult.mockResolvedValue(undefined);
+  boundary.photoshop.restoreVfxContext.mockResolvedValue(undefined);
   boundary.photoshop.groupLayers.mockResolvedValue(undefined);
   boundary.photoshop.moveActiveLayerToTop.mockResolvedValue(undefined);
   boundary.photoshop.onBatchAddLayer.mockResolvedValue(null);
@@ -394,6 +410,86 @@ describe("useGenerationController generation history integration", () => {
   );
 });
 
+describe("useGenerationController VFX integration", () => {
+  const geminiSettings: AppSettings = {
+    ...DEFAULT_SETTINGS,
+    imageProvider: "gemini",
+    offlineMode: false
+  };
+
+  it("generates, blends, and records a complete VFX plan", async () => {
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    act(() => {
+      rendered.getController().setFormValue("positivePrompt", "behind the subject");
+      rendered.getController().updateVfxConfig({
+        effectType: "lightning",
+        direction: 225,
+        intensity: 0.88,
+        color: "#35a7ff",
+        blendMode: "linearDodge"
+      });
+    });
+    await act(async () => rendered.getController().runVfx());
+
+    expect(rendered.getController().status).toBe("success");
+    expect(rendered.getController().vfxStatus).toBe("success");
+    expect(boundary.geminiClient.editImage).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: expect.stringContaining("Additional art direction: behind the subject"),
+      baseImageBase64: "VFX_SOURCE",
+      taskId: expect.any(String)
+    }));
+    expect(boundary.photoshop.placeVfxResult).toHaveBeenCalledWith(
+      expect.objectContaining({ documentId: 7 }),
+      "data:image/png;base64,GEMINI_RESULT",
+      { blendMode: "linearDodge", useSelectionMask: true },
+      expect.any(Function),
+      { taskId: expect.any(String) }
+    );
+    expect(rendered.getController().history[0].params.vfxConfig).toMatchObject({
+      effectType: "lightning",
+      direction: 225,
+      intensity: 0.88,
+      color: "#35a7ff"
+    });
+    const recordedId = rendered.getController().history[0].id;
+    act(() => rendered.getController().updateVfxConfig({ effectType: "smoke", intensity: 0.1 }));
+    await act(async () => rendered.getController().restoreHistoryConfig(recordedId));
+    expect(rendered.getController().vfxConfig).toMatchObject({
+      effectType: "lightning",
+      intensity: 0.88,
+      blendMode: "linearDodge"
+    });
+  });
+
+  it("rejects Forge before Photoshop capture", async () => {
+    const rendered = trackedRender();
+    await flush();
+    await act(async () => rendered.getController().runVfx());
+    expect(rendered.getController().status).toBe("error");
+    expect(rendered.getController().vfxStatus).toBe("error");
+    expect(boundary.photoshop.captureVfxSource).not.toHaveBeenCalled();
+  });
+
+  it("stops an in-flight VFX request before placement", async () => {
+    let settle!: (value: string) => void;
+    boundary.geminiClient.editImage.mockReturnValueOnce(new Promise<string>((resolve) => { settle = resolve; }));
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    let run!: Promise<void>;
+    act(() => { run = rendered.getController().runVfx(); });
+    await vi.waitFor(() => expect(boundary.geminiClient.editImage).toHaveBeenCalled());
+    act(() => rendered.getController().stopGeneration());
+    await act(async () => {
+      settle("LATE");
+      await run;
+    });
+    expect(boundary.photoshop.placeVfxResult).not.toHaveBeenCalled();
+    expect(rendered.getController().status).toBe("idle");
+    expect(rendered.getController().vfxStatus).toBe("idle");
+  });
+});
+
 describe("useGenerationController history provider restoration", () => {
   const persistedEntry = (id: string, provider: AppSettings["imageProvider"], prompt: string, offset: number) => ({
     id,
@@ -509,13 +605,42 @@ describe("useGenerationController preset schemas", () => {
     });
     const rendered = trackedRender();
     await flush();
+    act(() => rendered.getController().updateVfxConfig({ intensity: 0.23 }));
 
     await act(async () => rendered.getController().applyPreset("factory:natural.json"));
 
     expect(rendered.updateSettings).toHaveBeenCalledWith({ imageProvider: "gemini" });
     expect(rendered.getController().form.positivePrompt).toBe("natural relight");
     expect(rendered.getController().form.extraPrompt).toBe("");
+    expect(rendered.getController().vfxConfig.intensity).toBe(0.23);
     expect(rendered.getController().selectedPreset).toBe("factory:natural.json");
+  });
+
+  it("applies a structured VFX factory preset with its prompt", async () => {
+    const vfxConfig = {
+      effectType: "smoke" as const,
+      direction: 180,
+      intensity: 0.8,
+      density: 0.7,
+      spread: 0.6,
+      glow: 0.2,
+      color: "#8aa4bb",
+      useSelectionMask: false,
+      transparentBackground: false,
+      blendMode: "linearDodge" as const
+    };
+    boundary.loadPresetFile.mockResolvedValueOnce({
+      meta: { name: "电影烟雾", fileName: "factory:vfx.json", createdAt: "", kind: "gemini", isFactory: true },
+      preset: { kind: "gemini", title: "电影烟雾", content: "cinematic smoke", vfxConfig },
+      version: 2
+    });
+    const rendered = trackedRender({
+      initialSettings: { ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }
+    });
+    await flush();
+    await act(async () => rendered.getController().applyPreset("factory:vfx.json"));
+    expect(rendered.getController().form.positivePrompt).toBe("cinematic smoke");
+    expect(rendered.getController().vfxConfig).toEqual(vfxConfig);
   });
 
   it("keeps the form unchanged when the Gemini provider patch fails", async () => {
@@ -655,7 +780,14 @@ describe("useGenerationController preset schemas", () => {
       expect.objectContaining({
         kind: "gemini",
         category: "智能修图",
-        content: "prompt\nextra"
+        content: "prompt\nextra",
+        vfxConfig: expect.objectContaining({
+          effectType: "sparks",
+          intensity: 0.7,
+          density: 0.55,
+          transparentBackground: true,
+          blendMode: "screen"
+        })
       })
     );
 

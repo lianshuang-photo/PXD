@@ -18,6 +18,7 @@ import {
   type ForgePreset,
   type GeminiPreset
 } from "./presets";
+import { DEFAULT_VFX_CONFIG } from "./vfx";
 
 const folder = {
   getEntries: vi.fn(),
@@ -46,6 +47,10 @@ describe("preset catalog", () => {
     const loaded = await loadPresetFile(metas[0].fileName);
     expect(loaded?.meta).toEqual(metas[0]);
     expect(loaded?.preset.kind).toBe(metas[0].kind);
+    const vfxMeta = metas.find(({ name }) => name === "电影级火花粒子");
+    expect(vfxMeta).toBeTruthy();
+    const vfx = await loadPresetFile(vfxMeta!.fileName);
+    expect(vfx?.preset).toMatchObject({ kind: "gemini", vfxConfig: DEFAULT_VFX_CONFIG });
   });
 
   it("merges users after factory presets and migrates legacy form envelopes", async () => {
@@ -99,7 +104,8 @@ describe("preset catalog", () => {
       title: "ignored",
       category: "智能修图",
       content: "replace the background",
-      refImages: ["data:image/png;base64,REF"]
+      refImages: ["data:image/png;base64,REF"],
+      vfxConfig: { ...DEFAULT_VFX_CONFIG, effectType: "smoke", density: 0.77 }
     };
     const forge: ForgePreset = {
       kind: "forge",
@@ -117,7 +123,12 @@ describe("preset catalog", () => {
       1,
       folder,
       "场景替换.json",
-      expect.objectContaining({ version: 2, kind: "gemini", content: gemini.content })
+      expect.objectContaining({
+        version: 2,
+        kind: "gemini",
+        content: gemini.content,
+        vfxConfig: gemini.vfxConfig
+      })
     );
     expect(storage.writeJsonEntry).toHaveBeenNthCalledWith(
       2,
@@ -125,6 +136,36 @@ describe("preset catalog", () => {
       "精细重绘.json",
       expect.objectContaining({ version: 2, kind: "forge", data: forge.data })
     );
+  });
+
+  it("round-trips a complete VFX config through writable storage", async () => {
+    const files = new Map<string, unknown>();
+    storage.writeJsonEntry.mockImplementation(async (_folder, fileName, payload) => {
+      files.set(fileName, payload);
+    });
+    storage.readJsonEntry.mockImplementation(async (_folder, fileName, fallback) =>
+      files.get(fileName) ?? fallback
+    );
+    const vfxConfig = {
+      ...DEFAULT_VFX_CONFIG,
+      effectType: "lightning" as const,
+      direction: 225,
+      intensity: 0.88,
+      color: "#35a7ff",
+      blendMode: "linearDodge" as const
+    };
+    const saved = await savePresetFile("闪电特效", {
+      kind: "gemini",
+      title: "ignored",
+      content: "cinematic lightning",
+      vfxConfig
+    });
+    const loaded = await loadPresetFile(saved.meta.fileName);
+    expect(loaded?.preset).toEqual(expect.objectContaining({
+      kind: "gemini",
+      content: "cinematic lightning",
+      vfxConfig
+    }));
   });
 
   it("overwrites an external file name in place and keeps save-as separate", async () => {
@@ -196,6 +237,13 @@ describe("preset catalog", () => {
     });
     expect(normalized?.preset.kind).toBe("gemini");
     if (normalized?.preset.kind === "gemini") expect(normalized.preset.refImages).toHaveLength(8);
+    expect(normalizePresetDocument({
+      version: 2,
+      kind: "gemini",
+      title: "bad vfx",
+      content: "prompt",
+      vfxConfig: { ...DEFAULT_VFX_CONFIG, intensity: "strong" }
+    })).toBeNull();
   });
 
   it("refuses future schemas without rewriting them as v2", async () => {
