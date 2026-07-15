@@ -8,6 +8,7 @@ const lights = createDefaultRelightLights();
 const renderEditor = (overrides: Partial<Parameters<typeof LightingEditor>[0]> = {}) => {
   const props = {
     lights,
+    opacity: 70,
     selectedId: lights[0].id,
     prompt: "portrait",
     disabled: false,
@@ -17,6 +18,7 @@ const renderEditor = (overrides: Partial<Parameters<typeof LightingEditor>[0]> =
     onAdd: vi.fn(),
     onRemove: vi.fn(),
     onChange: vi.fn(),
+    onOpacityChange: vi.fn(),
     onPromptChange: vi.fn(),
     onRun: vi.fn(),
     ...overrides
@@ -45,6 +47,7 @@ describe("LightingEditor", () => {
     act(() => renderer.root.findByProps({ "aria-label": "灯光强度" }).props.onChange({ target: { value: "0.61" } }));
     act(() => renderer.root.findByProps({ "aria-label": "灯光色温" }).props.onChange({ target: { value: "6200" } }));
     act(() => renderer.root.findByProps({ "aria-label": "灯光方向" }).props.onChange({ target: { value: "210" } }));
+    act(() => renderer.root.findByProps({ "aria-label": "能量层不透明度" }).props.onChange({ target: { value: "64" } }));
     expect(props.onAdd).toHaveBeenCalled();
     expect(props.onRemove).toHaveBeenCalledWith("key-1");
     expect(props.onSelect).toHaveBeenCalledWith("rim-1");
@@ -53,6 +56,7 @@ describe("LightingEditor", () => {
     expect(props.onChange).toHaveBeenCalledWith("key-1", { intensity: 0.61 });
     expect(props.onChange).toHaveBeenCalledWith("key-1", { temperature: 6200 });
     expect(props.onChange).toHaveBeenCalledWith("key-1", { direction: 210 });
+    expect(props.onOpacityChange).toHaveBeenCalledWith(64);
   });
 
   it("disables relighting for Forge, active work, and an empty plan", () => {
@@ -60,6 +64,7 @@ describe("LightingEditor", () => {
     expect(forge.renderer.root.findByProps({ children: "重新打光" }).props.disabled).toBe(true);
     const running = renderEditor({ disabled: true });
     expect(running.renderer.root.findByProps({ children: "重新打光" }).props.disabled).toBe(true);
+    expect(running.renderer.root.findByProps({ "aria-label": "能量层不透明度" }).props.disabled).toBe(true);
     const empty = renderEditor({ lights: [], selectedId: null });
     expect(empty.renderer.root.findByProps({ children: "重新打光" }).props.disabled).toBe(true);
   });

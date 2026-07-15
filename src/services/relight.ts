@@ -14,7 +14,10 @@ export interface RelightLight {
 
 export interface RelightConfig {
   lights: RelightLight[];
+  opacity: number;
 }
+
+export const DEFAULT_RELIGHT_OPACITY = 70;
 
 export const RELIGHT_LIGHT_TYPE_LABELS: Record<RelightLightType, string> = {
   softbox: "柔光箱",
@@ -50,6 +53,8 @@ const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
 
 export const clampRelightCoordinate = (value: number) => clamp(value, 0, 1);
+export const normalizeRelightOpacity = (value: number) =>
+  Math.round(clamp(value, 0, 100));
 
 export const normalizeRelightLight = (light: RelightLight): RelightLight => ({
   ...light,
@@ -175,7 +180,14 @@ export const normalizeRelightConfig = (
       temperature: Number(light.temperature)
     }));
   }
-  return lights.length ? { lights: lights.slice(0, 8) } : null;
+  const rawOpacity = (value as { opacity?: unknown }).opacity;
+  if (options.strict && rawOpacity !== undefined && (
+    typeof rawOpacity !== "number" || !Number.isFinite(rawOpacity)
+  )) return null;
+  const opacity = rawOpacity === undefined
+    ? DEFAULT_RELIGHT_OPACITY
+    : normalizeRelightOpacity(Number(rawOpacity));
+  return lights.length ? { lights: lights.slice(0, 8), opacity } : null;
 };
 
 export const buildRelightPrompt = (lights: RelightLight[], userPrompt = "") => {
@@ -187,13 +199,15 @@ export const buildRelightPrompt = (lights: RelightLight[], userPrompt = "") => {
     `intensity ${light.intensity.toFixed(2)}, color temperature ${light.temperature}K.`
   );
   return [
-    "Relight the supplied image using only additive illumination.",
-    "Add light and visible light falloff, but do not darken any existing pixel or deepen existing shadows.",
-    "Do not change global hue, saturation, luminance, gamma, exposure, contrast, or white balance.",
-    "Preserve subject identity, facial features, pose, anatomy, composition, camera perspective, materials, texture, and background geometry exactly.",
+    "Create an additive lighting-contribution AOV for the supplied image; do not return a relit copy of the image.",
+    "Return a full-frame RGB image on an exact neutral 50% gray background (RGB 128, 128, 128).",
+    "Encode only positive illumination above neutral gray; every channel of every output pixel must be 128 or higher.",
+    "Areas receiving no added light must remain exact RGB 128, 128, 128. Never encode shadows, negative light, or pixels below neutral gray.",
+    "Do not reproduce the source image, subject, texture, color, exposure, contrast, or background in the output; include only smooth light energy and falloff shaped by source depth and occlusion.",
+    "The AOV will be composited over the untouched source with Soft Light blending, so neutral gray must create zero change and the contribution must only increase light.",
     "Do not generate visible lamps, fixtures, stands, arrows, labels, dots, numbers, or annotation marks.",
     "Respect depth, occlusion, cast-light direction, and the existing scene geometry.",
-    "Remove any visual annotation traces from the result and return only the naturally relit image.",
+    "Remove all annotation traces and return only the neutral-gray lighting contribution layer.",
     "Lighting plan:",
     ...lightInstructions,
     userPrompt.trim() ? `Additional direction: ${userPrompt.trim()}` : ""

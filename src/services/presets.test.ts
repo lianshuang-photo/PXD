@@ -52,6 +52,7 @@ describe("preset catalog", () => {
     expect(relight?.preset).toMatchObject({
       kind: "gemini",
       relightConfig: {
+        opacity: 70,
         lights: [
           expect.objectContaining({ role: "key", type: "softbox", direction: 35 }),
           expect.objectContaining({ role: "rim", type: "spot", temperature: 7000 })
@@ -113,6 +114,7 @@ describe("preset catalog", () => {
       content: "replace the background",
       refImages: ["data:image/png;base64,REF"],
       relightConfig: {
+        opacity: 70,
         lights: [{
           id: "key", type: "softbox", role: "key", x: 0.2, y: 0.3,
           direction: 45, intensity: 0.8, temperature: 5200
@@ -159,6 +161,7 @@ describe("preset catalog", () => {
       files.get(fileName) ?? fallback
     );
     const relightConfig = {
+      opacity: 62,
       lights: [
         { id: "key", type: "softbox" as const, role: "key" as const, x: 0.18, y: 0.27, direction: 32, intensity: 0.82, temperature: 5100 },
         { id: "rim", type: "spot" as const, role: "rim" as const, x: 0.84, y: 0.21, direction: 148, intensity: 0.44, temperature: 7200 }

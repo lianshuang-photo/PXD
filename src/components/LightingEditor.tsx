@@ -12,6 +12,7 @@ import type { RelightPhase } from "../services/relightWorkflow";
 
 interface LightingEditorProps {
   lights: RelightLight[];
+  opacity: number;
   selectedId: string | null;
   prompt: string;
   disabled: boolean;
@@ -21,12 +22,14 @@ interface LightingEditorProps {
   onAdd: () => void;
   onRemove: (id: string) => void;
   onChange: (id: string, patch: Partial<RelightLight>) => void;
+  onOpacityChange: (value: number) => void;
   onPromptChange: (value: string) => void;
   onRun: () => void;
 }
 
 const LightingEditor = ({
   lights,
+  opacity,
   selectedId,
   prompt,
   disabled,
@@ -36,6 +39,7 @@ const LightingEditor = ({
   onAdd,
   onRemove,
   onChange,
+  onOpacityChange,
   onPromptChange,
   onRun
 }: LightingEditorProps) => {
@@ -202,6 +206,20 @@ const LightingEditor = ({
           </label>
         </div>
       )}
+
+      <label className="lighting-editor__opacity">
+        <span>能量层不透明度 {Math.round(opacity)}%</span>
+        <input
+          aria-label="能量层不透明度"
+          type="range"
+          min="0"
+          max="100"
+          step="1"
+          value={opacity}
+          disabled={disabled}
+          onChange={(event) => onOpacityChange(Number(event.target.value))}
+        />
+      </label>
 
       <textarea
         className="input lighting-editor__prompt"
