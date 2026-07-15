@@ -64,6 +64,22 @@ describe("scene pack catalog", () => {
     expect(resolveScenePrompt(pack, { lighting: ["missing"] }).errors).toContain("灯光包含无效选项");
   });
 
+  it("normalizes prompt markers once at the catalog boundary", () => {
+    const pack = normalizeScenePack({
+      id: "marker-scene",
+      name: "Marker scene",
+      promptTemplate: "base, {lighting}, @param:global:2, @param:disabled:0",
+      options: {
+        lighting: [{ id: "soft", label: "Soft", prompt: "soft light 【局部：0.376】" }]
+      }
+    })!;
+
+    expect(resolveScenePrompt(pack, createSceneSelection(pack))).toEqual({
+      prompt: "base, soft light 【局部：0.38】, @param:global:1.00",
+      errors: []
+    });
+  });
+
   it("resolves 10000 deterministic generated templates without leaking placeholders", () => {
     let seed = 0x14c0ffee;
     const random = () => {

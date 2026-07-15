@@ -1,3 +1,5 @@
+import { sanitizePrompt } from "./promptParams";
+
 export interface SceneOptionValue {
   id: string;
   label: string;
@@ -184,11 +186,11 @@ export const resolveScenePrompt = (
     replacements.set(group.id, prompts.join(", "));
   }
   if (errors.length) return { prompt: "", errors };
-  const prompt = pack.promptTemplate
+  const prompt = sanitizePrompt(pack.promptTemplate
     .replace(PLACEHOLDER_PATTERN, (_match, id: string) => replacements.get(id) ?? "")
     .replace(/[ \t]+/g, " ")
     .replace(/\s+([,.;，。；])/g, "$1")
-    .trim();
+    .trim());
   const unresolved = parseSceneTemplate(prompt);
   if (unresolved.error || unresolved.placeholders.length) {
     return { prompt: "", errors: ["场景提示词仍包含未解析占位符"] };

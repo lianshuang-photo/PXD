@@ -357,9 +357,12 @@ describe("useGenerationController scene packs", () => {
     resolve("LATE_RESULT");
     await act(async () => run);
 
-    expect(rendered.getController().sceneStopping).toBe(false);
+    expect(rendered.getController().sceneStopping).toBe(true);
     expect(rendered.getController().status).toBe("error");
     expect(rendered.getController().error).toContain("channel cleanup failed");
+    const captureCalls = boundary.photoshop.captureSceneSource.mock.calls.length;
+    await act(async () => rendered.getController().runScenePack());
+    expect(boundary.photoshop.captureSceneSource).toHaveBeenCalledTimes(captureCalls);
   });
 
   it("rejects Forge before scene capture", async () => {

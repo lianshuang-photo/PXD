@@ -5,7 +5,8 @@ import {
   PSCircuitOpenError,
   PSLockCancelledError,
   PSOperationTimeoutError,
-  runPSExclusive
+  runPSExclusive,
+  waitForPSTaskSettlement
 } from "../src/services/psLock.ts";
 
 const delay = (milliseconds: number) =>
@@ -98,4 +99,38 @@ test("clearPSLockQueue only rejects pending entries for the selected task", asyn
   await cancelledAssertion;
   const releaseRetained = await retained;
   releaseRetained();
+});
+
+test("task settlement waits for timed-out underlying work and circuit cooldown", async () => {
+  let settle!: () => void;
+  const timedOut = runPSExclusive(
+    () => new Promise<void>((resolve) => { settle = resolve; }),
+    { taskId: "settlement", timeoutMs: 20 }
+  );
+  await expect(timedOut).rejects.toBeInstanceOf(PSOperationTimeoutError);
+  let finished = false;
+  const settlement = waitForPSTaskSettlement("settlement").then(() => { finished = true; });
+  settle();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(finished).toBe(false);
+  await settlement;
+  expect(finished).toBe(true);
+});
+
+test("a timed-out recovery failure leaves the Photoshop circuit open", async () => {
+  let fail!: () => void;
+  const timedOut = runPSExclusive(
+    () => new Promise<void>((_resolve, reject) => {
+      fail = () => reject(Object.assign(new Error("late cleanup failed"), { recoveryFailed: true }));
+    }),
+    { taskId: "sticky", timeoutMs: 20 }
+  );
+  await expect(timedOut).rejects.toBeInstanceOf(PSOperationTimeoutError);
+  fail();
+  await expect(waitForPSTaskSettlement("sticky")).rejects.toMatchObject({
+    message: "late cleanup failed",
+    recoveryFailed: true
+  });
+  await expect(runPSExclusive(() => undefined, { taskId: "blocked" }))
+    .rejects.toMatchObject({ name: PSCircuitOpenError.name, blockingTaskId: "sticky" });
 });

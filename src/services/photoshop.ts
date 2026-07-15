@@ -1,5 +1,5 @@
 import { bridge } from "./uxpBridge";
-import { runPSExclusive } from "./psLock";
+import { PSOperationTimeoutError, runPSExclusive, waitForPSTaskSettlement } from "./psLock";
 
 export interface SelectionBounds {
   left: number;
@@ -41,11 +41,24 @@ export class ScenePhotoshopError extends Error {
   }
 }
 
+export class ScenePlacementPartialError extends ScenePhotoshopError {
+  readonly layerId: number;
+  readonly cleanupComplete: boolean;
+
+  constructor(message: string, layerId: number, cleanupComplete: boolean, recoveryFailed = false) {
+    super(message, recoveryFailed);
+    this.name = "ScenePlacementPartialError";
+    this.layerId = layerId;
+    this.cleanupComplete = cleanupComplete;
+  }
+}
+
 export interface CaptureSceneSourceOptions extends PhotoshopOperationOptions {
   maxEdge: number;
   includeSelection: boolean;
   preserveSelection: boolean;
   maxInputBytes: number;
+  isCurrent?: () => boolean;
 }
 
 export interface PlaceSceneBackgroundOptions extends PhotoshopOperationOptions {
@@ -884,10 +897,12 @@ const captureBoundsUnlocked = async (
   photoshop: any,
   documentId: number,
   bounds: SelectionBounds,
-  target: { width: number; height: number }
+  target: { width: number; height: number },
+  layerId?: number
 ) => await executeAsModalUnlocked(photoshop, async () => {
   const pixels = await photoshop.imaging.getPixels({
     documentID: documentId,
+    ...(layerId ? { layerID: layerId } : {}),
     sourceBounds: bounds,
     targetSize: target,
     applyAlpha: true,
@@ -938,64 +953,128 @@ const removeSceneSelectionChannelUnlocked = async (name: string) => {
   if (!result) throw new Error("Photoshop 未能清理场景选区通道");
 };
 
-export const captureSceneSource = (
-  options: CaptureSceneSourceOptions
-): Promise<SceneSourceCapture> => runTransaction(async () => {
+const activeSceneLayerIdUnlocked = () => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
   const doc = photoshop.app.activeDocument;
-  const documentId = Number(doc?.id);
-  const documentWidth = scenePixelValue(doc?.width);
-  const documentHeight = scenePixelValue(doc?.height);
-  if (!Number.isInteger(documentId) || documentId <= 0 || documentWidth <= 0 || documentHeight <= 0) {
-    throw new Error("请先打开有效的 Photoshop 文档");
+  const id = Number(doc?.activeLayers?.[0]?.id ?? doc?.activeLayer?.id);
+  return Number.isInteger(id) && id > 0 ? id : null;
+};
+
+const createSceneReferenceLayerUnlocked = async (channelName: string, layerName: string) => {
+  const previousLayerId = activeSceneLayerIdUnlocked();
+  await runJsxCodeUnlocked(`
+    var doc = app.activeDocument;
+    var channel = doc.channels.getByName(${JSON.stringify(channelName)});
+    doc.selection.load(channel, SelectionType.REPLACE);
+    doc.selection.copy(true);
+    var layer = doc.paste();
+    layer.name = ${JSON.stringify(layerName)};
+    true;
+  `);
+  const layerId = activeSceneLayerIdUnlocked();
+  if (!layerId || layerId === previousLayerId) {
+    throw new Error("Photoshop 未创建透明主体参考图层");
   }
-  const maxEdge = Math.max(128, Math.min(2048, Math.round(options.maxEdge)));
-  const maxInputBytes = Math.max(1024 * 1024, Math.round(options.maxInputBytes));
-  const selectionBounds = doc.selection?.bounds ? toBounds(doc.selection.bounds) : null;
-  let selectionChannelName: string | null = null;
-  try {
-    if (options.preserveSelection && selectionBounds) {
-      selectionChannelName = sceneSelectionChannelName(documentId);
-      await storeSceneSelectionUnlocked(selectionChannelName);
+  return layerId;
+};
+
+export const captureSceneSource = (
+  options: CaptureSceneSourceOptions
+): Promise<SceneSourceCapture> => {
+  let abandoned = false;
+  const assertCurrent = () => {
+    if (abandoned || (options.isCurrent && !options.isCurrent())) throw new Error("场景生成已取消");
+  };
+  const operation = runTransaction(async () => {
+    const photoshop = ensureModule(getPhotoshop, "Photoshop");
+    const doc = photoshop.app.activeDocument;
+    const documentId = Number(doc?.id);
+    const documentWidth = scenePixelValue(doc?.width);
+    const documentHeight = scenePixelValue(doc?.height);
+    if (!Number.isInteger(documentId) || documentId <= 0 || documentWidth <= 0 || documentHeight <= 0) {
+      throw new Error("请先打开有效的 Photoshop 文档");
     }
-    const documentBounds = { left: 0, top: 0, right: documentWidth, bottom: documentHeight };
-    const baseSize = sceneFitWithin(documentWidth, documentHeight, maxEdge);
-    const base64 = await captureBoundsUnlocked(photoshop, documentId, documentBounds, baseSize);
-    let referenceBase64: string | null = null;
-    if (options.includeSelection && selectionBounds) {
-      const selectionWidth = selectionBounds.right - selectionBounds.left;
-      const selectionHeight = selectionBounds.bottom - selectionBounds.top;
-      if (selectionWidth <= 0 || selectionHeight <= 0) throw new Error("主体选区尺寸无效");
-      const referenceSize = sceneFitWithin(selectionWidth, selectionHeight, Math.min(maxEdge, 1024));
-      referenceBase64 = await captureBoundsUnlocked(photoshop, documentId, selectionBounds, referenceSize);
-    }
-    const encodedBytes = sceneDecodedBytes(base64) + (referenceBase64 ? sceneDecodedBytes(referenceBase64) : 0);
-    if (encodedBytes > maxInputBytes) throw new Error("场景画布与人物参考图超过输入资源上限");
-    return {
-      documentId,
-      documentWidth,
-      documentHeight,
-      baseImageDataUrl: `data:image/png;base64,${base64}`,
-      baseWidth: baseSize.width,
-      baseHeight: baseSize.height,
-      selectionBounds,
-      referenceImageDataUrl: referenceBase64 ? `data:image/png;base64,${referenceBase64}` : null,
-      selectionChannelName
-    };
-  } catch (error) {
-    if (selectionChannelName) {
-      try {
-        await removeSceneSelectionChannelUnlocked(selectionChannelName);
-      } catch (cleanupError) {
-        throw new ScenePhotoshopError(
-          `${error instanceof Error ? error.message : String(error)}；自动清理选区通道：${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
-          true
-        );
+    const maxEdge = Math.max(128, Math.min(2048, Math.round(options.maxEdge)));
+    const maxInputBytes = Math.max(1024 * 1024, Math.round(options.maxInputBytes));
+    const selectionBounds = doc.selection?.bounds ? toBounds(doc.selection.bounds) : null;
+    let selectionChannelName: string | null = null;
+    let referenceLayerId: number | null = null;
+    try {
+      assertCurrent();
+      if ((options.includeSelection || options.preserveSelection) && selectionBounds) {
+        selectionChannelName = sceneSelectionChannelName(documentId);
+        await storeSceneSelectionUnlocked(selectionChannelName);
       }
+      const documentBounds = { left: 0, top: 0, right: documentWidth, bottom: documentHeight };
+      const baseSize = sceneFitWithin(documentWidth, documentHeight, maxEdge);
+      const base64 = await captureBoundsUnlocked(photoshop, documentId, documentBounds, baseSize);
+      let referenceBase64: string | null = null;
+      if (options.includeSelection && selectionBounds && selectionChannelName) {
+        const selectionWidth = selectionBounds.right - selectionBounds.left;
+        const selectionHeight = selectionBounds.bottom - selectionBounds.top;
+        if (selectionWidth <= 0 || selectionHeight <= 0) throw new Error("主体选区尺寸无效");
+        const referenceSize = sceneFitWithin(selectionWidth, selectionHeight, Math.min(maxEdge, 1024));
+        referenceLayerId = await createSceneReferenceLayerUnlocked(
+          selectionChannelName,
+          `__PXD_SCENE_REFERENCE_${documentId}`
+        );
+        referenceBase64 = await captureBoundsUnlocked(
+          photoshop,
+          documentId,
+          selectionBounds,
+          referenceSize,
+          referenceLayerId
+        );
+        await deleteSceneLayerUnlocked(referenceLayerId);
+        referenceLayerId = null;
+      }
+      const encodedBytes = sceneDecodedBytes(base64) + (referenceBase64 ? sceneDecodedBytes(referenceBase64) : 0);
+      if (encodedBytes > maxInputBytes) throw new Error("场景画布与人物参考图超过输入资源上限");
+      assertCurrent();
+      return {
+        documentId,
+        documentWidth,
+        documentHeight,
+        baseImageDataUrl: `data:image/png;base64,${base64}`,
+        baseWidth: baseSize.width,
+        baseHeight: baseSize.height,
+        selectionBounds,
+        referenceImageDataUrl: referenceBase64 ? `data:image/png;base64,${referenceBase64}` : null,
+        selectionChannelName
+      };
+    } catch (error) {
+      const cleanupErrors: unknown[] = [];
+      if (referenceLayerId) {
+        try {
+          await deleteSceneLayerUnlocked(referenceLayerId);
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
+        }
+      }
+      if (selectionChannelName) {
+        try {
+          await removeSceneSelectionChannelUnlocked(selectionChannelName);
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
+        }
+      }
+      if (cleanupErrors.length) {
+        throw new ScenePhotoshopError([
+          error instanceof Error ? error.message : String(error),
+          ...cleanupErrors.map((cleanupError) => `自动清理：${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`)
+        ].join("；"), true);
+      }
+      throw error;
+    }
+  }, options);
+  return operation.catch(async (error) => {
+    if (error instanceof PSOperationTimeoutError && options.taskId) {
+      abandoned = true;
+      await waitForPSTaskSettlement(options.taskId);
     }
     throw error;
-  }
-}, options);
+  });
+};
 
 const sceneLayerId = (info: unknown) => {
   const record = info as Record<string, unknown> | null;
@@ -1007,52 +1086,6 @@ const sceneUnitValue = (value: unknown) => {
   if (typeof value === "number") return value;
   const record = value as { _value?: unknown; value?: unknown } | null;
   return Number(record?._value ?? record?.value ?? value);
-};
-
-const resizeSceneLayerUnlocked = async (layerId: number, initialBounds: unknown, width: number, height: number) => {
-  const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  const bounds = initialBounds as Record<string, unknown> | null;
-  const left = sceneUnitValue(bounds?.left);
-  const top = sceneUnitValue(bounds?.top);
-  const right = sceneUnitValue(bounds?.right);
-  const bottom = sceneUnitValue(bounds?.bottom);
-  const sourceWidth = right - left;
-  const sourceHeight = bottom - top;
-  if (![left, top, right, bottom, sourceWidth, sourceHeight].every(Number.isFinite) || sourceWidth <= 0 || sourceHeight <= 0) {
-    throw new Error("Photoshop 未返回可定位的场景图层");
-  }
-  await executeAsModalUnlocked(photoshop, async () => {
-    await photoshop.app.batchPlay([{
-      _obj: "transform",
-      _target: [{ _ref: "layer", _id: layerId }],
-      freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
-      width: { _unit: "percentUnit", _value: width / sourceWidth * 100 },
-      height: { _unit: "percentUnit", _value: height / sourceHeight * 100 },
-      offset: {
-        _obj: "offset",
-        horizontal: { _unit: "pixelsUnit", _value: (width - left - right) / 2 },
-        vertical: { _unit: "pixelsUnit", _value: (height - top - bottom) / 2 }
-      }
-    }], { synchronousExecution: true });
-  }, { commandName: "定位 PXD 场景背景" });
-  const verified = await executeAsModalUnlocked(photoshop, async () => {
-    const result = await photoshop.app.batchPlay(
-      [{ _obj: "get", _target: [{ _ref: "layer", _id: layerId }] }],
-      { synchronousExecution: true }
-    );
-    return result[0];
-  }, DEFAULT_MODAL_OPTIONS);
-  const verifiedBounds = verified?.bounds ?? verified?.boundsNoEffects;
-  const actual = [
-    sceneUnitValue(verifiedBounds?.left),
-    sceneUnitValue(verifiedBounds?.top),
-    sceneUnitValue(verifiedBounds?.right),
-    sceneUnitValue(verifiedBounds?.bottom)
-  ];
-  const expected = [0, 0, width, height];
-  if (actual.some((value, index) => !Number.isFinite(value) || Math.abs(value - expected[index]) > 1.5)) {
-    throw new Error("Photoshop 未将场景背景严格贴合画布");
-  }
 };
 
 const deleteSceneLayerUnlocked = async (layerId: number) => {
@@ -1069,93 +1102,247 @@ export const placeSceneBackground = (
   capture: SceneSourceCapture,
   dataUrl: string,
   options: PlaceSceneBackgroundOptions
-): Promise<ScenePlacementResult> => runTransaction(async () => {
+): Promise<ScenePlacementResult> => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  const restoreDocumentId = Number(photoshop.app.activeDocument?.id) || null;
+  const base64 = dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
+  let abandoned = false;
+  let landedLayerId: number | null = null;
+  let cleanupComplete = false;
+  let historyRestoreFailed = false;
   const assertCurrent = () => {
-    if (options.isCurrent && !options.isCurrent()) throw new Error("场景生成已取消");
+    if (abandoned || (options.isCurrent && !options.isCurrent())) throw new Error("场景生成已取消");
   };
-  let layerId: number | null = null;
-  let operationError: unknown = null;
-  try {
-    assertCurrent();
-    if (restoreDocumentId !== capture.documentId) await switchToDocumentUnlocked(capture.documentId);
-    const info = await placeImageIntoDocumentUnlocked(dataUrl, 1, capture.documentId);
-    layerId = sceneLayerId(info);
-    if (!layerId) throw new Error("Photoshop 未返回场景背景图层 ID");
-    assertCurrent();
-    const record = info as Record<string, unknown>;
-    await resizeSceneLayerUnlocked(layerId, record.bounds ?? record.boundsNoEffects, capture.documentWidth, capture.documentHeight);
-    await executeAsModalUnlocked(photoshop, async () => {
-      await photoshop.app.batchPlay([{
-        _obj: "set",
-        _target: [{ _ref: "layer", _id: layerId }],
-        to: { _obj: "layer", name: options.layerName }
-      }], { synchronousExecution: true });
-    }, DEFAULT_MODAL_OPTIONS);
-    if (options.protectSubject) {
-      if (!capture.selectionChannelName) throw new Error("没有可用于保护主体的选区");
-      await loadSceneSelectionUnlocked(capture.selectionChannelName);
-      await executeAsModalUnlocked(photoshop, async () => {
-        await photoshop.app.batchPlay([{
-          _obj: "make",
-          at: { _ref: "channel", _enum: "channel", _value: "mask" },
-          new: { _class: "channel" },
-          using: { _enum: "userMaskEnabled", _value: "hideSelection" }
-        }], { synchronousExecution: true });
-      }, { commandName: "保护 PXD 场景主体" });
-      const maskInfo = await executeAsModalUnlocked(photoshop, async () => {
-        const result = await photoshop.app.batchPlay(
-          [{ _obj: "get", _target: [{ _ref: "layer", _id: layerId }] }],
-          { synchronousExecution: true }
-        );
-        return result[0];
-      }, DEFAULT_MODAL_OPTIONS);
-      if (maskInfo?.hasUserMask !== true) throw new Error("Photoshop 未保留主体保护蒙版");
+  const operation = runTransaction(async () => {
+    const restoreDocumentId = Number(photoshop.app.activeDocument?.id) || null;
+    const token = await createTempTokenFromBase64(base64, "pxd-scene-background.png");
+    let operationError: unknown = null;
+    try {
+      assertCurrent();
+      if (restoreDocumentId !== capture.documentId) await switchToDocumentUnlocked(capture.documentId);
+      await photoshop.core.executeAsModal(async (executionContext: any) => {
+        const suspension = await executionContext.hostControl.suspendHistory({
+          documentID: capture.documentId,
+          name: options.layerName
+        });
+        let modalError: unknown = null;
+        let previousLayerId: number | null = null;
+        try {
+          assertCurrent();
+          const before = await photoshop.app.batchPlay([{
+            _obj: "get",
+            _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }]
+          }], { synchronousExecution: true });
+          previousLayerId = sceneLayerId(before[0]) ?? activeSceneLayerIdUnlocked();
+          const placed = await photoshop.app.batchPlay([{
+            ID: capture.documentId,
+            _obj: "placeEvent",
+            freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
+            null: { _kind: "local", _path: token },
+            offset: {
+              _obj: "offset",
+              horizontal: { _unit: "pixelsUnit", _value: 0 },
+              vertical: { _unit: "pixelsUnit", _value: 0 }
+            }
+          }], {});
+          const placedId = sceneLayerId(placed[0]);
+          const activeId = activeSceneLayerIdUnlocked();
+          if (placedId && placedId !== previousLayerId) landedLayerId = placedId;
+          if (activeId && activeId !== previousLayerId) landedLayerId = activeId;
+
+          const infoResult = await photoshop.app.batchPlay([{
+            _obj: "get",
+            _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }]
+          }], { synchronousExecution: true });
+          const info = infoResult[0] as Record<string, unknown> | undefined;
+          const reportedId = sceneLayerId(info);
+          if (reportedId && reportedId !== previousLayerId) landedLayerId = reportedId;
+          if (!landedLayerId || landedLayerId === previousLayerId) {
+            throw new Error("Photoshop 未创建新的场景背景图层");
+          }
+          const smartObject = info?.smartObject;
+          const layerKind = Number(info?.layerKind ?? info?.kind);
+          if (!smartObject && layerKind !== 5) {
+            throw new Error("Photoshop 场景背景不是新的智能对象");
+          }
+          const bounds = (info?.bounds ?? info?.boundsNoEffects) as Record<string, unknown> | undefined;
+          const left = sceneUnitValue(bounds?.left);
+          const top = sceneUnitValue(bounds?.top);
+          const right = sceneUnitValue(bounds?.right);
+          const bottom = sceneUnitValue(bounds?.bottom);
+          const sourceWidth = right - left;
+          const sourceHeight = bottom - top;
+          if (![left, top, right, bottom, sourceWidth, sourceHeight].every(Number.isFinite) || sourceWidth <= 0 || sourceHeight <= 0) {
+            throw new Error("Photoshop 未返回可定位的场景图层");
+          }
+          await photoshop.app.batchPlay([{
+            _obj: "transform",
+            _target: [{ _ref: "layer", _id: landedLayerId }],
+            freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
+            width: { _unit: "percentUnit", _value: capture.documentWidth / sourceWidth * 100 },
+            height: { _unit: "percentUnit", _value: capture.documentHeight / sourceHeight * 100 },
+            offset: {
+              _obj: "offset",
+              horizontal: { _unit: "pixelsUnit", _value: (capture.documentWidth - left - right) / 2 },
+              vertical: { _unit: "pixelsUnit", _value: (capture.documentHeight - top - bottom) / 2 }
+            }
+          }], { synchronousExecution: true });
+          const verifiedResult = await photoshop.app.batchPlay(
+            [{ _obj: "get", _target: [{ _ref: "layer", _id: landedLayerId }] }],
+            { synchronousExecution: true }
+          );
+          const verified = verifiedResult[0] as Record<string, any> | undefined;
+          const verifiedBounds = verified?.bounds ?? verified?.boundsNoEffects;
+          const actual = [
+            sceneUnitValue(verifiedBounds?.left), sceneUnitValue(verifiedBounds?.top),
+            sceneUnitValue(verifiedBounds?.right), sceneUnitValue(verifiedBounds?.bottom)
+          ];
+          const expected = [0, 0, capture.documentWidth, capture.documentHeight];
+          if (actual.some((value, index) => !Number.isFinite(value) || Math.abs(value - expected[index]) > 1.5)) {
+            throw new Error("Photoshop 未将场景背景严格贴合画布");
+          }
+          await photoshop.app.batchPlay([{
+            _obj: "set",
+            _target: [{ _ref: "layer", _id: landedLayerId }],
+            to: { _obj: "layer", name: options.layerName }
+          }], { synchronousExecution: true });
+          if (options.protectSubject) {
+            if (!capture.selectionChannelName) throw new Error("没有可用于保护主体的选区");
+            await photoshop.app.batchPlay([{
+              _obj: "set",
+              _target: [{ _ref: "channel", _property: "selection" }],
+              to: { _ref: "channel", _name: capture.selectionChannelName }
+            }, {
+              _obj: "make",
+              at: { _ref: "channel", _enum: "channel", _value: "mask" },
+              new: { _class: "channel" },
+              using: { _enum: "userMaskEnabled", _value: "hideSelection" }
+            }], { synchronousExecution: true });
+            const maskResult = await photoshop.app.batchPlay(
+              [{ _obj: "get", _target: [{ _ref: "layer", _id: landedLayerId }] }],
+              { synchronousExecution: true }
+            );
+            if (maskResult[0]?.hasUserMask !== true) throw new Error("Photoshop 未保留主体保护蒙版");
+          }
+          if (capture.selectionChannelName) {
+            await photoshop.app.batchPlay([{
+              _obj: "delete",
+              _target: [{ _ref: "channel", _name: capture.selectionChannelName }]
+            }], { synchronousExecution: true });
+            capture.selectionChannelName = null;
+          }
+          assertCurrent();
+        } catch (error) {
+          modalError = error;
+        }
+        if (modalError && landedLayerId) {
+          try {
+            await photoshop.app.batchPlay(
+              [{ _obj: "delete", _target: [{ _ref: "layer", _id: landedLayerId }] }],
+              { synchronousExecution: true }
+            );
+            cleanupComplete = true;
+          } catch (cleanupError) {
+            modalError = new ScenePlacementPartialError(
+              `${modalError instanceof Error ? modalError.message : String(modalError)}；自动清理：${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+              landedLayerId,
+              false,
+              true
+            );
+          }
+        }
+        try {
+          await executionContext.hostControl.resumeHistory(suspension);
+        } catch (resumeError) {
+          historyRestoreFailed = true;
+          modalError = modalError
+            ? new Error(`${modalError instanceof Error ? modalError.message : String(modalError)}；历史记录恢复：${resumeError instanceof Error ? resumeError.message : String(resumeError)}`)
+            : resumeError;
+          try {
+            await executionContext.hostControl.resumeHistory(suspension);
+            historyRestoreFailed = false;
+          } catch (retryError) {
+            modalError = new Error(
+              `${modalError instanceof Error ? modalError.message : String(modalError)}；再次恢复历史记录：${retryError instanceof Error ? retryError.message : String(retryError)}`
+            );
+          }
+        }
+        if (modalError) {
+          if (landedLayerId && !(modalError instanceof ScenePlacementPartialError)) {
+            throw new ScenePlacementPartialError(
+              modalError instanceof Error ? modalError.message : String(modalError),
+              landedLayerId,
+              cleanupComplete,
+              !cleanupComplete
+            );
+          }
+          throw modalError;
+        }
+      }, { commandName: "回贴 PXD 场景背景" });
+      assertCurrent();
+    } catch (error) {
+      operationError = error;
     }
-    assertCurrent();
-  } catch (error) {
-    operationError = error;
-  }
-  try {
-    if (restoreDocumentId && restoreDocumentId !== capture.documentId) {
-      await switchToDocumentUnlocked(restoreDocumentId);
-    }
-    if (!operationError) assertCurrent();
-  } catch (error) {
-    operationError = operationError
-      ? new Error(`${operationError instanceof Error ? operationError.message : String(operationError)}；恢复文档：${error instanceof Error ? error.message : String(error)}`)
-      : error;
-  }
-  if (operationError) {
-    const cleanupErrors: unknown[] = [];
-    if (layerId) {
+    const cleanupLandedLayer = async () => {
+      if (!operationError || !landedLayerId || cleanupComplete) return;
       try {
         if (Number(photoshop.app.activeDocument?.id) !== capture.documentId) {
           await switchToDocumentUnlocked(capture.documentId);
         }
-        await deleteSceneLayerUnlocked(layerId);
-      } catch (error) {
-        cleanupErrors.push(error);
+        await deleteSceneLayerUnlocked(landedLayerId);
+        cleanupComplete = true;
+      } catch (cleanupError) {
+        operationError = new ScenePlacementPartialError(
+          `${operationError instanceof Error ? operationError.message : String(operationError)}；自动清理：${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+          landedLayerId,
+          false,
+          true
+        );
       }
-    }
+    };
+    await cleanupLandedLayer();
+    let restoreFailed = false;
     if (restoreDocumentId && restoreDocumentId !== capture.documentId) {
       try {
         await switchToDocumentUnlocked(restoreDocumentId);
-      } catch (error) {
-        cleanupErrors.push(error);
+      } catch (restoreError) {
+        restoreFailed = true;
+        operationError = operationError
+          ? new Error(`${operationError instanceof Error ? operationError.message : String(operationError)}；恢复文档：${restoreError instanceof Error ? restoreError.message : String(restoreError)}`)
+          : restoreError;
       }
     }
-    if (cleanupErrors.length) {
-      throw new ScenePhotoshopError([
-        operationError instanceof Error ? operationError.message : String(operationError),
-        ...cleanupErrors.map((error) => `自动清理：${error instanceof Error ? error.message : String(error)}`)
-      ].join("；"), true);
+    await cleanupLandedLayer();
+    if (restoreFailed && restoreDocumentId) {
+      try {
+        await switchToDocumentUnlocked(restoreDocumentId);
+        restoreFailed = false;
+      } catch (restoreError) {
+        operationError = new Error(
+          `${operationError instanceof Error ? operationError.message : String(operationError)}；再次恢复文档：${restoreError instanceof Error ? restoreError.message : String(restoreError)}`
+        );
+      }
     }
-    throw operationError;
-  }
-  return { layerId: layerId as number };
-}, options);
+    if (operationError) {
+      if (landedLayerId) {
+        throw new ScenePlacementPartialError(
+          operationError instanceof Error ? operationError.message : String(operationError),
+          landedLayerId,
+          cleanupComplete,
+          !cleanupComplete || restoreFailed || historyRestoreFailed
+        );
+      }
+      throw operationError;
+    }
+    return { layerId: landedLayerId as number };
+  }, options);
+  return operation.catch(async (error) => {
+    if (error instanceof PSOperationTimeoutError && options.taskId) {
+      abandoned = true;
+      await waitForPSTaskSettlement(options.taskId);
+    }
+    throw error;
+  });
+};
 
 export const releaseSceneCapture = (
   capture: SceneSourceCapture,
@@ -1165,13 +1352,20 @@ export const releaseSceneCapture = (
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
   const restoreDocumentId = Number(photoshop.app.activeDocument?.id) || null;
   try {
-    if (restoreDocumentId !== capture.documentId) await switchToDocumentUnlocked(capture.documentId);
-    await loadSceneSelectionUnlocked(capture.selectionChannelName);
-    await removeSceneSelectionChannelUnlocked(capture.selectionChannelName);
-  } finally {
-    if (restoreDocumentId && restoreDocumentId !== capture.documentId) {
-      await switchToDocumentUnlocked(restoreDocumentId);
+    try {
+      if (restoreDocumentId !== capture.documentId) await switchToDocumentUnlocked(capture.documentId);
+      await loadSceneSelectionUnlocked(capture.selectionChannelName);
+      await removeSceneSelectionChannelUnlocked(capture.selectionChannelName);
+    } finally {
+      if (restoreDocumentId && restoreDocumentId !== capture.documentId) {
+        await switchToDocumentUnlocked(restoreDocumentId);
+      }
     }
+  } catch (error) {
+    throw new ScenePhotoshopError(
+      `场景选区资源清理失败：${error instanceof Error ? error.message : String(error)}`,
+      true
+    );
   }
 }, options);
 
@@ -1183,11 +1377,18 @@ export const removeScenePlacement = (
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
   const restoreDocumentId = Number(photoshop.app.activeDocument?.id) || null;
   try {
-    if (restoreDocumentId !== documentId) await switchToDocumentUnlocked(documentId);
-    await deleteSceneLayerUnlocked(layerId);
-  } finally {
-    if (restoreDocumentId && restoreDocumentId !== documentId) {
-      await switchToDocumentUnlocked(restoreDocumentId);
+    try {
+      if (restoreDocumentId !== documentId) await switchToDocumentUnlocked(documentId);
+      await deleteSceneLayerUnlocked(layerId);
+    } finally {
+      if (restoreDocumentId && restoreDocumentId !== documentId) {
+        await switchToDocumentUnlocked(restoreDocumentId);
+      }
     }
+  } catch (error) {
+    throw new ScenePhotoshopError(
+      `场景背景图层清理失败：${error instanceof Error ? error.message : String(error)}`,
+      true
+    );
   }
 }, options);

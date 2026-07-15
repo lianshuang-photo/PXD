@@ -40,7 +40,7 @@ import {
   type GeneratedDocumentSession,
   type SelectionPixels
 } from "../services/photoshop";
-import { clearPSLockQueue, isPSLockControlError } from "../services/psLock";
+import { clearPSLockQueue, isPSLockControlError, waitForPSTaskSettlement } from "../services/psLock";
 import {
   deletePresetFile,
   listPresetMetas,
@@ -933,6 +933,7 @@ export const useGenerationController = (
     const { token: runToken } = runGateRef.current.begin("scene", taskId);
     const isRunCurrent = () => isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken);
     let committed = false;
+    let recoveryBlocked = false;
     setSceneStopping(false);
     setSceneRunning(true);
     setStatus("running");
@@ -945,7 +946,7 @@ export const useGenerationController = (
       const result = await executeSceneWorkflow({
         engine: requestEngine,
         pack,
-        prompt: sanitizePrompt(resolved.prompt),
+        prompt: resolved.prompt,
         taskId,
         timeoutMs: Math.max(
           5_000,
@@ -965,7 +966,8 @@ export const useGenerationController = (
           captureSource: captureSceneSource,
           placeBackground: placeSceneBackground,
           removePlacement: removeScenePlacement,
-          releaseCapture: releaseSceneCapture
+          releaseCapture: releaseSceneCapture,
+          waitForSettlement: waitForPSTaskSettlement
         }
       });
       if (!isRunCurrent()) return;
@@ -990,7 +992,11 @@ export const useGenerationController = (
       });
     } catch (caught) {
       if (caught instanceof SceneWorkflowError && caught.recoveryFailed) {
+        recoveryBlocked = true;
         const message = formatGenerationError(caught, "场景资源恢复失败");
+        sceneSettlingRef.current = true;
+        setSceneStopping(true);
+        setSceneRunning(false);
         setStatus("error");
         setError(message);
         pushToast("error", message);
@@ -1008,7 +1014,7 @@ export const useGenerationController = (
       setError(message);
       pushToast("error", message);
     } finally {
-      if (!committed) {
+      if (!committed && !recoveryBlocked) {
         if (runGateRef.current.isCurrent(runToken)) runGateRef.current.complete(runToken);
         sceneSettlingRef.current = false;
         setSceneStopping(false);

@@ -139,7 +139,7 @@ describe("scene Photoshop adapters", () => {
     selectionChannelName: "__PXD_SCENE_TEST"
   };
 
-  it("captures bounded canvas/reference images sequentially and disposes both pixel buffers", async () => {
+  it("captures a feather-preserving transparent subject reference through the saved alpha channel", async () => {
     const disposes = [vi.fn(), vi.fn()];
     const getPixels = vi.fn()
       .mockResolvedValueOnce({ imageData: { dispose: disposes[0] } })
@@ -147,15 +147,26 @@ describe("scene Photoshop adapters", () => {
     const encodeImageData = vi.fn()
       .mockResolvedValueOnce("QUJD")
       .mockResolvedValueOnce("REVG");
+    const runner = { write: vi.fn() };
+    boundary.bridge.getDataFolder.mockResolvedValue({ createFile: vi.fn().mockResolvedValue(runner) });
+    boundary.bridge.createSessionToken.mockResolvedValue("jsx-token");
+    const activeDocument: any = {
+      id: 10,
+      width: { value: 2000 },
+      height: { value: 1000 },
+      selection: { bounds: { left: 100, top: 100, right: 700, bottom: 900 } },
+      activeLayer: { id: 11 }
+    };
+    let jsxCalls = 0;
+    const batchPlay = vi.fn().mockImplementation(async (descriptors: any[]) => {
+      if (descriptors[0]?._obj === "AdobeScriptAutomation Scripts") {
+        jsxCalls += 1;
+        if (jsxCalls === 2) activeDocument.activeLayer = { id: 77 };
+      }
+      return [{}];
+    });
     boundary.bridge.photoshop = {
-      app: {
-        activeDocument: {
-          id: 10,
-          width: { value: 2000 },
-          height: { value: 1000 },
-          selection: { bounds: { left: 100, top: 100, right: 700, bottom: 900 } }
-        }
-      },
+      app: { activeDocument, batchPlay },
       imaging: { getPixels, encodeImageData },
       core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
     };
@@ -172,25 +183,37 @@ describe("scene Photoshop adapters", () => {
       targetSize: { width: 1024, height: 512 }
     }));
     expect(getPixels).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      layerID: 77,
       sourceBounds: { left: 100, top: 100, right: 700, bottom: 900 },
-      targetSize: { width: 600, height: 800 }
+      targetSize: { width: 600, height: 800 },
+      applyAlpha: true
     }));
     expect(disposes[0]).toHaveBeenCalledOnce();
     expect(disposes[1]).toHaveBeenCalledOnce();
     expect(result).toMatchObject({
       baseImageDataUrl: "data:image/png;base64,QUJD",
-      referenceImageDataUrl: "data:image/png;base64,REVG"
+      referenceImageDataUrl: "data:image/png;base64,REVG",
+      selectionChannelName: expect.stringContaining("__PXD_SCENE_10_")
     });
+    expect(runner.write.mock.calls.some(([jsx]) =>
+      String(jsx).includes("doc.selection.copy(true)") && String(jsx).includes("doc.selection.load(channel")
+    )).toBe(true);
+    expect(batchPlay).toHaveBeenCalledWith([{
+      _obj: "delete",
+      _target: [{ _ref: "layer", _id: 77 }]
+    }], { synchronousExecution: true });
   });
 
-  const setupPlacement = (failTransform = false, failDelete = false) => {
+  const setupPlacement = (flags: {
+    failTransform?: boolean;
+    failDelete?: boolean;
+    failLookup?: boolean;
+    failResume?: boolean;
+    regularLayer?: boolean;
+    silentNoop?: boolean;
+  } = {}) => {
     const deleted: number[] = [];
     const maskModes: string[] = [];
-    const file = { write: vi.fn() };
-    boundary.bridge.getDataFolder.mockResolvedValue({
-      createFile: vi.fn().mockResolvedValue(file)
-    });
-    boundary.bridge.createSessionToken.mockResolvedValue("jsx-token");
     boundary.bridge.uxp = {
       storage: {
         formats: { binary: "binary" },
@@ -202,26 +225,25 @@ describe("scene Photoshop adapters", () => {
         }
       }
     };
+    const activeDocument: any = { id: 10, activeLayer: { id: 11 } };
+    let targetGetCount = 0;
+    let idGetCount = 0;
     const batchPlay = vi.fn().mockImplementation(async (descriptors: any[]) => {
       const descriptor = descriptors[0];
-      if (descriptor?._obj === "placeEvent") return [];
+      if (descriptor?._obj === "placeEvent") {
+        if (flags.silentNoop) return [];
+        activeDocument.activeLayer = { id: 42 };
+        return [{ layerID: 42 }];
+      }
       if (descriptor?._obj === "transform") {
-        if (failTransform) throw new Error("transform failed");
+        if (flags.failTransform) throw new Error("transform failed");
         return [];
       }
       if (descriptor?._obj === "get" && descriptor._target?.[0]?._id === 42) {
-        const getCount = batchPlay.mock.calls.filter(([items]) => items[0]?._obj === "get").length;
-        if (getCount === 1) {
-          return [{
-            layerID: 42,
-            bounds: {
-              left: { _value: 0 }, top: { _value: 0 },
-              right: { _value: 1000 }, bottom: { _value: 1000 }
-            }
-          }];
-        }
+        idGetCount += 1;
         return [{
-          hasUserMask: true,
+          layerID: 42,
+          hasUserMask: idGetCount > 1,
           bounds: {
             left: { _value: 0 }, top: { _value: 0 },
             right: { _value: 2000 }, bottom: { _value: 1000 }
@@ -229,31 +251,45 @@ describe("scene Photoshop adapters", () => {
         }];
       }
       if (descriptor?._obj === "get") {
+        targetGetCount += 1;
+        if (targetGetCount === 1) return [{ layerID: 11, layerKind: 1 }];
+        if (flags.failLookup) throw new Error("lookup failed");
+        if (flags.silentNoop) return [{ layerID: 11, layerKind: 1 }];
         return [{
           layerID: 42,
+          ...(flags.regularLayer ? { layerKind: 1 } : { smartObject: { linked: false } }),
           bounds: {
             left: { _value: 0 }, top: { _value: 0 },
             right: { _value: 1000 }, bottom: { _value: 1000 }
           }
         }];
       }
-      if (descriptor?._obj === "make") maskModes.push(descriptor.using?._value);
-      if (descriptor?._obj === "delete") {
-        if (failDelete) throw new Error("delete failed");
+      for (const item of descriptors) {
+        if (item?._obj === "make") maskModes.push(item.using?._value);
+      }
+      if (descriptor?._obj === "delete" && descriptor._target?.[0]?._ref === "layer") {
+        if (flags.failDelete) throw new Error("delete failed");
         deleted.push(descriptor._target[0]._id);
       }
       return [{}];
     });
+    const suspendHistory = vi.fn().mockResolvedValue("scene-history");
+    const resumeHistory = flags.failResume
+      ? vi.fn().mockRejectedValue(new Error("resume failed"))
+      : vi.fn().mockResolvedValue(undefined);
     boundary.bridge.photoshop = {
-      app: { batchPlay, activeDocument: { id: 10 } },
-      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+      app: { batchPlay, activeDocument },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback({
+        hostControl: { suspendHistory, resumeHistory }
+      })) }
     };
-    return { batchPlay, deleted, maskModes };
+    return { activeDocument, batchPlay, deleted, maskModes, resumeHistory, suspendHistory };
   };
 
   it("strictly fills the canvas and hides the generated layer inside the stored subject selection", async () => {
     const harness = setupPlacement();
-    const result = await placeSceneBackground(capture, "data:image/png;base64,T1VU", {
+    const source = { ...capture };
+    const result = await placeSceneBackground(source, "data:image/png;base64,T1VU", {
       protectSubject: true,
       layerName: "PXD Scene",
       isCurrent: () => true
@@ -261,10 +297,13 @@ describe("scene Photoshop adapters", () => {
     expect(result).toEqual({ layerId: 42 });
     expect(harness.maskModes).toContain("hideSelection");
     expect(harness.deleted).toEqual([]);
+    expect(harness.suspendHistory).toHaveBeenCalledWith({ documentID: 10, name: "PXD Scene" });
+    expect(harness.resumeHistory).toHaveBeenCalledWith("scene-history");
+    expect(source.selectionChannelName).toBeNull();
   });
 
   it("deletes the known landed layer when strict transform fails", async () => {
-    const harness = setupPlacement(true);
+    const harness = setupPlacement({ failTransform: true });
     await expect(placeSceneBackground(capture, "data:image/png;base64,T1VU", {
       protectSubject: false,
       layerName: "PXD Scene",
@@ -274,13 +313,133 @@ describe("scene Photoshop adapters", () => {
   });
 
   it("marks a failed landed-layer rollback as a recovery failure", async () => {
-    setupPlacement(true, true);
+    setupPlacement({ failTransform: true, failDelete: true });
     await expect(placeSceneBackground(capture, "data:image/png;base64,T1VU", {
       protectSubject: false,
       layerName: "PXD Scene",
       isCurrent: () => true
     })).rejects.toMatchObject({
-      name: "ScenePhotoshopError",
+      name: "ScenePlacementPartialError",
+      recoveryFailed: true
+    });
+  });
+
+  it("never deletes the user's active layer when place is a silent no-op", async () => {
+    const harness = setupPlacement({ silentNoop: true });
+    await expect(placeSceneBackground({ ...capture, selectionChannelName: null }, "data:image/png;base64,T1VU", {
+      protectSubject: false,
+      layerName: "PXD Scene",
+      isCurrent: () => true
+    })).rejects.toThrow("未创建新的场景背景图层");
+    expect(harness.deleted).toEqual([]);
+    expect(harness.activeDocument.activeLayer.id).toBe(11);
+  });
+
+  it("returns a structured partial and deletes the exact placed layer when lookup fails", async () => {
+    const harness = setupPlacement({ failLookup: true });
+    await expect(placeSceneBackground({ ...capture, selectionChannelName: null }, "data:image/png;base64,T1VU", {
+      protectSubject: false,
+      layerName: "PXD Scene",
+      isCurrent: () => true
+    })).rejects.toMatchObject({
+      name: "ScenePlacementPartialError",
+      layerId: 42,
+      cleanupComplete: true,
+      recoveryFailed: false
+    });
+    expect(harness.deleted).toEqual([42]);
+  });
+
+  it("rejects and removes a newly placed regular layer", async () => {
+    const harness = setupPlacement({ regularLayer: true });
+    await expect(placeSceneBackground({ ...capture, selectionChannelName: null }, "data:image/png;base64,T1VU", {
+      protectSubject: false,
+      layerName: "PXD Scene",
+      isCurrent: () => true
+    })).rejects.toThrow("不是新的智能对象");
+    expect(harness.deleted).toEqual([42]);
+  });
+
+  it("compensates the exact layer and flags an unresolved history suspension", async () => {
+    const harness = setupPlacement({ failResume: true });
+    await expect(placeSceneBackground({ ...capture, selectionChannelName: null }, "data:image/png;base64,T1VU", {
+      protectSubject: false,
+      layerName: "PXD Scene",
+      isCurrent: () => true
+    })).rejects.toMatchObject({
+      name: "ScenePlacementPartialError",
+      layerId: 42,
+      cleanupComplete: true,
+      recoveryFailed: true
+    });
+    expect(harness.deleted).toEqual([42]);
+    expect(harness.resumeHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps settlement pending after timeout and deletes the exact late layer", async () => {
+    const harness = setupPlacement();
+    let releaseModal!: () => void;
+    const modalGate = new Promise<void>((resolve) => { releaseModal = resolve; });
+    boundary.bridge.photoshop.core.executeAsModal.mockImplementation(async (callback: any, modalOptions: any) => {
+      const result = await callback({
+        hostControl: { suspendHistory: harness.suspendHistory, resumeHistory: harness.resumeHistory }
+      });
+      if (modalOptions?.commandName === "回贴 PXD 场景背景") await modalGate;
+      return result;
+    });
+    let settled = false;
+    const placement = placeSceneBackground(
+      { ...capture, selectionChannelName: null },
+      "data:image/png;base64,T1VU",
+      {
+        protectSubject: false,
+        layerName: "PXD Scene",
+        isCurrent: () => true,
+        taskId: "late-scene-layer",
+        timeoutMs: 20
+      }
+    ).catch((error) => error).then((result) => {
+      settled = true;
+      return result;
+    });
+    await vi.waitFor(() => expect(harness.batchPlay.mock.calls.some(
+      ([items]) => items[0]?._obj === "placeEvent"
+    )).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(settled).toBe(false);
+    releaseModal();
+    await expect(placement).resolves.toMatchObject({ name: "PSOperationTimeoutError" });
+    expect(harness.deleted).toEqual([42]);
+  });
+
+  it("keeps the circuit blocked when late exact-layer cleanup fails", async () => {
+    const harness = setupPlacement({ failDelete: true });
+    let releaseModal!: () => void;
+    const modalGate = new Promise<void>((resolve) => { releaseModal = resolve; });
+    boundary.bridge.photoshop.core.executeAsModal.mockImplementation(async (callback: any, modalOptions: any) => {
+      const result = await callback({
+        hostControl: { suspendHistory: harness.suspendHistory, resumeHistory: harness.resumeHistory }
+      });
+      if (modalOptions?.commandName === "回贴 PXD 场景背景") await modalGate;
+      return result;
+    });
+    const placement = placeSceneBackground(
+      { ...capture, selectionChannelName: null },
+      "data:image/png;base64,T1VU",
+      {
+        protectSubject: false,
+        layerName: "PXD Scene",
+        isCurrent: () => true,
+        taskId: "late-scene-cleanup-failure",
+        timeoutMs: 20
+      }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    releaseModal();
+    await expect(placement).rejects.toMatchObject({
+      name: "ScenePlacementPartialError",
+      layerId: 42,
+      cleanupComplete: false,
       recoveryFailed: true
     });
   });

@@ -17,6 +17,7 @@ export interface SceneWorkflowAdapters {
     includeSelection: boolean;
     preserveSelection: boolean;
     maxInputBytes: number;
+    isCurrent: () => boolean;
   }) => Promise<SceneSourceCapture>;
   placeBackground: (
     capture: SceneSourceCapture,
@@ -34,6 +35,7 @@ export interface SceneWorkflowAdapters {
     options: { taskId: string }
   ) => Promise<void>;
   releaseCapture: (capture: SceneSourceCapture, options: { taskId: string }) => Promise<void>;
+  waitForSettlement: (taskId: string) => Promise<void>;
 }
 
 export interface SceneWorkflowInput {
@@ -90,6 +92,15 @@ const isRecoveryFailure = (error: unknown) => Boolean(
   error && typeof error === "object" && (error as { recoveryFailed?: unknown }).recoveryFailed === true
 );
 
+const partialPlacement = (error: unknown) => {
+  if (!error || typeof error !== "object") return null;
+  const candidate = error as { layerId?: unknown; cleanupComplete?: unknown };
+  const layerId = Number(candidate.layerId);
+  return Number.isInteger(layerId) && layerId > 0
+    ? { layerId, cleanupComplete: candidate.cleanupComplete === true }
+    : null;
+};
+
 export const executeSceneWorkflow = async (input: SceneWorkflowInput): Promise<SceneWorkflowResult> => {
   if (input.engine.provider !== "gemini") {
     throw new GenerationEngineError(
@@ -112,13 +123,23 @@ export const executeSceneWorkflow = async (input: SceneWorkflowInput): Promise<S
       maxEdge: input.targetMaxEdge,
       includeSelection: input.useSelectionReference,
       preserveSelection: input.protectSubject,
-      maxInputBytes
+      maxInputBytes,
+      isCurrent: input.isCurrent
     });
   } catch (error) {
-    if (isRecoveryFailure(error)) {
+    let settlementError: unknown = null;
+    try {
+      await input.adapters.waitForSettlement(input.taskId);
+    } catch (caught) {
+      settlementError = caught;
+    }
+    if (isRecoveryFailure(error) || settlementError) {
       throw new SceneWorkflowError(
-        error instanceof Error ? error.message : String(error),
-        [error],
+        [error, settlementError]
+          .filter(Boolean)
+          .map((caught) => caught instanceof Error ? caught.message : String(caught))
+          .join("；"),
+        [error, settlementError],
         true
       );
     }
@@ -167,8 +188,6 @@ export const executeSceneWorkflow = async (input: SceneWorkflowInput): Promise<S
         layerName: `PXD 场景 · ${input.pack.name}`
       }
     );
-    assertCurrent();
-    input.onProgress?.(1, "场景替换完成");
   } catch (error) {
     input.engine.cancel(input.taskId);
     failure = error;
@@ -176,16 +195,53 @@ export const executeSceneWorkflow = async (input: SceneWorkflowInput): Promise<S
 
   const recoveryErrors: unknown[] = [];
   try {
-    await input.adapters.releaseCapture(capture, { taskId: input.taskId });
+    await input.adapters.waitForSettlement(input.taskId);
   } catch (error) {
     recoveryErrors.push(error);
   }
+  try {
+    await input.adapters.releaseCapture(capture, { taskId: input.taskId });
+  } catch (error) {
+    let settlementError: unknown = null;
+    try {
+      await input.adapters.waitForSettlement(input.taskId);
+    } catch (caught) {
+      settlementError = caught;
+    }
+    if (error instanceof Error && error.name === "PSOperationTimeoutError" && !settlementError) {
+      // The modal completed its cleanup after the public timeout.
+    } else {
+      recoveryErrors.push(error);
+      if (settlementError && settlementError !== error) recoveryErrors.push(settlementError);
+    }
+  }
+  if (!failure && !recoveryErrors.length) {
+    try {
+      assertCurrent();
+      input.onProgress?.(1, "场景替换完成");
+    } catch (error) {
+      failure = error;
+    }
+  }
   if (failure || recoveryErrors.length) {
-    if (placement) {
+    const partial = partialPlacement(failure);
+    const rollback = placement ?? (partial && !partial.cleanupComplete ? { layerId: partial.layerId } : null);
+    if (rollback) {
       try {
-        await input.adapters.removePlacement(capture.documentId, placement.layerId, { taskId: input.taskId });
+        await input.adapters.removePlacement(capture.documentId, rollback.layerId, { taskId: input.taskId });
       } catch (error) {
-        recoveryErrors.push(error);
+        let settlementError: unknown = null;
+        try {
+          await input.adapters.waitForSettlement(input.taskId);
+        } catch (caught) {
+          settlementError = caught;
+        }
+        if (error instanceof Error && error.name === "PSOperationTimeoutError" && !settlementError) {
+          // The exact-layer rollback completed after the public timeout.
+        } else {
+          recoveryErrors.push(error);
+          if (settlementError && settlementError !== error) recoveryErrors.push(settlementError);
+        }
       }
     }
     if (recoveryErrors.length || isRecoveryFailure(failure)) {

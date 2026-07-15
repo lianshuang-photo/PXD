@@ -35,7 +35,8 @@ const adapters = () => ({
   captureSource: vi.fn().mockResolvedValue({ ...capture }),
   placeBackground: vi.fn().mockResolvedValue({ layerId: 42 }),
   removePlacement: vi.fn().mockResolvedValue(undefined),
-  releaseCapture: vi.fn().mockResolvedValue(undefined)
+  releaseCapture: vi.fn().mockResolvedValue(undefined),
+  waitForSettlement: vi.fn().mockResolvedValue(undefined)
 });
 
 const input = (currentEngine: GenerationEngine, currentAdapters: ReturnType<typeof adapters>) => ({
@@ -75,6 +76,7 @@ describe("scene workflow", () => {
       expect.objectContaining({ protectSubject: true, layerName: "PXD 场景 · Studio" })
     );
     expect(currentAdapters.releaseCapture).toHaveBeenCalledOnce();
+    expect(currentAdapters.waitForSettlement).toHaveBeenCalledWith("scene-task");
     expect(currentAdapters.removePlacement).not.toHaveBeenCalled();
     expect(result).toEqual({ layerId: 42, image: "T1VU", documentId: 7 });
   });
@@ -139,6 +141,41 @@ describe("scene workflow", () => {
     expect(currentAdapters.releaseCapture).toHaveBeenCalledOnce();
   });
 
+  it("waits for capture release before checking staleness and rolling back", async () => {
+    const currentEngine = engine();
+    const currentAdapters = adapters();
+    let current = true;
+    currentAdapters.releaseCapture.mockImplementation(async () => {
+      current = false;
+    });
+
+    await expect(executeSceneWorkflow({
+      ...input(currentEngine, currentAdapters),
+      isCurrent: () => current
+    })).rejects.toMatchObject({ code: "ENGINE_STALE" });
+    expect(currentAdapters.removePlacement).toHaveBeenCalledWith(7, 42, { taskId: "scene-task" });
+  });
+
+  it("waits for a timed-out exact-layer rollback before settling", async () => {
+    const currentEngine = engine();
+    const currentAdapters = adapters();
+    let current = true;
+    currentAdapters.placeBackground.mockImplementation(async () => {
+      current = false;
+      return { layerId: 42 };
+    });
+    currentAdapters.removePlacement.mockRejectedValue(Object.assign(
+      new Error("rollback timed out"),
+      { name: "PSOperationTimeoutError" }
+    ));
+
+    await expect(executeSceneWorkflow({
+      ...input(currentEngine, currentAdapters),
+      isCurrent: () => current
+    })).rejects.toMatchObject({ code: "ENGINE_STALE" });
+    expect(currentAdapters.waitForSettlement).toHaveBeenCalledTimes(2);
+  });
+
   it("removes committed output and exposes recovery failures when capture cleanup fails", async () => {
     const currentEngine = engine();
     const currentAdapters = adapters();
@@ -177,6 +214,32 @@ describe("scene workflow", () => {
     expect(error).toBeInstanceOf(SceneWorkflowError);
     expect(error).toMatchObject({ recoveryFailed: true });
     expect(currentAdapters.releaseCapture).toHaveBeenCalledOnce();
+  });
+
+  it("rolls back a structured partial placement by its known layer ID", async () => {
+    const currentEngine = engine();
+    const currentAdapters = adapters();
+    currentAdapters.placeBackground.mockRejectedValue(Object.assign(
+      new Error("post-place lookup failed"),
+      { layerId: 73, cleanupComplete: false }
+    ));
+
+    await expect(executeSceneWorkflow(input(currentEngine, currentAdapters)))
+      .rejects.toThrow("post-place lookup failed");
+    expect(currentAdapters.removePlacement).toHaveBeenCalledWith(7, 73, { taskId: "scene-task" });
+  });
+
+  it("does not double-delete a partial placement already cleaned by the adapter", async () => {
+    const currentEngine = engine();
+    const currentAdapters = adapters();
+    currentAdapters.placeBackground.mockRejectedValue(Object.assign(
+      new Error("post-place validation failed"),
+      { layerId: 74, cleanupComplete: true }
+    ));
+
+    await expect(executeSceneWorkflow(input(currentEngine, currentAdapters)))
+      .rejects.toThrow("post-place validation failed");
+    expect(currentAdapters.removePlacement).not.toHaveBeenCalled();
   });
 
   it("rejects Forge before touching Photoshop", async () => {
