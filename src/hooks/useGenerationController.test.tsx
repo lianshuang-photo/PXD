@@ -20,6 +20,8 @@ const boundary = vi.hoisted(() => ({
   },
   photoshop: {
     closeDocument: vi.fn(),
+    closeGeneratedDocument: vi.fn(),
+    createGeneratedDocument: vi.fn(),
     deleteLayers: vi.fn(),
     deleteTaskLayers: vi.fn(),
     getActiveDocumentId: vi.fn(),
@@ -29,6 +31,7 @@ const boundary = vi.hoisted(() => ({
     moveActiveLayerToTop: vi.fn(),
     renameLayer: vi.fn(),
     onBatchAddLayer: vi.fn(),
+    placeImageIntoDocument: vi.fn(),
     placeImageIntoSelection: vi.fn(),
     setSelectionBounds: vi.fn(),
     switchToDocument: vi.fn()
@@ -191,9 +194,12 @@ beforeEach(() => {
   boundary.photoshop.getActiveDocumentId.mockResolvedValue(7);
   boundary.photoshop.deleteLayers.mockResolvedValue(undefined);
   boundary.photoshop.deleteTaskLayers.mockResolvedValue(undefined);
+  boundary.photoshop.closeGeneratedDocument.mockResolvedValue(undefined);
+  boundary.photoshop.createGeneratedDocument.mockResolvedValue({ documentId: 200, previousDocumentId: 99 });
   boundary.photoshop.renameLayer.mockResolvedValue(undefined);
   boundary.photoshop.hasActiveSelection.mockResolvedValue(true);
   boundary.photoshop.placeImageIntoSelection.mockResolvedValue({ layerID: 101 });
+  boundary.photoshop.placeImageIntoDocument.mockResolvedValue({ layerID: 102 });
   boundary.photoshop.groupLayers.mockResolvedValue(undefined);
   boundary.photoshop.moveActiveLayerToTop.mockResolvedValue(undefined);
   boundary.photoshop.onBatchAddLayer.mockResolvedValue(null);
@@ -439,6 +445,84 @@ describe("useGenerationController recycle bin integration", () => {
     );
   });
 
+  it("restores the caller document before falling back when the archived document switch fails", async () => {
+    boundary.forgeClient.img2img.mockResolvedValueOnce({ images: ["AQID"] });
+    const rendered = trackedRender();
+    await flush();
+    await act(async () => {
+      await rendered.getController().runGeneration();
+    });
+    const archived = rendered.getController().recycleBinEntries[0];
+    boundary.photoshop.getActiveDocumentId.mockResolvedValue(99);
+    boundary.photoshop.switchToDocument
+      .mockRejectedValueOnce(new Error("document missing"))
+      .mockResolvedValueOnce(undefined);
+    boundary.photoshop.placeImageIntoSelection.mockClear();
+
+    await act(async () => {
+      await rendered.getController().pasteRecycleBinResult(archived.taskId);
+    });
+
+    expect(boundary.photoshop.switchToDocument.mock.calls.map(([documentId]) => documentId)).toEqual([7, 99]);
+    expect(boundary.photoshop.hasActiveSelection).toHaveBeenCalled();
+    expect(boundary.photoshop.placeImageIntoSelection).toHaveBeenCalled();
+  });
+
+  it("does not paste into an unrelated selection when restoring archived bounds fails", async () => {
+    boundary.forgeClient.img2img.mockResolvedValueOnce({ images: ["AQID"] });
+    const rendered = trackedRender();
+    await flush();
+    await act(async () => {
+      await rendered.getController().runGeneration();
+    });
+    const archived = rendered.getController().recycleBinEntries[0];
+    boundary.photoshop.getActiveDocumentId.mockResolvedValue(99);
+    boundary.photoshop.setSelectionBounds.mockRejectedValueOnce(new Error("bounds invalid"));
+    boundary.photoshop.placeImageIntoSelection.mockClear();
+
+    await act(async () => {
+      await rendered.getController().pasteRecycleBinResult(archived.taskId);
+    });
+
+    expect(boundary.photoshop.switchToDocument.mock.calls.map(([documentId]) => documentId)).toEqual([7, 99]);
+    expect(boundary.photoshop.placeImageIntoSelection).not.toHaveBeenCalled();
+    expect(boundary.photoshop.createGeneratedDocument).toHaveBeenCalledWith(
+      archived.context.width,
+      archived.context.height,
+      "PXD 回收站恢复",
+      expect.any(Object)
+    );
+    expect(boundary.photoshop.placeImageIntoDocument).toHaveBeenCalled();
+  });
+
+  it("stops recovery when a partial switch cannot restore the caller document", async () => {
+    boundary.forgeClient.img2img.mockResolvedValueOnce({ images: ["AQID"] });
+    const rendered = trackedRender();
+    await flush();
+    await act(async () => {
+      await rendered.getController().runGeneration();
+    });
+    const archived = rendered.getController().recycleBinEntries[0];
+    boundary.photoshop.getActiveDocumentId.mockResolvedValue(99);
+    boundary.photoshop.switchToDocument
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("cannot restore caller"));
+    boundary.photoshop.setSelectionBounds.mockRejectedValueOnce(new Error("bounds invalid"));
+    boundary.photoshop.placeImageIntoSelection.mockClear();
+    boundary.photoshop.createGeneratedDocument.mockClear();
+
+    await act(async () => {
+      await rendered.getController().pasteRecycleBinResult(archived.taskId);
+    });
+
+    expect(boundary.photoshop.placeImageIntoSelection).not.toHaveBeenCalled();
+    expect(boundary.photoshop.createGeneratedDocument).not.toHaveBeenCalled();
+    expect(rendered.getController().toast).toMatchObject({
+      type: "error",
+      message: expect.stringContaining("已停止智能贴回")
+    });
+  });
+
   it("reruns a failed archived request with a new task id", async () => {
     boundary.forgeClient.img2img
       .mockRejectedValueOnce(new Error("network failed"))
@@ -458,6 +542,39 @@ describe("useGenerationController recycle bin integration", () => {
     expect(boundary.forgeClient.img2img).toHaveBeenCalledTimes(2);
     expect(rendered.getController().recycleBinEntries[0]).toMatchObject({ status: "success" });
     expect(rendered.getController().recycleBinEntries[0].taskId).not.toBe(failed.taskId);
+  });
+
+  it("persists an active task as aborted when the pool cancels it", async () => {
+    let resolveGeneration!: (value: { images: string[] }) => void;
+    boundary.forgeClient.img2img.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveGeneration = resolve;
+    }));
+    const rendered = trackedRender();
+    await flush();
+
+    let generation!: Promise<void>;
+    await act(async () => {
+      generation = rendered.getController().runGeneration();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const taskId = rendered.getController().recycleBinEntries[0].taskId;
+
+    await act(async () => {
+      await rendered.getController().cancelTask(taskId);
+      await Promise.resolve();
+    });
+    expect(rendered.getController().recycleBinEntries[0]).toMatchObject({
+      taskId,
+      status: "aborted",
+      assets: []
+    });
+
+    await act(async () => {
+      resolveGeneration({ images: ["LATE_RESULT"] });
+      await generation;
+    });
+    expect(rendered.getController().recycleBinEntries[0]).toMatchObject({ status: "aborted", assets: [] });
   });
 });
 

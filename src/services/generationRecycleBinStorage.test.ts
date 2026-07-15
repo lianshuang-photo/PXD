@@ -74,6 +74,75 @@ describe("generation recycle bin storage adapter", () => {
     vi.unstubAllGlobals();
   });
 
+  it("recovers from a schema-invalid primary even when it is valid JSON", async () => {
+    const localStorage = new MemoryLocalStorage();
+    vi.stubGlobal("window", { localStorage });
+    const storage = createGenerationRecycleBinStorage();
+    await storage.writeIndex(file("schema-stable"));
+    await storage.writeIndex(file("schema-new"));
+    localStorage.values.set("pxd.recycle-bin.index", JSON.stringify({ version: 1 }));
+
+    await expect(storage.readIndex()).resolves.toEqual(file("schema-stable"));
+    expect(JSON.parse(localStorage.getItem("pxd.recycle-bin.index")!)).toEqual(file("schema-stable"));
+    vi.unstubAllGlobals();
+  });
+
+  it("does not hide a future-version primary behind an older backup", async () => {
+    const localStorage = new MemoryLocalStorage();
+    vi.stubGlobal("window", { localStorage });
+    const storage = createGenerationRecycleBinStorage();
+    await storage.writeIndex(file("older"));
+    localStorage.values.set("pxd.recycle-bin.index", JSON.stringify({
+      version: RECYCLE_BIN_VERSION + 1,
+      entries: []
+    }));
+
+    await expect(storage.readIndex()).rejects.toMatchObject({ code: "RECYCLE_BIN_VERSION_UNSUPPORTED" });
+    await expect(storage.writeIndex(file("must-not-downgrade")))
+      .rejects.toMatchObject({ code: "RECYCLE_BIN_VERSION_UNSUPPORTED" });
+    expect(JSON.parse(localStorage.getItem("pxd.recycle-bin.index")!)).toEqual({
+      version: RECYCLE_BIN_VERSION + 1,
+      entries: []
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("never rotates non-canonical sensitive params into previous-good storage", async () => {
+    const localStorage = new MemoryLocalStorage();
+    vi.stubGlobal("window", { localStorage });
+    const unsafe = file("unsafe");
+    unsafe.entries[0].params = { apiKey: "must-not-remain", steps: 20 };
+    localStorage.values.set("pxd.recycle-bin.index", JSON.stringify(unsafe));
+    localStorage.values.set("pxd.recycle-bin.index.bak", JSON.stringify(unsafe));
+    const storage = createGenerationRecycleBinStorage();
+    const canonical = file("canonical");
+
+    await storage.writeIndex(canonical);
+
+    expect(JSON.parse(localStorage.getItem("pxd.recycle-bin.index")!)).toEqual(canonical);
+    expect(JSON.parse(localStorage.getItem("pxd.recycle-bin.index.bak")!)).toEqual(canonical);
+    vi.unstubAllGlobals();
+  });
+
+  it("makes the canonical backup durable before replacing a sensitive primary", async () => {
+    const localStorage = new MemoryLocalStorage();
+    vi.stubGlobal("window", { localStorage });
+    const unsafe = file("unsafe");
+    unsafe.entries[0].params = { apiKey: "must-not-remain" };
+    localStorage.values.set("pxd.recycle-bin.index", JSON.stringify(unsafe));
+    localStorage.values.set("pxd.recycle-bin.index.bak", JSON.stringify(unsafe));
+    localStorage.failPrimary = true;
+    const storage = createGenerationRecycleBinStorage();
+    const canonical = file("canonical-after-restart");
+
+    await expect(storage.writeIndex(canonical)).rejects.toThrow("interrupted primary write");
+    expect(JSON.parse(localStorage.getItem("pxd.recycle-bin.index.bak")!)).toEqual(canonical);
+    localStorage.failPrimary = false;
+    localStorage.values.set("pxd.recycle-bin.index", "{partial");
+    await expect(storage.readIndex()).resolves.toEqual(canonical);
+    vi.unstubAllGlobals();
+  });
+
   it("uses previous-good index.json.bak semantics in the real UXP folder adapter", async () => {
     const texts = new Map<string, string>();
     const assetsFolder = { getEntries: vi.fn().mockResolvedValue([]) };

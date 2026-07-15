@@ -1049,15 +1049,31 @@ export const useGenerationController = (
       const dataUrls = await recycleBin.readImages(id);
       if (!dataUrls.length) throw new Error("这条记录没有可恢复的图片");
       const taskId = `recycle-${generateId()}`;
+      const originDocumentId = await getActiveDocumentId({ taskId }).catch(() => undefined) ?? undefined;
       let useSelection = false;
       if (entry.context.selectionBounds) {
         if (entry.context.documentId) {
+          let documentReady = false;
           try {
             await switchToDocument(entry.context.documentId, { taskId });
+            documentReady = true;
             await setSelectionBounds(entry.context.selectionBounds, { taskId });
             useSelection = true;
           } catch {
-            useSelection = await hasActiveSelection({ taskId });
+            let originRestored = originDocumentId === entry.context.documentId;
+            if (!originRestored && originDocumentId) {
+              originRestored = await switchToDocument(originDocumentId, { taskId })
+                .then(() => true, () => false);
+            }
+            if (originDocumentId && !originRestored) {
+              throw new Error("无法恢复贴回前的 Photoshop 文档，已停止智能贴回");
+            }
+            // A document switch failure may safely fall back to the selection that was active
+            // when recovery started. A selection-restore failure must not paste into some other
+            // selection in the archived document.
+            useSelection = !documentReady && originRestored
+              ? await hasActiveSelection({ taskId })
+              : false;
           }
         } else {
           useSelection = await hasActiveSelection({ taskId });

@@ -1,6 +1,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { bridge } from "./uxpBridge";
-import { isSafeRecycleBinAssetName, type RecycleBinFile } from "./generationRecycleBin";
+import {
+  RecycleBinSchemaError,
+  isSafeRecycleBinAssetName,
+  parseRecycleBinFile,
+  type RecycleBinFile
+} from "./generationRecycleBin";
 import type { GenerationRecycleBinStorage } from "./generationRecycleBinRepository";
 
 const FOLDER_NAME = "recycle-bin";
@@ -37,7 +42,15 @@ const toBytes = (value: unknown): Uint8Array => {
   throw new Error("回收站图片读取格式无效");
 };
 
-const parseText = (text: string | null): unknown | null => text === null ? null : JSON.parse(text) as unknown;
+const parseIndexText = (text: string): { parsed: unknown; canonical: RecycleBinFile } => {
+  const parsed = JSON.parse(text) as unknown;
+  return { parsed, canonical: parseRecycleBinFile(parsed) };
+};
+
+const isCanonicalIndexText = (text: string) => {
+  const { parsed, canonical } = parseIndexText(text);
+  return JSON.stringify(parsed) === JSON.stringify(canonical);
+};
 
 const readEntryText = async (folder: any, fileName: string): Promise<string | null> => {
   try {
@@ -60,14 +73,17 @@ const readWithBackup = async (
   const primary = await readText(INDEX_FILE_NAME);
   if (primary !== null) {
     try {
-      return parseText(primary);
-    } catch {
+      return parseIndexText(primary).parsed;
+    } catch (error) {
+      if (error instanceof RecycleBinSchemaError && error.code === "RECYCLE_BIN_VERSION_UNSUPPORTED") {
+        throw error;
+      }
       // Fall through to the last-known-good backup.
     }
   }
   const backup = await readText(`${INDEX_FILE_NAME}.bak`);
   if (backup === null) return null;
-  const recovered = parseText(backup);
+  const recovered = parseIndexText(backup).parsed;
   await repairPrimary(backup).catch(() => undefined);
   return recovered;
 };
@@ -82,15 +98,32 @@ const writeWithLastKnownGood = async (
   let previousGood: string | null = null;
   if (primary !== null) {
     try {
-      JSON.parse(primary);
-      previousGood = primary;
-    } catch {
+      if (isCanonicalIndexText(primary)) previousGood = primary;
+    } catch (error) {
+      if (error instanceof RecycleBinSchemaError && error.code === "RECYCLE_BIN_VERSION_UNSUPPORTED") {
+        throw error;
+      }
       // Preserve the existing backup when the primary is already damaged.
     }
   }
-  const backup = previousGood ?? await readText(`${INDEX_FILE_NAME}.bak`);
-  if (previousGood !== null) await writeText(`${INDEX_FILE_NAME}.bak`, previousGood);
-  else if (backup === null) await writeText(`${INDEX_FILE_NAME}.bak`, serialized);
+  if (previousGood !== null) {
+    await writeText(`${INDEX_FILE_NAME}.bak`, previousGood);
+  } else {
+    const backup = await readText(`${INDEX_FILE_NAME}.bak`);
+    let backupIsCanonical = false;
+    if (backup !== null) {
+      try {
+        backupIsCanonical = isCanonicalIndexText(backup);
+      } catch (error) {
+        if (error instanceof RecycleBinSchemaError && error.code === "RECYCLE_BIN_VERSION_UNSUPPORTED") {
+          throw error;
+        }
+      }
+    }
+    // A legacy/non-canonical index may contain fields that the current schema strips. Never
+    // rotate those bytes into previous-good storage; make the canonical payload durable first.
+    if (!backupIsCanonical) await writeText(`${INDEX_FILE_NAME}.bak`, serialized);
+  }
   await writeText(INDEX_FILE_NAME, serialized);
 };
 

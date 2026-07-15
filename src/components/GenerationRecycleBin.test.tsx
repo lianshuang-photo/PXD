@@ -19,6 +19,7 @@ describe("GenerationRecycleBin", () => {
   it("browses recoverable images and exposes paste and rerun actions", async () => {
     const onPaste = vi.fn();
     const onRerun = vi.fn();
+    const onReadPreview = vi.fn().mockResolvedValue("data:image/png;base64,AQID");
     let renderer!: ReturnType<typeof create>;
     await act(async () => {
       renderer = create(
@@ -26,11 +27,17 @@ describe("GenerationRecycleBin", () => {
           entries={[entry]}
           loading={false}
           error={null}
-          onReadPreview={vi.fn().mockResolvedValue("data:image/png;base64,AQID")}
+          onReadPreview={onReadPreview}
           onPaste={onPaste}
           onRerun={onRerun}
         />
       );
+    });
+    expect(onReadPreview).not.toHaveBeenCalled();
+    const previewButton = renderer.root.findAllByType("button")[0];
+    expect(previewButton.children.join("")).toBe("加载预览");
+    await act(async () => {
+      previewButton.props.onClick();
       await Promise.resolve();
     });
     expect(renderer.root.findByType("img").props.src).toBe("data:image/png;base64,AQID");

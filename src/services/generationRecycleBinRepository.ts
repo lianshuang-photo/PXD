@@ -123,7 +123,8 @@ export class GenerationRecycleBinRepository {
         const raw = await this.storage.readIndex();
         const parsed = raw === null ? EMPTY_FILE : parseRecycleBinFile(raw);
         const assetNames = new Set((await this.storage.listAssets()).filter(isSafeRecycleBinAssetName));
-        let changed = raw === null || parsed.entries.some(({ status }) => status === "pending");
+        let changed = raw === null || JSON.stringify(raw) !== JSON.stringify(parsed) ||
+          parsed.entries.some(({ status }) => status === "pending");
         const recovered: RecycleBinEntry[] = [];
         for (const entry of recoverInterruptedEntries(parsed.entries, this.now())) {
           const assets: RecycleBinAsset[] = [];
@@ -191,10 +192,15 @@ export class GenerationRecycleBinRepository {
 
   async complete(taskId: string, imageValues: string[]): Promise<RecycleBinEntry | null> {
     await this.initialize();
-    const images = imageValues.map(decodeRecycleBinImage);
-    const totalBytes = images.reduce((total, image) => total + image.bytes.byteLength, 0);
-    if (!images.length) throw new Error("任务未返回可归档图片");
-    if (totalBytes > RECYCLE_BIN_TASK_BYTE_LIMIT) throw new Error("单个任务图片超过回收站限制");
+    if (!imageValues.length) throw new Error("任务未返回可归档图片");
+    const images: DecodedRecycleBinImage[] = [];
+    let totalBytes = 0;
+    for (const imageValue of imageValues) {
+      const image = decodeRecycleBinImage(imageValue);
+      totalBytes += image.bytes.byteLength;
+      if (totalBytes > RECYCLE_BIN_TASK_BYTE_LIMIT) throw new Error("单个任务图片超过回收站限制");
+      images.push(image);
+    }
     return await this.enqueue(async () => {
       const current = this.entries.find(({ taskId: candidate }) => candidate === taskId);
       if (!current || current.status === "success") return current ? { ...current } : null;
@@ -224,14 +230,6 @@ export class GenerationRecycleBinRepository {
             throw new Error("图片文件写入校验失败");
           }
         }
-        let completed: RecycleBinEntry | null = null;
-        this.entries = this.entries.map((entry) => {
-          if (entry.taskId !== taskId) return entry;
-          completed = { ...entry, status: "success", updatedAt: this.now(), error: undefined };
-          return completed;
-        });
-        await this.persistAndPrune();
-        return completed ? { ...(completed as RecycleBinEntry) } : null;
       } catch (error) {
         await this.deleteAssets(assets);
         this.entries = this.entries.map((entry) => entry.taskId === taskId ? {
@@ -244,11 +242,27 @@ export class GenerationRecycleBinRepository {
         try {
           await this.persist();
         } catch {
-          this.entries = pendingEntries;
+          this.entries = originalEntries;
           this.emit();
         }
         throw error;
       }
+      let completed: RecycleBinEntry | null = null;
+      this.entries = this.entries.map((entry) => {
+        if (entry.taskId !== taskId) return entry;
+        completed = { ...entry, status: "success", updatedAt: this.now(), error: undefined };
+        return completed;
+      });
+      try {
+        await this.persistAndPrune();
+      } catch (error) {
+        // The pending manifest and verified files are already durable. Keep both in memory so
+        // a failed terminal-status write cannot turn a recoverable result into an orphan.
+        this.entries = pendingEntries;
+        this.emit();
+        throw error;
+      }
+      return completed ? { ...(completed as RecycleBinEntry) } : null;
     });
   }
 

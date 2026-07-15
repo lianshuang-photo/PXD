@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import type { RecycleBinEntry } from "../services/generationRecycleBin";
 
 interface Props {
@@ -34,29 +34,23 @@ const GenerationRecycleBin = ({
   onRerun
 }: Props) => {
   const [previews, setPreviews] = useState<Record<string, string>>({});
+  const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({});
   const requestedRef = useRef(new Set<string>());
 
-  useEffect(() => {
-    let current = true;
-    const currentIds = new Set(entries.map(({ taskId }) => taskId));
-    for (const taskId of requestedRef.current) {
-      if (!currentIds.has(taskId)) requestedRef.current.delete(taskId);
-    }
-    const candidates = entries.filter((entry) =>
-      entry.assets.length > 0 && !previews[entry.taskId] && !requestedRef.current.has(entry.taskId)
-    );
-    for (const entry of candidates) {
-      requestedRef.current.add(entry.taskId);
-      void onReadPreview(entry.taskId)
-        .then((preview) => {
-          if (current && preview) setPreviews((previous) => ({ ...previous, [entry.taskId]: preview }));
-        })
-        .catch(() => undefined);
-    }
-    return () => {
-      current = false;
-    };
-  }, [entries, onReadPreview, previews]);
+  const requestPreview = (taskId: string) => {
+    if (previews[taskId] || requestedRef.current.has(taskId)) return;
+    requestedRef.current.add(taskId);
+    setPreviewLoading((previous) => ({ ...previous, [taskId]: true }));
+    void onReadPreview(taskId)
+      .then((preview) => {
+        if (preview) setPreviews((previous) => ({ ...previous, [taskId]: preview }));
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        requestedRef.current.delete(taskId);
+        setPreviewLoading((previous) => ({ ...previous, [taskId]: false }));
+      });
+  };
 
   return (
     <section className="generation-recycle-bin" aria-label="生成回收站">
@@ -81,7 +75,16 @@ const GenerationRecycleBin = ({
                 />
               ) : (
                 <div className="generation-history__thumbnail generation-recycle-bin__placeholder">
-                  {entry.assets.length ? "读取中" : "无图片"}
+                  {entry.assets.length ? (
+                    <button
+                      type="button"
+                      className="generation-recycle-bin__preview-button"
+                      disabled={previewLoading[entry.taskId] === true}
+                      onClick={() => requestPreview(entry.taskId)}
+                    >
+                      {previewLoading[entry.taskId] ? "读取中" : "加载预览"}
+                    </button>
+                  ) : "无图片"}
                 </div>
               )}
               <div className="generation-history__content">

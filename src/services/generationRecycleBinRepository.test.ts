@@ -36,6 +36,32 @@ const fakeStorage = (raw: unknown | null = null) => {
 const input = { taskId: "task-1", prompt: "prompt", params: { steps: 20 }, provider: "forge" as const, context: { width: 32, height: 32 } };
 
 describe("generation recycle bin persistence and recovery", () => {
+  it("persists legacy migration and sensitive-param cleanup as canonical data", async () => {
+    const fake = fakeStorage([{
+      id: "legacy-task",
+      createdAt: 10,
+      provider: "forge",
+      prompt: "legacy",
+      params: { apiKey: "must-not-remain", steps: 20 },
+      width: 32,
+      height: 48
+    }]);
+    const repository = new GenerationRecycleBinRepository(fake.storage);
+
+    await repository.initialize();
+
+    expect(fake.writes).toHaveLength(1);
+    expect(fake.writes[0]).toEqual({
+      version: RECYCLE_BIN_VERSION,
+      entries: [expect.objectContaining({
+        taskId: "legacy-task",
+        status: "failed",
+        params: { steps: 20 },
+        context: { width: 32, height: 48 }
+      })]
+    });
+  });
+
   it("persists pending entries as aborted on startup and preserves complete recoverable assets", async () => {
     const assetBytes = bytes(1, 2, 3);
     const asset = { fileName: "recover_01.png", mimeType: "image/png" as const, byteLength: assetBytes.byteLength };
@@ -84,6 +110,53 @@ describe("generation recycle bin persistence and recovery", () => {
 
     expect(fake.assets.size).toBe(0);
     expect(repository.getSnapshot()[0]).toMatchObject({ status: "failed", assets: [] });
+  });
+
+  it("keeps verified assets recoverable when the final status write fails", async () => {
+    const fake = fakeStorage();
+    let durableIndex: RecycleBinFile | null = null;
+    vi.mocked(fake.storage.readIndex).mockImplementation(async () => structuredClone(durableIndex));
+    vi.mocked(fake.storage.writeIndex).mockImplementation(async (payload) => {
+      durableIndex = structuredClone(payload);
+      fake.writes.push(structuredClone(payload));
+    });
+    const repository = new GenerationRecycleBinRepository(fake.storage, () => 300);
+    await repository.begin(input);
+    vi.mocked(fake.storage.writeIndex)
+      .mockImplementationOnce(async (payload) => {
+        durableIndex = structuredClone(payload);
+        fake.writes.push(structuredClone(payload));
+      })
+      .mockRejectedValueOnce(new Error("final index write failed"));
+
+    await expect(repository.complete("task-1", [toBase64(bytes(1, 2, 3))]))
+      .rejects.toThrow("final index write failed");
+
+    expect(repository.getSnapshot()[0]).toMatchObject({ status: "pending", assets: [{ byteLength: 3 }] });
+    expect(await repository.readImages("task-1")).toEqual(["data:image/png;base64,AQID"]);
+
+    const restarted = new GenerationRecycleBinRepository(fake.storage, () => 400);
+    await restarted.initialize();
+    expect(restarted.getSnapshot()[0]).toMatchObject({ status: "aborted", assets: [{ byteLength: 3 }] });
+    expect(await restarted.readImages("task-1")).toEqual(["data:image/png;base64,AQID"]);
+  });
+
+  it("rolls memory back to the pre-archive state if cleanup status also cannot persist", async () => {
+    const fake = fakeStorage();
+    const repository = new GenerationRecycleBinRepository(fake.storage, () => 300);
+    await repository.begin(input);
+    vi.mocked(fake.storage.writeAsset).mockImplementation(async (name) => {
+      fake.assets.set(name, bytes(9));
+    });
+    vi.mocked(fake.storage.writeIndex)
+      .mockImplementationOnce(async (payload) => { fake.writes.push(structuredClone(payload)); })
+      .mockRejectedValueOnce(new Error("failure status write failed"));
+
+    await expect(repository.complete("task-1", [toBase64(bytes(1, 2, 3))]))
+      .rejects.toThrow("校验失败");
+
+    expect(repository.getSnapshot()[0]).toMatchObject({ status: "pending", assets: [] });
+    expect(fake.assets.size).toBe(0);
   });
 
   it("rolls memory back when a mutation cannot be persisted", async () => {
