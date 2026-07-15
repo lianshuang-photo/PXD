@@ -20,7 +20,12 @@ const boundary = vi.hoisted(() => ({
   },
   photoshop: {
     closeDocument: vi.fn(),
+    closeGeneratedDocument: vi.fn(),
+    createGeneratedDocument: vi.fn(),
     deleteLayersInDocument: vi.fn(),
+    getDocumentPixels: vi.fn(),
+    getSelectionMetadata: vi.fn(),
+    placeImageIntoDocumentBounds: vi.fn(),
     getSelectionPixels: vi.fn(),
     groupLayers: vi.fn(),
     hasActiveSelection: vi.fn(),
@@ -62,6 +67,10 @@ vi.mock("../services/presets", () => ({
 
 vi.mock("../services/translator", () => ({
   translateText: vi.fn()
+}));
+
+vi.mock("../services/tileImage", () => ({
+  featherTileDataUrl: vi.fn().mockResolvedValue("data:image/png;base64,FEATHERED")
 }));
 
 vi.mock("../services/uxpBridge", () => ({
@@ -193,6 +202,16 @@ beforeEach(() => {
   boundary.geminiClient.editImage.mockResolvedValue("GEMINI_RESULT");
   boundary.photoshop.getSelectionPixels.mockResolvedValue(selection(""));
   boundary.photoshop.deleteLayersInDocument.mockResolvedValue(undefined);
+  boundary.photoshop.getSelectionMetadata.mockResolvedValue({
+    documentId: 7,
+    width: 1024,
+    height: 1024,
+    selectionBounds: { left: 10, top: 20, right: 1034, bottom: 1044 }
+  });
+  boundary.photoshop.getDocumentPixels.mockResolvedValue("data:image/png;base64,TILE");
+  boundary.photoshop.createGeneratedDocument.mockResolvedValue({ documentId: 9, previousDocumentId: 7 });
+  boundary.photoshop.placeImageIntoDocumentBounds.mockResolvedValue({ layerID: 501 });
+  boundary.photoshop.closeGeneratedDocument.mockResolvedValue(undefined);
   boundary.photoshop.hasActiveSelection.mockResolvedValue(true);
   boundary.photoshop.placeImageIntoSelection.mockResolvedValue({ layerID: 101 });
   boundary.photoshop.groupLayers.mockResolvedValue(undefined);
@@ -456,6 +475,167 @@ describe("useGenerationController poster wizard", () => {
     await act(async () => rendered.getController().undoPosterGeneration());
     expect(boundary.photoshop.deleteLayersInDocument).toHaveBeenLastCalledWith(7, [515], { taskId });
     expect(rendered.getController().posterLastResult).toBeNull();
+  });
+});
+
+const tiledConfig = {
+  scale: 2 as const,
+  tileSize: 1024,
+  overlap: 256,
+  feather: 128,
+  edgeMode: "anchor" as const,
+  prompt: "enhance texture"
+};
+
+describe("useGenerationController tiled upscale", () => {
+  it("runs Gemini tiles into a grouped non-destructive output", async () => {
+    boundary.photoshop.groupLayers.mockResolvedValueOnce(700);
+    const rendered = trackedRender({
+      initialSettings: { ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }
+    });
+    await flush();
+
+    await act(async () => {
+      await rendered.getController().runTiledUpscale(tiledConfig);
+    });
+
+    expect(boundary.geminiClient.editImage).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: expect.stringContaining("Preserve the exact composition"),
+      baseImageBase64: "TILE",
+      taskId: expect.stringContaining("tile-0-0")
+    }));
+    expect(boundary.photoshop.placeImageIntoDocumentBounds).toHaveBeenCalledWith(
+      "data:image/png;base64,FEATHERED",
+      { left: 0, top: 0, right: 2048, bottom: 2048 },
+      1,
+      9,
+      expect.objectContaining({ taskId: expect.any(String) })
+    );
+    expect(boundary.photoshop.groupLayers).toHaveBeenCalledWith([501], "PXD 分块放大", expect.objectContaining({
+      requireGroup: true
+    }));
+    expect(rendered.getController().status).toBe("success");
+    expect(rendered.getController().tiledUpscaleRunning).toBe(false);
+  });
+
+  it("maps Forge tiles to img2img dimensions and current generation controls", async () => {
+    const rendered = trackedRender();
+    await flush();
+
+    await act(async () => {
+      await rendered.getController().runTiledUpscale({ ...tiledConfig, tileSize: 768, overlap: 192, feather: 96 });
+    });
+
+    expect(boundary.forgeClient.img2img).toHaveBeenCalledWith(expect.objectContaining({
+      baseImage: "data:image/png;base64,TILE",
+      width: 1536,
+      height: 1536,
+      prompt: expect.stringContaining("enhance texture"),
+      denoisingStrength: rendered.getController().form.denoisingStrength
+    }), expect.objectContaining({ taskId: expect.stringContaining("tile-0-0") }));
+    expect(boundary.forgeClient.img2img.mock.calls[0][0].prompt).toContain("Preserve the exact composition");
+  });
+
+  it("cancels a late tile, closes the output, and restores the source document", async () => {
+    let resolveImage!: (value: string) => void;
+    boundary.geminiClient.editImage.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveImage = resolve;
+    }));
+    const rendered = trackedRender({
+      initialSettings: { ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }
+    });
+    await flush();
+
+    let run!: Promise<boolean>;
+    act(() => {
+      run = rendered.getController().runTiledUpscale(tiledConfig);
+    });
+    await vi.waitFor(() => expect(boundary.geminiClient.editImage).toHaveBeenCalledOnce());
+    act(() => rendered.getController().stopGeneration());
+    resolveImage("LATE");
+    await act(async () => {
+      await run;
+    });
+
+    expect(boundary.photoshop.placeImageIntoDocumentBounds).not.toHaveBeenCalled();
+    expect(boundary.photoshop.closeGeneratedDocument).toHaveBeenCalledWith(
+      9,
+      7,
+      expect.objectContaining({ taskId: expect.any(String) })
+    );
+    expect(rendered.getController().status).toBe("idle");
+  });
+
+  it("blocks a new run until the stopped tiled workflow has finished rolling back", async () => {
+    let resolveImage!: (value: string) => void;
+    boundary.geminiClient.editImage.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveImage = resolve;
+    }));
+    const rendered = trackedRender({
+      initialSettings: { ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }
+    });
+    await flush();
+
+    let oldRun!: Promise<boolean>;
+    act(() => {
+      oldRun = rendered.getController().runTiledUpscale(tiledConfig);
+    });
+    await vi.waitFor(() => expect(boundary.geminiClient.editImage).toHaveBeenCalledOnce());
+    act(() => rendered.getController().stopGeneration());
+
+    expect(rendered.getController().tiledUpscaleStopping).toBe(true);
+    expect(rendered.getController().tiledUpscaleRunning).toBe(true);
+    await act(async () => {
+      await rendered.getController().runGeneration();
+    });
+    expect(boundary.photoshop.getSelectionPixels).not.toHaveBeenCalled();
+    let blockedResult!: boolean;
+    await act(async () => {
+      blockedResult = await rendered.getController().runTiledUpscale(tiledConfig);
+    });
+    expect(blockedResult).toBe(false);
+    expect(boundary.photoshop.createGeneratedDocument).toHaveBeenCalledOnce();
+    expect(boundary.photoshop.getSelectionMetadata).toHaveBeenCalledOnce();
+
+    resolveImage("LATE");
+    await act(async () => {
+      await oldRun;
+    });
+    expect(boundary.photoshop.closeGeneratedDocument).toHaveBeenCalledOnce();
+    expect(rendered.getController().tiledUpscaleStopping).toBe(false);
+    expect(rendered.getController().status).toBe("idle");
+
+    await act(async () => {
+      expect(await rendered.getController().runTiledUpscale(tiledConfig)).toBe(true);
+    });
+    expect(boundary.photoshop.createGeneratedDocument).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces output recovery failure even after cancellation invalidates the run", async () => {
+    let resolveImage!: (value: string) => void;
+    boundary.geminiClient.editImage.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveImage = resolve;
+    }));
+    boundary.photoshop.closeGeneratedDocument.mockRejectedValueOnce(new Error("close failed"));
+    const rendered = trackedRender({
+      initialSettings: { ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }
+    });
+    await flush();
+
+    let run!: Promise<boolean>;
+    act(() => {
+      run = rendered.getController().runTiledUpscale(tiledConfig);
+    });
+    await vi.waitFor(() => expect(boundary.geminiClient.editImage).toHaveBeenCalledOnce());
+    act(() => rendered.getController().stopGeneration());
+    resolveImage("LATE");
+    await act(async () => {
+      await run;
+    });
+
+    expect(rendered.getController().status).toBe("error");
+    expect(rendered.getController().error).toContain("输出文档恢复失败");
+    expect(rendered.getController().error).toContain("close failed");
   });
 });
 

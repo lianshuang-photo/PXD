@@ -4,6 +4,7 @@ import { useGenerationController } from "../hooks/useGenerationController";
 import { useLayoutExperience } from "../hooks/useLayoutExperience";
 import OverlayPortal from "../components/OverlayPortal";
 import PromptParamControls from "../components/PromptParamControls";
+import TiledUpscaleDialog from "../components/TiledUpscaleDialog";
 import PosterWizard from "../components/PosterWizard";
 import PresetCatalogSelect from "../components/PresetCatalogSelect";
 import LayoutSnapshotControls from "../components/LayoutSnapshotControls";
@@ -76,6 +77,12 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     refreshOptions,
     runGeneration,
     stopGeneration,
+    tiledUpscaleRunning,
+    tiledUpscaleStopping,
+    tiledUpscaleProgress,
+    tiledUpscaleSourceSize,
+    inspectTiledUpscaleSelection,
+    runTiledUpscale,
     posterRunning,
     posterLastResult,
     runPosterWizard,
@@ -122,6 +129,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
   const [presetName, setPresetName] = useState<string>("");
   const [customResolution, setCustomResolution] = useState(false);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
+  const [tiledUpscaleOpen, setTiledUpscaleOpen] = useState(false);
   const [posterWizardOpen, setPosterWizardOpen] = useState(false);
   const [layoutToolsOpen, setLayoutToolsOpen] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
@@ -485,6 +493,15 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
           style={compactTopActionButtonStyle}
         >
           {status === "running" ? "生成中" : "开始生成"}
+        </button>
+        <button
+          type="button"
+          className="btn btn--secondary"
+          onClick={() => setTiledUpscaleOpen(true)}
+          disabled={status === "running"}
+          style={compactTopActionButtonStyle}
+        >
+          分块放大
         </button>
         <button
           type="button"
@@ -1122,6 +1139,19 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
       </div>
 
       </section>
+      {tiledUpscaleOpen && (
+        <TiledUpscaleDialog
+          provider={settings.imageProvider}
+          running={tiledUpscaleRunning}
+          stopping={tiledUpscaleStopping}
+          progress={tiledUpscaleProgress}
+          sourceSize={tiledUpscaleSourceSize}
+          onInspect={inspectTiledUpscaleSelection}
+          onRun={runTiledUpscale}
+          onStop={stopGeneration}
+          onClose={() => setTiledUpscaleOpen(false)}
+        />
+      )}
       {posterWizardOpen && (
         <PosterWizard
           provider={settings.imageProvider}

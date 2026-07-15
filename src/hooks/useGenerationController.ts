@@ -25,12 +25,15 @@ import {
   closeGeneratedDocument,
   createGeneratedDocument,
   deleteLayersInDocument,
+  getDocumentPixels,
   getSelectionPixels,
+  getSelectionMetadata,
   groupLayers,
   hasActiveSelection,
   moveActiveLayerToTop,
   onBatchAddLayer,
   placeImageIntoDocument,
+  placeImageIntoDocumentBounds,
   placeImageIntoSelection,
   setSelectionBounds,
   switchToDocument,
@@ -54,6 +57,14 @@ import { translateText } from "../services/translator";
 import { useGenerationHistory } from "./useGenerationHistory";
 import type { GenerationHistoryEntry } from "../services/generationHistory";
 import { normalizePromptParams, sanitizePrompt } from "../services/promptParams";
+import {
+  buildTiledUpscalePlan,
+  executeTiledUpscale,
+  TiledUpscaleRollbackError,
+  type TiledUpscaleConfig,
+  type TiledUpscaleProgress
+} from "../services/tiledUpscale";
+import { featherTileDataUrl } from "../services/tileImage";
 import {
   executePosterWorkflow,
   type PosterWizardDraft
@@ -392,6 +403,12 @@ export interface GenerationControllerState {
   refreshOptions: () => Promise<void>;
   runGeneration: () => Promise<void>;
   stopGeneration: () => void;
+  tiledUpscaleRunning: boolean;
+  tiledUpscaleStopping: boolean;
+  tiledUpscaleProgress: TiledUpscaleProgress | null;
+  tiledUpscaleSourceSize: { width: number; height: number } | null;
+  inspectTiledUpscaleSelection: () => Promise<boolean>;
+  runTiledUpscale: (config: TiledUpscaleConfig) => Promise<boolean>;
   posterRunning: boolean;
   posterLastResult: PosterGenerationResult | null;
   runPosterWizard: (draft: PosterWizardDraft) => Promise<boolean>;
@@ -463,6 +480,10 @@ export const useGenerationController = (
   const [progressText, setProgressText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastImages, setLastImages] = useState<string[]>([]);
+  const [tiledUpscaleRunning, setTiledUpscaleRunning] = useState(false);
+  const [tiledUpscaleStopping, setTiledUpscaleStopping] = useState(false);
+  const [tiledUpscaleProgress, setTiledUpscaleProgress] = useState<TiledUpscaleProgress | null>(null);
+  const [tiledUpscaleSourceSize, setTiledUpscaleSourceSize] = useState<{ width: number; height: number } | null>(null);
   const [posterRunning, setPosterRunning] = useState(false);
   const [posterLastResult, setPosterLastResult] = useState<PosterGenerationResult | null>(null);
   const [options, setOptions] = useState<SdOptions>(EMPTY_OPTIONS);
@@ -479,6 +500,7 @@ export const useGenerationController = (
   const [sourceLanguage, setSourceLanguage] = useState("zh");
   const [targetLanguage, setTargetLanguage] = useState("en");
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tiledUpscaleSettlingRef = useRef(false);
   const presetsLoadGateRef = useRef(new LatestLoadGate());
   const settingsRef = useRef(settings);
   const historyRestoreGenerationRef = useRef(0);
@@ -492,9 +514,13 @@ export const useGenerationController = (
   const stoppedByEngineChangeRef = useRef(false);
 
   useLayoutEffect(() => {
+    const tiledUpscaleSettling = tiledUpscaleSettlingRef.current;
     setProgress(0);
+    setTiledUpscaleRunning(tiledUpscaleSettling);
+    setTiledUpscaleStopping(tiledUpscaleSettling);
+    setTiledUpscaleProgress(null);
     setPosterRunning(false);
-    setStatus((current) => current === "running" ? "idle" : current);
+    setStatus((current) => current === "running" && !tiledUpscaleSettling ? "idle" : current);
   }, [engineToken]);
 
   useEffect(() => () => {
@@ -834,6 +860,7 @@ export const useGenerationController = (
   const stopGeneration = useCallback(() => {
     const activeRun = runGateRef.current.current;
     if (!activeRun) return;
+    const tiledUpscaleStopping = activeRun.kind === "tiled-upscale";
     runGateRef.current.stop();
     engine.cancelAll();
     stopPolling(engineToken);
@@ -846,14 +873,157 @@ export const useGenerationController = (
         )
       );
     }
-    setStatus("idle");
+    setStatus(tiledUpscaleStopping ? "running" : "idle");
+    setTiledUpscaleRunning(tiledUpscaleStopping);
+    setTiledUpscaleStopping(tiledUpscaleStopping);
+    setTiledUpscaleProgress(null);
     setPosterRunning(false);
     setProgress(0);
     setProgressPreview(null);
     setProgressText(null);
     setError(null);
-    pushToast("info", "已停止");
+    pushToast("info", tiledUpscaleStopping ? "正在停止并恢复源文档" : "已停止");
   }, [engine, engineToken, pushToast, stopPolling]);
+
+  const inspectTiledUpscaleSelection = useCallback(async () => {
+    if (runGateRef.current.current || tiledUpscaleSettlingRef.current) return false;
+    const metadata = await getSelectionMetadata();
+    if (!metadata) {
+      setTiledUpscaleSourceSize(null);
+      pushToast("warning", "请先在 Photoshop 中选择需要放大的区域");
+      return false;
+    }
+    setTiledUpscaleSourceSize({ width: metadata.width, height: metadata.height });
+    return true;
+  }, [pushToast]);
+
+  const runTiledUpscale = useCallback(async (config: TiledUpscaleConfig): Promise<boolean> => {
+    if (runGateRef.current.current || tiledUpscaleSettlingRef.current) return false;
+    tiledUpscaleSettlingRef.current = true;
+    const requestToken = engineToken;
+    const requestEngine = requestToken.engine;
+    const taskId = generateId();
+    const { token: runToken } = runGateRef.current.begin("tiled-upscale", taskId);
+    const isRunCurrent = () => isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken);
+    setTiledUpscaleRunning(true);
+    setTiledUpscaleStopping(false);
+    setTiledUpscaleProgress(null);
+    setStatus("running");
+    setError(null);
+    dismissToast();
+    try {
+      const source = await getSelectionMetadata({ taskId });
+      if (!isRunCurrent()) return false;
+      if (!source) throw new Error("请先在 Photoshop 中选择需要放大的区域");
+      setTiledUpscaleSourceSize({ width: source.width, height: source.height });
+      const plan = buildTiledUpscalePlan(source.width, source.height, config);
+      if (requestEngine.provider === "forge" && config.tileSize * config.scale > 2048) {
+        throw new Error("Forge 单瓦片输出不能超过 2048 像素，请减小瓦片或倍率");
+      }
+      await executeTiledUpscale({
+        engine: requestEngine,
+        source: {
+          documentId: source.documentId,
+          bounds: source.selectionBounds,
+          width: source.width,
+          height: source.height
+        },
+        config,
+        taskId,
+        isCurrent: isRunCurrent,
+        onProgress: (next) => {
+          if (!isRunCurrent()) return;
+          setTiledUpscaleProgress(next);
+          setProgress(next.completed / next.total);
+          setProgressText(`瓦片 ${Math.min(next.completed + 1, next.total)}/${next.total}`);
+        },
+        adapters: {
+          readTile: (documentId, bounds, tileTaskId) =>
+            getDocumentPixels(documentId, bounds, { taskId: tileTaskId }),
+          enhanceTile: async (activeEngine, dataUrl, tile, activeConfig, tileTaskId) => {
+            const outputWidth = tile.output.right - tile.output.left;
+            const outputHeight = tile.output.bottom - tile.output.top;
+            const alignForgeDimension = (value: number) =>
+              Math.min(2048, Math.max(64, Math.round(value / 8) * 8));
+            const prompt = sanitizePrompt([
+              activeConfig.prompt || "Enhance fine texture and edge detail.",
+              "Preserve the exact composition, geometry, colors, text, identity, and tile boundary content.",
+              "Do not add, remove, crop, or move any object. Return only the enhanced image tile."
+            ].join("\n"));
+            const result = await activeEngine.generate({
+              prompt,
+              baseImageBase64: dataUrlToBase64(dataUrl),
+              timeoutMs: Math.max(5_000, Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)),
+              taskId: `${tileTaskId}-${tile.id}`,
+              forgeParams: activeEngine.provider === "forge"
+                ? {
+                    ...buildImg2ImgParams(
+                      { ...form, imageCount: 1 },
+                      dataUrl,
+                      alignForgeDimension(outputWidth),
+                      alignForgeDimension(outputHeight)
+                    ),
+                    prompt
+                  }
+                : undefined
+            });
+            if (!result.images[0]) throw new Error(`瓦片 ${tile.id} 未返回增强结果`);
+            return toDataUrl(result.images[0]);
+          },
+          featherTile: featherTileDataUrl,
+          createOutput: (width, height, name, outputTaskId) =>
+            createGeneratedDocument(width, height, name, { taskId: outputTaskId }),
+          placeTile: (dataUrl, bounds, index, documentId, placeTaskId) =>
+            placeImageIntoDocumentBounds(dataUrl, bounds, index, documentId, { taskId: placeTaskId }),
+          finalize: async (layerIds, documentId, finalizeTaskId) => {
+            await switchToDocument(documentId, { taskId: finalizeTaskId });
+            const groupId = await groupLayers(layerIds, "PXD 分块放大", {
+              taskId: finalizeTaskId,
+              requireGroup: true
+            });
+            if (groupId) await moveActiveLayerToTop({ layerId: groupId, taskId: finalizeTaskId });
+          },
+          rollback: (session, rollbackTaskId) => closeGeneratedDocument(
+            session.documentId,
+            session.previousDocumentId,
+            { taskId: rollbackTaskId }
+          )
+        }
+      });
+      if (!isRunCurrent()) return false;
+      setStatus("success");
+      setProgress(1);
+      setProgressText(`${plan.tiles.length} 个瓦片已完成`);
+      pushToast("success", `分块放大完成：${plan.outputWidth}×${plan.outputHeight}`);
+      return true;
+    } catch (caught) {
+      if (caught instanceof TiledUpscaleRollbackError) {
+        const message = formatGenerationError(caught, "分块放大恢复失败");
+        setStatus("error");
+        setError(message);
+        pushToast("error", message);
+        return false;
+      }
+      if (!isRunCurrent()) return false;
+      if (isGenerationCancelledError(caught)) {
+        setStatus("idle");
+        setError(null);
+        return false;
+      }
+      const message = formatGenerationError(caught, "分块放大失败");
+      setStatus("error");
+      setError(message);
+      pushToast("error", message);
+      return false;
+    } finally {
+      if (runGateRef.current.isCurrent(runToken)) runGateRef.current.complete(runToken);
+      tiledUpscaleSettlingRef.current = false;
+      setTiledUpscaleRunning(false);
+      setTiledUpscaleStopping(false);
+      setProgress(0);
+      setStatus((current) => current === "running" ? "idle" : current);
+    }
+  }, [dismissToast, engineToken, form, isEngineCurrent, pushToast, settings.timeoutMaxSeconds, settings.timeoutMultiplier]);
 
   const runPosterWizard = useCallback(async (draft: PosterWizardDraft): Promise<boolean> => {
     if (runGateRef.current.current) return false;
@@ -986,7 +1156,7 @@ export const useGenerationController = (
   }, [posterLastResult, posterRunning, pushToast]);
 
   const runGeneration = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (runGateRef.current.current || tiledUpscaleSettlingRef.current) return;
     const requestToken = engineToken;
     const requestEngine = requestToken.engine;
     const taskId = generateId();
@@ -1187,7 +1357,7 @@ export const useGenerationController = (
   }, [batchItems, engine, pushToast, stopGeneration]);
 
   const runBatch = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (runGateRef.current.current || tiledUpscaleSettlingRef.current) return;
     const runnableItems = batchItems.filter((item) => item.status !== "success");
     if (!runnableItems.length) {
       if (batchItems.length) {
@@ -1441,6 +1611,12 @@ export const useGenerationController = (
     refreshOptions,
     runGeneration,
     stopGeneration,
+    tiledUpscaleRunning,
+    tiledUpscaleStopping,
+    tiledUpscaleProgress,
+    tiledUpscaleSourceSize,
+    inspectTiledUpscaleSelection,
+    runTiledUpscale,
     posterRunning,
     posterLastResult,
     runPosterWizard,

@@ -1549,3 +1549,392 @@ select.input::-ms-expand {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+
+.tiled-upscale-backdrop {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  background: rgba(5, 6, 9, 0.8);
+}
+
+.tiled-upscale {
+  width: min(640px, 100%);
+  max-height: calc(100vh - 20px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(56, 189, 248, 0.38);
+  border-radius: 8px;
+  background: #171920;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.58);
+}
+
+.tiled-upscale__header,
+.tiled-upscale__footer {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+}
+
+.tiled-upscale__header {
+  border-bottom: 1px solid var(--border-color);
+}
+
+.tiled-upscale__header h2 {
+  margin: 0;
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
+.tiled-upscale__close {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.tiled-upscale__body {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(210px, 0.8fr) minmax(220px, 1.2fr);
+  gap: 12px;
+  overflow-y: auto;
+  padding: 10px;
+}
+
+.tiled-upscale__controls,
+.tiled-upscale__field,
+.tiled-upscale__row label {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.tiled-upscale__controls {
+  gap: 8px;
+}
+
+.tiled-upscale__row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.tiled-upscale__preview-panel {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px;
+  background: #0d1015;
+}
+
+.tiled-upscale__preview {
+  position: relative;
+  width: 100%;
+  max-height: 300px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: #20242b;
+}
+
+.tiled-upscale__tile {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid;
+  color: rgba(255, 255, 255, 0.84);
+  font-size: 9px;
+  line-height: 1;
+}
+
+.tiled-upscale__tile--active {
+  z-index: 2;
+  border-width: 2px;
+  box-shadow: inset 0 0 0 1px #fff;
+}
+
+.tiled-upscale__stats {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.tiled-upscale__empty {
+  min-height: 150px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.tiled-upscale__error {
+  margin: 0;
+  color: var(--error-color);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.tiled-upscale__progress {
+  position: relative;
+  height: 18px;
+  margin: 0 10px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.tiled-upscale__progress span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: #0ea5e9;
+  transition: width 160ms ease;
+}
+
+.tiled-upscale__progress strong {
+  position: relative;
+  z-index: 1;
+  display: block;
+  color: #fff;
+  font-size: 10px;
+  line-height: 18px;
+  text-align: center;
+}
+
+.tiled-upscale__footer {
+  border-top: 1px solid var(--border-color);
+}
+
+.tiled-upscale__stop {
+  color: #fca5a5;
+}
+
+@media (max-width: 430px) {
+  .tiled-upscale__body {
+    grid-template-columns: 1fr;
+  }
+
+  .tiled-upscale__preview {
+    max-height: 180px;
+  }
+}
+
+.result-grid {
+  display: grid;
+  gap: var(--gap-sm);
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+}
+
+.result-grid img {
+  width: 100%;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+}
+
+.toast {
+  position: relative;
+  min-width: 320px;
+  max-width: calc(100% - 48px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-sm);
+  padding: 14px 18px;
+  border-radius: var(--radius-lg);
+  background: rgba(20, 22, 36, 0.95);
+  border: 1px solid rgba(183, 148, 246, 0.65);
+  box-shadow: 0 16px 30px rgba(12, 10, 22, 0.5), 0 0 0 1px rgba(183, 148, 246, 0.2);
+  font-size: 12px;
+}
+
+.toast--info {
+  border-color: rgba(59, 130, 246, 0.42);
+}
+
+.toast--success {
+  border-color: rgba(183, 148, 246, 0.45);
+}
+
+.toast--warning {
+  border-color: rgba(245, 158, 11, 0.45);
+}
+
+.toast--error {
+  border-color: rgba(248, 113, 113, 0.45);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  padding: var(--gap-md);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  box-shadow: var(--shadow-soft);
+}
+
+.panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-md);
+}
+
+.panel__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.panel__subtitle {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.panel__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-md);
+}
+
+.panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-sm);
+}
+
+@media (max-width: 1080px) {
+  .board {
+    grid-template-columns: 1fr;
+  }
+
+  .hero {
+    align-items: flex-start;
+  }
+}
+
+@media (max-width: 720px) {
+  .app-panel {
+    padding: var(--gap-md);
+  }
+
+  .hero__actions {
+    width: 100%;
+  }
+
+  .hero__actions .btn {
+    flex: 1;
+    justify-content: center;
+  }
+
+  .resolution-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .language-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .language-row__swap {
+    display: none;
+  }
+
+  .panel__header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .panel__header .panel__actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .panel__header .panel__actions .btn {
+    flex: 1;
+  }
+}
+
+/* UXP 窄面板适配 (320-380px) */
+@media (max-width: 380px) {
+  :root {
+    --gap-sm: 6px;
+    --gap-md: 8px;
+    --gap-lg: 10px;
+  }
+
+  .app-shell__header {
+    padding: 6px 8px;
+  }
+
+  .app-shell__title {
+    font-size: 12px;
+  }
+
+  .nav-button {
+    padding: 0 6px;
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .btn {
+    padding: 5px 10px;
+    font-size: 11px;
+  }
+
+  .input {
+    padding: 5px 8px;
+    font-size: 11px;
+  }
+
+  .card {
+    padding: 8px;
+  }
+
+  .form-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .chip-group {
+    flex-wrap: wrap;
+    gap: 0.08rem;
+  }
+
+  .chip {
+    padding: 0.05rem 0.35rem;
+    font-size: 0.6rem;
+    min-height: 1.05rem;
+  }
+
+  .progress-bar {
+    width: 100%;
+  }
+}
+
+/* UXP 中等面板适配 (380-460px) */
+@media (min-width: 380px) and (max-width: 460px) {
+  .form-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}

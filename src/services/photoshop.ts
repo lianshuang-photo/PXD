@@ -16,6 +16,13 @@ export interface SelectionPixels {
   selectionBounds: SelectionBounds;
 }
 
+export interface SelectionMetadata {
+  documentId: number;
+  width: number;
+  height: number;
+  selectionBounds: SelectionBounds;
+}
+
 export interface PhotoshopOperationOptions {
   taskId?: string;
   timeoutMs?: number;
@@ -466,6 +473,57 @@ export const getSelectionPixels = (
   options: PhotoshopOperationOptions = {}
 ): Promise<SelectionPixels | null> => runTransaction(getSelectionPixelsUnlocked, options);
 
+const getSelectionMetadataUnlocked = async (): Promise<SelectionMetadata | null> => {
+  try {
+    const photoshop = ensureModule(getPhotoshop, "Photoshop");
+    const doc = photoshop.app.activeDocument;
+    if (!doc?.selection?.bounds) return null;
+    const selectionBounds = toBounds(doc.selection.bounds);
+    return {
+      documentId: Number(doc.id),
+      width: selectionBounds.right - selectionBounds.left,
+      height: selectionBounds.bottom - selectionBounds.top,
+      selectionBounds
+    };
+  } catch {
+    return null;
+  }
+};
+
+export const getSelectionMetadata = (
+  options: PhotoshopOperationOptions = {}
+): Promise<SelectionMetadata | null> => runTransaction(getSelectionMetadataUnlocked, options);
+
+const getDocumentPixelsUnlocked = async (
+  documentId: number,
+  bounds: SelectionBounds
+): Promise<string> => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const pixels = await executeAsModalUnlocked(photoshop, async () =>
+    photoshop.imaging.getPixels({
+      documentID: documentId,
+      sourceBounds: bounds,
+      applyAlpha: true,
+      componentSize: 8,
+      colorProfile: "sRGB IEC61966-2.1"
+    }), DEFAULT_MODAL_OPTIONS);
+  try {
+    const encoded = await photoshop.imaging.encodeImageData({
+      imageData: pixels.imageData,
+      base64: true
+    });
+    return `data:image/png;base64,${encoded}`;
+  } finally {
+    pixels.imageData.dispose?.();
+  }
+};
+
+export const getDocumentPixels = (
+  documentId: number,
+  bounds: SelectionBounds,
+  options: PhotoshopOperationOptions = {}
+): Promise<string> => runTransaction(() => getDocumentPixelsUnlocked(documentId, bounds), options);
+
 const setSelectionBoundsUnlocked = async (bounds: SelectionBounds) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
   await executeAsModalUnlocked(photoshop, async () => {
@@ -778,6 +836,68 @@ export const placeImageIntoDocument = (
   docId?: number,
   options: PhotoshopOperationOptions = {}
 ) => runTransaction(() => placeImageIntoDocumentUnlocked(dataUrl, index, docId), options);
+
+const unitValue = (value: unknown) => {
+  if (typeof value === "number") return value;
+  if (value && typeof value === "object") {
+    const candidate = Number((value as { _value?: unknown })._value);
+    if (Number.isFinite(candidate)) return candidate;
+  }
+  return Number(value);
+};
+
+const placeImageIntoDocumentBoundsUnlocked = async (
+  dataUrl: string,
+  bounds: SelectionBounds,
+  index: number,
+  documentId: number
+) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const info = await placeImageIntoDocumentUnlocked(dataUrl, index, documentId);
+  const layerId = Number(info?.layerID ?? info?.layerId ?? info?.ID ?? info?.id);
+  const layerBounds = info?.bounds ?? info?.boundsNoEffects;
+  const left = unitValue(layerBounds?.left);
+  const top = unitValue(layerBounds?.top);
+  const right = unitValue(layerBounds?.right);
+  const bottom = unitValue(layerBounds?.bottom);
+  const width = right - left;
+  const height = bottom - top;
+  if (!Number.isInteger(layerId) || layerId <= 0 || ![left, top, right, bottom, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+    throw new Error("Photoshop 未返回可定位的瓦片图层");
+  }
+  const targetWidth = bounds.right - bounds.left;
+  const targetHeight = bounds.bottom - bounds.top;
+  const currentCenterX = (left + right) / 2;
+  const currentCenterY = (top + bottom) / 2;
+  const targetCenterX = (bounds.left + bounds.right) / 2;
+  const targetCenterY = (bounds.top + bounds.bottom) / 2;
+  await executeAsModalUnlocked(photoshop, async () => {
+    await photoshop.app.batchPlay([{
+      _obj: "transform",
+      _target: [{ _ref: "layer", _id: layerId }],
+      freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
+      width: { _unit: "percentUnit", _value: targetWidth / width * 100 },
+      height: { _unit: "percentUnit", _value: targetHeight / height * 100 },
+      offset: {
+        _obj: "offset",
+        horizontal: { _unit: "pixelsUnit", _value: targetCenterX - currentCenterX },
+        vertical: { _unit: "pixelsUnit", _value: targetCenterY - currentCenterY }
+      }
+    }], { synchronousExecution: true });
+  }, { commandName: "定位 PXD 放大瓦片" });
+  return info;
+};
+
+export const placeImageIntoDocumentBounds = (
+  dataUrl: string,
+  bounds: SelectionBounds,
+  index: number,
+  documentId: number,
+  options: PhotoshopOperationOptions = {}
+) => runTransaction(
+  () => placeImageIntoDocumentBoundsUnlocked(dataUrl, bounds, index, documentId),
+  options
+);
 
 const moveActiveLayerToTopUnlocked = async (layerId: number) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");

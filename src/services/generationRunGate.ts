@@ -1,4 +1,4 @@
-export type GenerationRunKind = "single" | "batch" | "poster";
+export type GenerationRunKind = "single" | "batch" | "poster" | "tiled-upscale";
 
 export interface GenerationRun {
   token: number;
