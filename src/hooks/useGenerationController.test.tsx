@@ -441,6 +441,56 @@ describe("useGenerationController global partition", () => {
     expect(rendered.getController().status).toBe("success");
   });
 
+  it("does not let an old rejected history tail warn or set historyError during a newer run", async () => {
+    let rejectHistoryWrite!: (error: Error) => void;
+    boundary.storage.writeJsonFile.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
+      rejectHistoryWrite = reject;
+    }));
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    act(() => rendered.getController().setFormValue("positivePrompt", "unified style"));
+
+    let oldRun!: Promise<void>;
+    act(() => {
+      oldRun = rendered.getController().runGlobalPartition();
+    });
+    await vi.waitFor(() => expect(boundary.storage.writeJsonFile).toHaveBeenCalledOnce());
+
+    let resolveDocument!: (value: { documentId: number; width: number; height: number }) => void;
+    boundary.photoshop.getActiveDocumentInfo.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveDocument = resolve;
+    }));
+    let newRun!: Promise<void>;
+    act(() => {
+      newRun = rendered.getController().runGlobalPartition();
+    });
+    expect(rendered.getController().status).toBe("running");
+    expect(rendered.getController().toast).toBeNull();
+
+    rejectHistoryWrite(new Error("old disk failure"));
+    await act(async () => oldRun);
+    expect(rendered.getController().status).toBe("running");
+    expect(rendered.getController().toast).toBeNull();
+    expect(rendered.getController().historyError).toBeNull();
+
+    resolveDocument({ documentId: 7, width: 2000, height: 1000 });
+    await act(async () => newRun);
+    expect(rendered.getController().status).toBe("success");
+  });
+
+  it("keeps partition success but reports a current history tail failure", async () => {
+    boundary.storage.writeJsonFile.mockRejectedValueOnce(new Error("disk full"));
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    act(() => rendered.getController().setFormValue("positivePrompt", "unified style"));
+
+    await act(async () => rendered.getController().runGlobalPartition());
+
+    expect(rendered.getController().status).toBe("success");
+    expect(rendered.getController().historyError).toContain("保存失败");
+    expect(rendered.getController().toast).toMatchObject({ type: "warning" });
+  });
+
   it("does not switch providers when the partition command is unavailable", async () => {
     const rendered = trackedRender();
     await flush();

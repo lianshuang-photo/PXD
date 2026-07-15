@@ -487,6 +487,7 @@ export const useGenerationController = (
   const settingsRef = useRef(settings);
   const historyRestoreGenerationRef = useRef(0);
   const historyRestoreQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const historyReportGenerationRef = useRef(0);
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
@@ -882,6 +883,7 @@ export const useGenerationController = (
       return;
     }
     const taskId = generateId();
+    const historyReportGeneration = ++historyReportGenerationRef.current;
     globalPartitionSettlingRef.current = true;
     const { token: runToken } = runGateRef.current.begin("partition", taskId);
     const isRunCurrent = () => isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken);
@@ -953,7 +955,8 @@ export const useGenerationController = (
         provider: "gemini",
         prompt,
         params: { ...form },
-        resultDataUrl: toDataUrl(result.images[0])
+        resultDataUrl: toDataUrl(result.images[0]),
+        shouldReportError: () => historyReportGenerationRef.current === historyReportGeneration
       });
     } catch (caught) {
       if (
@@ -995,6 +998,7 @@ export const useGenerationController = (
 
   const runGeneration = useCallback(async () => {
     if (runGateRef.current.current || globalPartitionSettlingRef.current) return;
+    historyReportGenerationRef.current += 1;
     const requestToken = engineToken;
     const requestEngine = requestToken.engine;
     const taskId = generateId();
@@ -1205,6 +1209,7 @@ export const useGenerationController = (
       }
       return;
     }
+    historyReportGenerationRef.current += 1;
     const requestToken = engineToken;
     const requestEngine = requestToken.engine;
     const { token: runToken } = runGateRef.current.begin("batch");
