@@ -42,8 +42,8 @@ import {
 } from "../services/photoshop";
 import {
   clearPSLockQueue,
-  isPSLockControlError,
-  PSCircuitOpenError
+  isPSBusyError,
+  isPSLockControlError
 } from "../services/psLock";
 import {
   deletePresetFile,
@@ -867,7 +867,7 @@ export const useGenerationController = (
                 await switchToDocument(returnTargetDocumentId, { taskId: prepared.id });
               }
               if (!layersDeleted) {
-                if (groupLayerId && rollbackIds.length) {
+                if (rollbackIds.length) {
                   await deleteLayers(rollbackIds, { taskId: prepared.id });
                 } else {
                   await deleteTaskLayers(prepared.id, { taskId: prepared.id });
@@ -995,7 +995,7 @@ export const useGenerationController = (
         });
       },
       isCancelledError: isGenerationCancelledError,
-      isDeferredReturnError: (caught) => caught instanceof PSCircuitOpenError,
+      isDeferredReturnError: isPSBusyError,
       formatError: (caught) => formatGenerationError(caught, "生成任务失败")
     });
   }, [recordHistory, taskPool]);

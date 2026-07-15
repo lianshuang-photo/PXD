@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const boundary = vi.hoisted(() => ({
   bridge: {
     photoshop: null as any,
-    uxp: undefined,
+    uxp: undefined as any,
     getDataFolder: vi.fn(),
     createSessionToken: vi.fn()
   }
@@ -17,12 +17,36 @@ import {
   deleteLayers,
   deleteTaskLayers,
   getActiveDocumentId,
-  groupLayers
+  groupLayers,
+  isPhotoshopPartialPlacementError,
+  placeImageIntoSelection
 } from "./photoshop";
 
 beforeEach(() => {
   vi.clearAllMocks();
 });
+
+const setupPlacement = (batchPlay: ReturnType<typeof vi.fn>) => {
+  const file = { write: vi.fn().mockResolvedValue(undefined) };
+  boundary.bridge.uxp = {
+    storage: {
+      formats: { binary: "binary" },
+      localFileSystem: {
+        getTemporaryFolder: vi.fn().mockResolvedValue({
+          createFile: vi.fn().mockResolvedValue(file)
+        }),
+        createSessionToken: vi.fn().mockResolvedValue("temp-token")
+      }
+    }
+  };
+  boundary.bridge.photoshop = {
+    app: {
+      batchPlay,
+      activeDocument: { id: 9 }
+    },
+    core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+  };
+};
 
 describe("createGeneratedDocument", () => {
   it("creates a transparent RGB canvas through the Photoshop DOM", async () => {
@@ -184,5 +208,51 @@ describe("createGeneratedDocument", () => {
     expect(batchPlay).toHaveBeenCalledWith([
       { _obj: "delete", _target: [{ _ref: "layer", _id: 2 }] }
     ], {});
+  });
+});
+
+describe("placeImageIntoSelection partial placement", () => {
+  it("carries the placed layer id when the later active-layer get fails", async () => {
+    const getFailure = new Error("get target failed");
+    const batchPlay = vi.fn()
+      .mockResolvedValueOnce([{ layerID: 42 }])
+      .mockRejectedValueOnce(getFailure);
+    setupPlacement(batchPlay);
+
+    await expect(placeImageIntoSelection("data:image/png;base64,QQ=="))
+      .rejects.toMatchObject({
+        name: "PhotoshopPartialPlacementError",
+        placedLayerId: 42,
+        originalError: getFailure
+      });
+  });
+
+  it("carries the placed layer id when writing the task marker fails", async () => {
+    const markerFailure = new Error("marker write failed");
+    const batchPlay = vi.fn()
+      .mockResolvedValueOnce([{ layerID: 43 }])
+      .mockRejectedValueOnce(markerFailure);
+    setupPlacement(batchPlay);
+
+    await expect(placeImageIntoSelection("data:image/png;base64,QQ==", 1, { taskId: "task-43" }))
+      .rejects.toMatchObject({
+        name: "PhotoshopPartialPlacementError",
+        placedLayerId: 43,
+        originalError: markerFailure
+      });
+    expect(batchPlay.mock.calls[1][0][0]).toMatchObject({
+      _obj: "set",
+      _target: [{ _ref: "layer", _id: 43 }]
+    });
+  });
+
+  it("does not report a layer id when placeEvent itself fails", async () => {
+    const placeFailure = new Error("place failed");
+    setupPlacement(vi.fn().mockRejectedValueOnce(placeFailure));
+
+    const caught = await placeImageIntoSelection("data:image/png;base64,QQ==").catch((error) => error);
+
+    expect(caught).toBe(placeFailure);
+    expect(isPhotoshopPartialPlacementError(caught)).toBe(false);
   });
 });

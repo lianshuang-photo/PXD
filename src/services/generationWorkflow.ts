@@ -63,6 +63,12 @@ const extractLayerId = (info: unknown): number | null => {
   return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
 };
 
+const extractPartialLayerId = (error: unknown): number | null => {
+  if (!error || typeof error !== "object") return null;
+  const numeric = Number((error as { placedLayerId?: unknown }).placedLayerId);
+  return Number.isInteger(numeric) && numeric > 0 ? numeric : null;
+};
+
 const createCurrentAssertion = (
   engine: GenerationEngine,
   isCurrent?: () => boolean
@@ -88,10 +94,19 @@ const placeGeneratedImages = async (
   try {
     for (let index = 0; index < images.length; index += 1) {
       assertCurrent();
-      const info = await adapters.placeImage(toDataUrl(images[index]), index + 1, {
-        feather: task.feather,
-        taskId: task.taskId
-      });
+      let info: unknown;
+      try {
+        info = await adapters.placeImage(toDataUrl(images[index]), index + 1, {
+          feather: task.feather,
+          taskId: task.taskId
+        });
+      } catch (error) {
+        const partialLayerId = extractPartialLayerId(error);
+        if (partialLayerId && !placedLayerIds.includes(partialLayerId)) {
+          placedLayerIds.push(partialLayerId);
+        }
+        throw error;
+      }
       assertCurrent();
       const layerId = extractLayerId(info);
       if (layerId) placedLayerIds.push(layerId);

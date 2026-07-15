@@ -235,4 +235,43 @@ describe("generation workflow", () => {
     );
     expect(activeLayers.size).toBe(2);
   });
+
+  it("rolls back a partially placed layer before retrying without duplicates", async () => {
+    const harness = makeHarness("forge", []);
+    const activeLayers = new Set<number>();
+    let nextId = 500;
+    let failAfterFirstPlacement = true;
+    harness.adapters.placeImage = vi.fn().mockImplementation(async () => {
+      const layerId = nextId++;
+      activeLayers.add(layerId);
+      if (failAfterFirstPlacement) {
+        failAfterFirstPlacement = false;
+        throw Object.assign(new Error("marker write failed"), { placedLayerId: layerId });
+      }
+      return { layerID: layerId };
+    });
+    harness.adapters.rollback = vi.fn().mockImplementation(async ({ placedLayerIds }) => {
+      placedLayerIds.forEach((layerId) => activeLayers.delete(layerId));
+    });
+
+    await expect(returnGenerationImages(
+      harness.engine,
+      ["ONE"],
+      { feather: 0 },
+      harness.adapters
+    )).rejects.toThrow("marker write failed");
+    expect(harness.adapters.rollback).toHaveBeenLastCalledWith({
+      placedLayerIds: [500],
+      groupLayerId: null
+    });
+    expect(activeLayers.size).toBe(0);
+
+    await returnGenerationImages(
+      harness.engine,
+      ["ONE"],
+      { feather: 0 },
+      harness.adapters
+    );
+    expect(activeLayers).toEqual(new Set([501]));
+  });
 });

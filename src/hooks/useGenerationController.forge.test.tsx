@@ -79,6 +79,7 @@ import {
   useGenerationController,
   type GenerationControllerState
 } from "./useGenerationController";
+import { PSCircuitOpenError, PSOperationTimeoutError } from "../services/psLock";
 
 const selection = {
   dataUrl: "data:image/png;base64,SELECTION",
@@ -435,6 +436,46 @@ describe("useGenerationController Forge completion", () => {
     act(() => harness.renderer.unmount());
   });
 
+  it("deletes an unmarked partial placement by exact id", async () => {
+    boundary.getSelectionPixels.mockResolvedValue(selection);
+    boundary.placeImageIntoSelection.mockRejectedValueOnce(
+      Object.assign(new Error("marker write failed"), { placedLayerId: 777 })
+    );
+    const harness = mountController();
+    await flushEffects();
+
+    await act(async () => {
+      await harness.controller.runGeneration();
+    });
+
+    const task = harness.controller.generationTasks[0];
+    expect(task.status).toBe("error");
+    expect(boundary.deleteLayers).toHaveBeenCalledWith([777], { taskId: task.id });
+    expect(boundary.deleteTaskLayers).not.toHaveBeenCalled();
+    act(() => harness.renderer.unmount());
+  });
+
+  it.each([
+    ["native error 9", Object.assign(new Error("executeAsModal rejected"), { number: 9 })],
+    ["lock timeout", new PSOperationTimeoutError(100, "timeout")],
+    ["open circuit", new PSCircuitOpenError("timeout", "next")]
+  ])("keeps generated images awaiting return after %s", async (_label, busyError) => {
+    boundary.getSelectionPixels.mockResolvedValue(selection);
+    boundary.placeImageIntoSelection.mockRejectedValueOnce(busyError);
+    const harness = mountController();
+    await flushEffects();
+
+    await act(async () => {
+      await harness.controller.runGeneration();
+    });
+
+    expect(harness.controller.generationTasks[0]).toMatchObject({
+      status: "awaiting-return",
+      images: ["IMG2IMG"]
+    });
+    act(() => harness.renderer.unmount());
+  });
+
   it("deletes the generated group and restores the document before manual return retry", async () => {
     boundary.getSelectionPixels.mockResolvedValue(selection);
     boundary.client.img2img.mockResolvedValue({ images: ["ONE", "TWO"] });
@@ -474,7 +515,7 @@ describe("useGenerationController Forge completion", () => {
     const move = deferred<void>();
     const cancelCleanup = deferred<void>();
     boundary.moveActiveLayerToTop.mockImplementationOnce(() => move.promise);
-    boundary.deleteTaskLayers
+    boundary.deleteLayers
       .mockReset()
       .mockRejectedValueOnce(new Error("late rollback failed"))
       .mockImplementationOnce(() => cancelCleanup.promise)
@@ -494,7 +535,8 @@ describe("useGenerationController Forge completion", () => {
       cancellation = harness.controller.cancelTask(taskId);
       move.resolve(undefined);
     });
-    await vi.waitFor(() => expect(boundary.deleteTaskLayers).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(boundary.deleteLayers).toHaveBeenCalledTimes(2));
+    expect(boundary.deleteLayers).toHaveBeenCalledWith([201], { taskId });
     expect(harness.controller.generationTasks[0].cleanupPending).toBe(true);
 
     cancelCleanup.reject(new Error("cleanup circuit open"));
