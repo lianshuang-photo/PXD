@@ -1060,3 +1060,133 @@ select.input::-ms-expand {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+
+.lighting-editor {
+  display: grid;
+  gap: 6px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.lighting-editor__header,
+.lighting-editor__actions {
+  display: flex;
+  align-items: center;
+}
+
+.lighting-editor__header {
+  justify-content: space-between;
+}
+
+.lighting-editor__title {
+  color: var(--text-primary);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.lighting-editor__actions {
+  gap: 4px;
+}
+
+.lighting-editor__icon-button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.lighting-editor__stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  min-height: 150px;
+  max-height: 260px;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background:
+    linear-gradient(90deg, transparent 49.5%, rgba(255, 255, 255, 0.06) 50%, transparent 50.5%),
+    linear-gradient(transparent 49.5%, rgba(255, 255, 255, 0.06) 50%, transparent 50.5%),
+    #1b1d20;
+  touch-action: none;
+}
+
+.lighting-editor__subject {
+  position: absolute;
+  left: 40%;
+  top: 22%;
+  width: 20%;
+  height: 60%;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 50% 50% 35% 35%;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.lighting-editor__light {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  transform: translate(-50%, -50%);
+  border: 2px solid rgba(20, 20, 20, 0.9);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
+  color: #111;
+  cursor: move;
+}
+
+.lighting-editor__light--selected {
+  box-shadow: 0 0 0 2px var(--brand-color), 0 0 10px rgba(255, 255, 255, 0.25);
+}
+
+.lighting-editor__direction {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 38px;
+  transform-origin: 0 50%;
+  color: inherit;
+  font-size: 19px;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.lighting-editor__controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 8px;
+}
+
+.lighting-editor__controls label {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  color: var(--text-secondary);
+  font-size: 0.62rem;
+}
+
+.lighting-editor__controls input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+}
+
+.lighting-editor__control--wide {
+  grid-column: 1 / -1;
+}
+
+.lighting-editor__prompt {
+  min-height: 46px;
+  resize: vertical;
+}
+
+.lighting-editor__run {
+  width: 100%;
+  min-height: 28px;
+}

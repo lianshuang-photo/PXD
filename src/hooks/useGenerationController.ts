@@ -53,6 +53,15 @@ import { translateText } from "../services/translator";
 import { useGenerationHistory } from "./useGenerationHistory";
 import type { GenerationHistoryEntry } from "../services/generationHistory";
 import { normalizePromptParams, sanitizePrompt } from "../services/promptParams";
+import {
+  createDefaultRelightLights,
+  normalizeRelightConfig,
+  normalizeRelightLight,
+  type RelightConfig,
+  type RelightLight
+} from "../services/relight";
+import { executeRelightWorkflow, type RelightPhase } from "../services/relightWorkflow";
+import { RELIGHT_PHOTOSHOP_ADAPTER } from "../services/relightPhotoshopAdapter";
 
 export type GenerationStatus = "idle" | "running" | "success" | "error";
 export type ToastType = "info" | "success" | "warning" | "error";
@@ -85,6 +94,7 @@ export interface GenerationForm {
   clipSkip: number;
   restoreFaces: boolean;
   tiling: boolean;
+  relightConfig?: RelightConfig;
 }
 
 export interface BatchItem {
@@ -387,6 +397,14 @@ export interface GenerationControllerState {
   refreshOptions: () => Promise<void>;
   runGeneration: () => Promise<void>;
   stopGeneration: () => void;
+  relightLights: RelightLight[];
+  selectedRelightId: string | null;
+  relightStatus: "idle" | RelightPhase | "success" | "error";
+  selectRelightLight: (id: string) => void;
+  addRelightLight: () => void;
+  removeRelightLight: (id: string) => void;
+  updateRelightLight: (id: string, patch: Partial<RelightLight>) => void;
+  runRelight: () => Promise<void>;
   history: GenerationHistoryEntry<GenerationForm>[];
   historyLoading: boolean;
   historyError: string | null;
@@ -442,6 +460,9 @@ export const useGenerationController = (
     stopPolling
   } = useEngineLifecycle(engine);
   const [form, setForm] = useState<GenerationForm>(DEFAULT_FORM);
+  const [relightLights, setRelightLights] = useState<RelightLight[]>(createDefaultRelightLights);
+  const [selectedRelightId, setSelectedRelightId] = useState<string | null>("key-1");
+  const [relightStatus, setRelightStatus] = useState<"idle" | RelightPhase | "success" | "error">("idle");
   const [status, setStatus] = useState<GenerationStatus>("idle");
   const [progress, setProgress] = useState(0);
   const [progressPreview, setProgressPreview] = useState<string | null>(null);
@@ -472,6 +493,8 @@ export const useGenerationController = (
     settingsRef.current = settings;
   }, [settings]);
   const runGateRef = useRef(new GenerationRunGate());
+  const relightAbortRef = useRef<AbortController | null>(null);
+  const relightHistoryTailCountRef = useRef(0);
   const stoppedByEngineChangeRef = useRef(false);
 
   useLayoutEffect(() => {
@@ -480,7 +503,13 @@ export const useGenerationController = (
   }, [engineToken]);
 
   useEffect(() => () => {
-    if (runGateRef.current.stop()) {
+    const stopped = runGateRef.current.stop();
+    if (stopped) {
+      if (stopped.taskId) clearPSLockQueue(stopped.taskId);
+      if (stopped.kind === "relight") {
+        relightAbortRef.current?.abort();
+        relightAbortRef.current = null;
+      }
       engine.cancelAll();
       stoppedByEngineChangeRef.current = true;
     }
@@ -499,7 +528,10 @@ export const useGenerationController = (
     loading: historyLoading,
     error: historyError,
     record: recordHistory
-  } = useGenerationHistory<GenerationForm>((message) => pushToast("warning", message));
+  } = useGenerationHistory<GenerationForm>((message) => {
+    if (relightHistoryTailCountRef.current > 0) return;
+    pushToast("warning", message);
+  });
   const dismissToast = useCallback(() => {
     clearToastTimer();
     setToast(null);
@@ -527,6 +559,7 @@ export const useGenerationController = (
         item.status === "running" ? { ...item, status: "stopped", error: undefined } : item
       )
     );
+    setRelightStatus("idle");
     setError(null);
     pushToast("info", "设置已更新，当前生成已停止");
   }, [engine, pushToast]);
@@ -543,6 +576,10 @@ export const useGenerationController = (
 
   const resetForm = useCallback(() => {
     setForm(DEFAULT_FORM);
+    const defaults = createDefaultRelightLights();
+    setRelightLights(defaults);
+    setSelectedRelightId(defaults[0]?.id ?? null);
+    setRelightStatus("idle");
   }, []);
 
   const setResolution = useCallback(
@@ -697,6 +734,16 @@ export const useGenerationController = (
         }
         if (generation !== historyRestoreGenerationRef.current) return;
         setForm(restoredForm);
+        const restoredRelight = normalizeRelightConfig(
+          entry.params && typeof entry.params === "object"
+            ? (entry.params as { relightConfig?: unknown }).relightConfig
+            : undefined
+        );
+        if (restoredRelight) {
+          setRelightLights(restoredRelight.lights);
+          setSelectedRelightId(restoredRelight.lights[0]?.id ?? null);
+          setRelightStatus("idle");
+        }
         pushToast("success", "已回填历史配置与生成引擎");
       });
     historyRestoreQueueRef.current = restore;
@@ -813,10 +860,49 @@ export const useGenerationController = (
     );
   }, [engineToken, startPolling]);
 
+  const selectRelightLight = useCallback((id: string) => {
+    setSelectedRelightId(id);
+  }, []);
+
+  const addRelightLight = useCallback(() => {
+    if (relightLights.length >= 8) return;
+    const id = `light-${Date.now()}-${Math.floor(Math.random() * 1e4)}`;
+    const next = normalizeRelightLight({
+      id,
+      type: "softbox",
+      role: "fill",
+      x: 0.5,
+      y: 0.5,
+      direction: 90,
+      intensity: 0.5,
+      temperature: 5600
+    });
+    setRelightLights((current) => current.length >= 8 ? current : [...current, next]);
+    setSelectedRelightId(id);
+  }, [relightLights.length]);
+
+  const removeRelightLight = useCallback((id: string) => {
+    const next = relightLights.filter((light) => light.id !== id);
+    setRelightLights(next);
+    if (selectedRelightId === id) setSelectedRelightId(next[0]?.id ?? null);
+  }, [relightLights, selectedRelightId]);
+
+  const updateRelightLight = useCallback((id: string, patch: Partial<RelightLight>) => {
+    setRelightLights((current) => current.map((light) =>
+      light.id === id ? normalizeRelightLight({ ...light, ...patch, id: light.id }) : light
+    ));
+  }, []);
+
   const stopGeneration = useCallback(() => {
     const activeRun = runGateRef.current.current;
     if (!activeRun) return;
     runGateRef.current.stop();
+    if (activeRun.taskId) clearPSLockQueue(activeRun.taskId);
+    if (activeRun.kind === "relight") {
+      relightAbortRef.current?.abort();
+      relightAbortRef.current = null;
+      setRelightStatus("idle");
+    }
     engine.cancelAll();
     stopPolling(engineToken);
     if (activeRun.kind === "batch" && activeRun.taskId) {
@@ -955,6 +1041,105 @@ export const useGenerationController = (
       });
     }
   }, [commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pollProgress, pushToast, recordHistory, settings, stopPolling]);
+
+  const runRelight = useCallback(async () => {
+    if (runGateRef.current.current) return;
+    const requestToken = engineToken;
+    const requestEngine = requestToken.engine;
+    const taskId = generateId();
+    const { token: runToken } = runGateRef.current.begin("relight", taskId);
+    const abortController = new AbortController();
+    relightAbortRef.current = abortController;
+    const lightsSnapshot = relightLights.map((light) => ({ ...light }));
+    const promptSnapshot = form.positivePrompt;
+    const isRunCurrent = () =>
+      isEngineCurrent(requestToken) &&
+      runGateRef.current.isCurrent(runToken) &&
+      !abortController.signal.aborted;
+    setStatus("running");
+    setError(null);
+    setRelightStatus("preparing");
+    setProgress(0);
+    setProgressPreview(null);
+    setProgressText("正在读取画面");
+    dismissToast();
+    let photoshopCommitted = false;
+    try {
+      const result = await executeRelightWorkflow(
+        requestEngine,
+        {
+          lights: lightsSnapshot,
+          prompt: promptSnapshot,
+          taskId,
+          timeoutMs: Math.max(
+            5_000,
+            Math.round(settings.timeoutMaxSeconds * settings.timeoutMultiplier * 1_000)
+          ),
+          signal: abortController.signal,
+          isCurrent: isRunCurrent,
+          onPhase: (phase) => {
+            if (!isRunCurrent()) return;
+            setRelightStatus(phase);
+            setProgressText(
+              phase === "preparing"
+                ? "正在读取画面"
+                : phase === "generating"
+                  ? "闭源引擎正在重新打光"
+                  : "正在非破坏回贴"
+            );
+          }
+        },
+        RELIGHT_PHOTOSHOP_ADAPTER
+      );
+      if (!isRunCurrent()) return;
+      photoshopCommitted = true;
+      runGateRef.current.complete(runToken);
+      if (relightAbortRef.current === abortController) relightAbortRef.current = null;
+      const resultDataUrl = result.image.startsWith("data:") ? result.image : toDataUrl(result.image);
+      setLastImages([resultDataUrl]);
+      setRelightStatus("success");
+      setStatus("success");
+      setProgress(0);
+      setProgressPreview(null);
+      setProgressText(null);
+      pushToast("success", "可视化打光完成");
+      relightHistoryTailCountRef.current += 1;
+      try {
+        await recordHistory({
+          provider: "gemini",
+          prompt: result.prompt,
+          params: {
+            ...form,
+            positivePrompt: promptSnapshot,
+            relightConfig: { lights: lightsSnapshot }
+          },
+          resultDataUrl
+        });
+      } finally {
+        relightHistoryTailCountRef.current -= 1;
+      }
+    } catch (caught) {
+      if (photoshopCommitted || !isRunCurrent()) return;
+      const message = formatGenerationError(caught, "可视化打光失败");
+      setRelightStatus("error");
+      setStatus("error");
+      setError(message);
+      pushToast("error", message);
+    } finally {
+      if (!photoshopCommitted) {
+        const runIsCurrent = runGateRef.current.isCurrent(runToken);
+        if (relightAbortRef.current === abortController) relightAbortRef.current = null;
+        if (runIsCurrent) {
+          runGateRef.current.complete(runToken);
+          commitIfCurrent(requestToken, () => {
+            setProgress(0);
+            setProgressPreview(null);
+            setProgressText(null);
+          });
+        }
+      }
+    }
+  }, [commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pushToast, recordHistory, relightLights, settings]);
 
   const addToBatch = useCallback(async () => {
     const taskId = generateId();
@@ -1292,6 +1477,14 @@ export const useGenerationController = (
     refreshOptions,
     runGeneration,
     stopGeneration,
+    relightLights,
+    selectedRelightId,
+    relightStatus,
+    selectRelightLight,
+    addRelightLight,
+    removeRelightLight,
+    updateRelightLight,
+    runRelight,
     history,
     historyLoading,
     historyError,

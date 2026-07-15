@@ -28,6 +28,14 @@ export interface MoveLayerOptions extends PhotoshopOperationOptions {
   layerId: number;
 }
 
+export interface RelightSource {
+  dataUrl: string;
+  documentId: number;
+  documentWidth: number;
+  documentHeight: number;
+  selectionBounds: SelectionBounds | null;
+}
+
 const DEFAULT_MODAL_OPTIONS = { commandName: "PXDUI" };
 
 const getPhotoshop = () => bridge.photoshop;
@@ -49,10 +57,15 @@ const executeAsModalUnlocked = <T>(
 
 const runTransaction = <T>(
   operation: () => Promise<T>,
-  options: PhotoshopOperationOptions = {}
+  options: PhotoshopOperationOptions = {},
+  onLateSettlement?: (settlement:
+    | { status: "fulfilled"; value: T }
+    | { status: "rejected"; reason: unknown }
+  ) => Promise<void> | void
 ): Promise<T> => runPSExclusive(operation, {
   taskId: options.taskId,
-  timeoutMs: options.timeoutMs
+  timeoutMs: options.timeoutMs,
+  onLateSettlement
 });
 
 const toBounds = (bounds: any): SelectionBounds => ({
@@ -818,3 +831,406 @@ export const switchToDocument = (
   docId: number,
   options: PhotoshopOperationOptions = {}
 ): Promise<void> => runTransaction(() => switchToDocumentUnlocked(docId), options);
+
+const pixelValue = (value: unknown) => {
+  if (typeof value === "number") return value;
+  if (value && typeof value === "object") {
+    const candidate = value as { value?: unknown; _value?: unknown; as?: (unit: string) => number };
+    if (typeof candidate.as === "function") return Number(candidate.as("px"));
+    return Number(candidate.value ?? candidate._value);
+  }
+  return Number(value);
+};
+
+const relightSelectionDescriptor = (bounds: SelectionBounds | null) => ({
+  _obj: "set",
+  _target: [{ _ref: "channel", _property: "selection" }],
+  to: bounds
+    ? selectionToRectangle(bounds)
+    : { _enum: "ordinal", _value: "none" }
+});
+
+const selectionBoundsEqual = (left: SelectionBounds, right: SelectionBounds) =>
+  left.left === right.left &&
+  left.top === right.top &&
+  left.right === right.right &&
+  left.bottom === right.bottom;
+
+const activeLayerIdUnlocked = () => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const layerId = Number(
+    photoshop.app.activeDocument?.activeLayers?.[0]?.id ??
+    photoshop.app.activeDocument?.activeLayer?.id
+  );
+  return Number.isInteger(layerId) && layerId > 0 ? layerId : 0;
+};
+
+const relightErrorMessage = (error: unknown, fallback: string) =>
+  error instanceof Error ? error.message : fallback;
+
+const appendRelightCleanupError = (error: unknown, label: string, cleanupError: unknown) =>
+  new Error(
+    `${relightErrorMessage(error, "可视化打光贴回失败")}；${label}：` +
+    relightErrorMessage(cleanupError, "未知错误")
+  );
+
+const deleteLayerUnlocked = async (layerId: number) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  await executeAsModalUnlocked(photoshop, async () => {
+    await photoshop.app.batchPlay([{
+      _obj: "delete",
+      _target: [{ _ref: "layer", _id: layerId }]
+    }], {});
+  }, { commandName: "删除 PXD 打光图层" });
+};
+
+export const deleteLayer = (
+  layerId: number,
+  options: PhotoshopOperationOptions = {}
+) => runTransaction(() => deleteLayerUnlocked(layerId), options);
+
+const setRelightSelectionUnlocked = async (bounds: SelectionBounds | null) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  await executeAsModalUnlocked(photoshop, async () => {
+    await photoshop.app.batchPlay([relightSelectionDescriptor(bounds)], {});
+  }, { commandName: "恢复 PXD 打光选区" });
+};
+
+const validateRelightSourceUnlocked = async (source: RelightSource) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const document = photoshop.app.activeDocument;
+  if (Number(document?.id) !== source.documentId) {
+    throw new Error("等待重新打光期间活动文档已切换，请重新发起");
+  }
+  const width = Math.round(pixelValue(document?.width));
+  const height = Math.round(pixelValue(document?.height));
+  if (width !== source.documentWidth || height !== source.documentHeight) {
+    throw new Error("等待重新打光期间画布尺寸已变化，请重新发起");
+  }
+};
+
+export const validateRelightSource = (
+  source: RelightSource,
+  options: PhotoshopOperationOptions = {}
+) => runTransaction(() => validateRelightSourceUnlocked(source), options);
+
+const restoreRelightContextUnlocked = async (source: RelightSource) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  if (Number(photoshop.app.activeDocument?.id) !== source.documentId) {
+    await switchToDocumentUnlocked(source.documentId);
+  }
+  const currentBounds = photoshop.app.activeDocument?.selection?.bounds
+    ? toBounds(photoshop.app.activeDocument.selection.bounds)
+    : null;
+  const matches = source.selectionBounds
+    ? currentBounds !== null && selectionBoundsEqual(currentBounds, source.selectionBounds)
+    : currentBounds === null;
+  if (!matches) await setRelightSelectionUnlocked(source.selectionBounds);
+};
+
+export const restoreRelightContext = (
+  source: RelightSource,
+  options: PhotoshopOperationOptions = {}
+) => runTransaction(() => restoreRelightContextUnlocked(source), options);
+
+const captureDocumentPixelsUnlocked = async (
+  documentId: number,
+  width: number,
+  height: number
+) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  return await executeAsModalUnlocked(photoshop, async () => {
+    const pixels = await photoshop.imaging.getPixels({
+      documentID: documentId,
+      sourceBounds: { left: 0, top: 0, right: width, bottom: height },
+      applyAlpha: true,
+      componentSize: 8,
+      colorProfile: "sRGB IEC61966-2.1"
+    });
+    try {
+      return await photoshop.imaging.encodeImageData({ imageData: pixels.imageData, base64: true });
+    } finally {
+      pixels.imageData.dispose?.();
+    }
+  }, { commandName: "截取 PXD 打光源图" });
+};
+
+const captureSelectionPixelsStrictUnlocked = async (
+  documentId: number,
+  bounds: SelectionBounds
+): Promise<SelectionPixels> => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  return await executeAsModalUnlocked(photoshop, async () => {
+    const pixels = await photoshop.imaging.getPixels({
+      documentID: documentId,
+      sourceBounds: bounds,
+      applyAlpha: true,
+      componentSize: 8,
+      colorProfile: "sRGB IEC61966-2.1"
+    });
+    try {
+      const encoded = await photoshop.imaging.encodeImageData({ imageData: pixels.imageData, base64: true });
+      return {
+        dataUrl: `data:image/png;base64,${encoded}`,
+        width: bounds.right - bounds.left,
+        height: bounds.bottom - bounds.top,
+        selectionBounds: bounds
+      };
+    } finally {
+      pixels.imageData.dispose?.();
+    }
+  }, { commandName: "截取 PXD 打光选区" });
+};
+
+const captureRelightSourceUnlocked = async (): Promise<RelightSource> => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const document = photoshop.app.activeDocument;
+  const documentId = Number(document?.id);
+  const documentWidth = Math.round(pixelValue(document?.width));
+  const documentHeight = Math.round(pixelValue(document?.height));
+  if (!Number.isInteger(documentId) || documentId <= 0 || documentWidth <= 0 || documentHeight <= 0) {
+    throw new Error("没有可用于重新打光的 Photoshop 文档");
+  }
+  const selectionBounds = document?.selection?.bounds ? toBounds(document.selection.bounds) : null;
+  const selection = selectionBounds
+    ? await captureSelectionPixelsStrictUnlocked(documentId, selectionBounds)
+    : null;
+  const encoded = selection
+    ? selection.dataUrl
+    : `data:image/png;base64,${await captureDocumentPixelsUnlocked(
+        documentId,
+        documentWidth,
+        documentHeight
+      )}`;
+  return {
+    dataUrl: encoded,
+    documentId,
+    documentWidth,
+    documentHeight,
+    selectionBounds: selection?.selectionBounds ?? null
+  };
+};
+
+export const captureRelightSource = (
+  options: PhotoshopOperationOptions = {}
+): Promise<RelightSource> => runTransaction(captureRelightSourceUnlocked, options);
+
+const placeRelitResultUnlocked = async (
+  source: RelightSource,
+  dataUrl: string,
+  isCurrent: () => boolean
+) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  await validateRelightSourceUnlocked(source);
+  const base64 = dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
+  const token = await createTempTokenFromBase64(base64, "pxd-relit.png");
+  await validateRelightSourceUnlocked(source);
+  const previousLayerId = activeLayerIdUnlocked();
+  const target = source.selectionBounds ?? {
+    left: 0,
+    top: 0,
+    right: source.documentWidth,
+    bottom: source.documentHeight
+  };
+  let layerId = 0;
+  try {
+    await photoshop.core.executeAsModal(async (executionContext: any) => {
+      const suspension = await executionContext.hostControl.suspendHistory({
+        documentID: source.documentId,
+        name: "AI 可视化打光"
+      });
+      let operationError: unknown;
+      try {
+        if (!isCurrent()) throw new Error("RELIGHT_CANCELLED");
+        const placed = await photoshop.app.batchPlay([{
+          ID: source.documentId,
+          _obj: "placeEvent",
+          freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
+          null: { _kind: "local", _path: token },
+          offset: {
+            _obj: "offset",
+            horizontal: { _unit: "pixelsUnit", _value: 0 },
+            vertical: { _unit: "pixelsUnit", _value: 0 }
+          }
+        }], {});
+        const directId = Number(placed?.[0]?.layerID ?? placed?.[0]?.layerId);
+        if (Number.isInteger(directId) && directId > 0) layerId = directId;
+        const activeId = activeLayerIdUnlocked();
+        if (activeId && activeId !== previousLayerId) layerId = activeId;
+        const info = await photoshop.app.batchPlay([{
+          _obj: "get",
+          _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }]
+        }], { synchronousExecution: true });
+        const layer = info?.[0] ?? {};
+        const reportedId = Number(layer.layerID ?? layer.layerId);
+        if (Number.isInteger(reportedId) && reportedId > 0 && reportedId !== previousLayerId) {
+          layerId = reportedId;
+        }
+        if (!layerId || layerId === previousLayerId) throw new Error("Photoshop 未返回重新打光图层 ID");
+        const bounds = layer.bounds ?? {};
+        const left = pixelValue(bounds.left);
+        const top = pixelValue(bounds.top);
+        const right = pixelValue(bounds.right);
+        const bottom = pixelValue(bounds.bottom);
+        if (![left, top, right, bottom].every(Number.isFinite) || right <= left || bottom <= top) {
+          throw new Error("Photoshop 未返回有效的重新打光图层范围");
+        }
+        const targetCenterX = (target.left + target.right) / 2;
+        const targetCenterY = (target.top + target.bottom) / 2;
+        const commands: any[] = [{
+          _obj: "transform",
+          _target: [{ _ref: "layer", _id: layerId }],
+          freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
+          offset: {
+            _obj: "offset",
+            horizontal: { _unit: "pixelsUnit", _value: targetCenterX - (left + right) / 2 },
+            vertical: { _unit: "pixelsUnit", _value: targetCenterY - (top + bottom) / 2 }
+          },
+          width: { _unit: "percentUnit", _value: (target.right - target.left) / (right - left) * 100 },
+          height: { _unit: "percentUnit", _value: (target.bottom - target.top) / (bottom - top) * 100 }
+        }];
+        if (source.selectionBounds) {
+          commands.push(
+            relightSelectionDescriptor(source.selectionBounds),
+            {
+              _obj: "make",
+              new: { _class: "channel" },
+              at: { _ref: "channel", _enum: "channel", _value: "mask" },
+              using: { _enum: "userMaskEnabled", _value: "revealSelection" }
+            }
+          );
+        }
+        commands.push(
+          {
+            _obj: "set",
+            _target: [{ _ref: "layer", _id: layerId }],
+            to: { _obj: "layer", name: "AI 可视化打光" }
+          },
+          {
+            _obj: "move",
+            _target: [{ _ref: "layer", _id: layerId }],
+            to: { _ref: "layer", _enum: "ordinal", _value: "front" }
+          },
+          relightSelectionDescriptor(source.selectionBounds)
+        );
+        await photoshop.app.batchPlay(commands, {});
+        if (!isCurrent()) throw new Error("RELIGHT_CANCELLED");
+      } catch (error) {
+        operationError = error;
+        if (!layerId) {
+          const activeId = activeLayerIdUnlocked();
+          if (activeId && activeId !== previousLayerId) layerId = activeId;
+        }
+        if (layerId) {
+          try {
+            await photoshop.app.batchPlay([{
+              _obj: "delete",
+              _target: [{ _ref: "layer", _id: layerId }]
+            }], {});
+            layerId = 0;
+          } catch (cleanupError) {
+            operationError = appendRelightCleanupError(operationError, "自动清理失败", cleanupError);
+          }
+        }
+        await photoshop.app.batchPlay([relightSelectionDescriptor(source.selectionBounds)], {}).catch((cleanupError: unknown) => {
+          operationError = appendRelightCleanupError(operationError, "选区恢复失败", cleanupError);
+        });
+      } finally {
+        try {
+          await executionContext.hostControl.resumeHistory(suspension);
+        } catch (resumeError) {
+          operationError = operationError
+            ? appendRelightCleanupError(operationError, "历史记录恢复失败", resumeError)
+            : resumeError;
+        }
+      }
+      if (operationError) throw operationError;
+    }, { commandName: "AI 可视化打光贴回" });
+  } catch (error) {
+    let cleanupError: unknown;
+    if (!layerId) {
+      const activeId = activeLayerIdUnlocked();
+      if (activeId && activeId !== previousLayerId) layerId = activeId;
+    }
+    if (layerId) {
+      try {
+        await deleteLayerUnlocked(layerId);
+        layerId = 0;
+      } catch (caught) {
+        cleanupError = caught;
+      }
+    }
+    try {
+      await restoreRelightContextUnlocked(source);
+    } catch (caught) {
+      cleanupError = cleanupError
+        ? appendRelightCleanupError(cleanupError, "上下文恢复失败", caught)
+        : caught;
+    }
+    if (cleanupError) {
+      const combined = appendRelightCleanupError(error, "自动清理失败", cleanupError) as Error & {
+        placedLayerId?: number;
+      };
+      if (layerId > 0) combined.placedLayerId = layerId;
+      throw combined;
+    }
+    throw error;
+  }
+  return { layerId };
+};
+
+const cleanupLateRelitResultUnlocked = async (source: RelightSource, layerId: number) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  if (Number(photoshop.app.activeDocument?.id) !== source.documentId) {
+    await switchToDocumentUnlocked(source.documentId);
+  }
+  if (layerId > 0) await deleteLayerUnlocked(layerId);
+  await restoreRelightContextUnlocked(source);
+};
+
+const rollbackRelitResultUnlocked = async (source: RelightSource, layerId: number) => {
+  let cleanupError: unknown;
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  try {
+    if (Number(photoshop.app.activeDocument?.id) !== source.documentId) {
+      await switchToDocumentUnlocked(source.documentId);
+    }
+    if (layerId > 0) await deleteLayerUnlocked(layerId);
+  } catch (error) {
+    cleanupError = error;
+  }
+  try {
+    await restoreRelightContextUnlocked(source);
+  } catch (error) {
+    cleanupError = cleanupError
+      ? appendRelightCleanupError(cleanupError, "上下文恢复失败", error)
+      : error;
+  }
+  if (cleanupError) throw cleanupError;
+};
+
+export const rollbackRelitResult = (
+  source: RelightSource,
+  layerId: number,
+  options: PhotoshopOperationOptions = {}
+) => runTransaction(() => rollbackRelitResultUnlocked(source, layerId), options);
+
+export const placeRelitResult = (
+  source: RelightSource,
+  dataUrl: string,
+  isCurrent: () => boolean,
+  options: PhotoshopOperationOptions = {}
+) => runTransaction(
+  () => placeRelitResultUnlocked(source, dataUrl, isCurrent),
+  options,
+  async (settlement) => {
+    const layerId = settlement.status === "fulfilled"
+      ? settlement.value.layerId
+      : Number(
+          settlement.reason && typeof settlement.reason === "object"
+            ? (settlement.reason as { placedLayerId?: unknown }).placedLayerId
+            : 0
+        );
+    await cleanupLateRelitResultUnlocked(source, Number.isInteger(layerId) ? layerId : 0);
+  }
+);

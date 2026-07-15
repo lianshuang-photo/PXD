@@ -26,6 +26,11 @@ const boundary = vi.hoisted(() => ({
     moveActiveLayerToTop: vi.fn(),
     onBatchAddLayer: vi.fn(),
     placeImageIntoSelection: vi.fn(),
+    captureRelightSource: vi.fn(),
+    validateRelightSource: vi.fn(),
+    placeRelitResult: vi.fn(),
+    rollbackRelitResult: vi.fn(),
+    restoreRelightContext: vi.fn(),
     setSelectionBounds: vi.fn(),
     switchToDocument: vi.fn()
   },
@@ -191,6 +196,17 @@ beforeEach(() => {
   boundary.photoshop.getSelectionPixels.mockResolvedValue(selection(""));
   boundary.photoshop.hasActiveSelection.mockResolvedValue(true);
   boundary.photoshop.placeImageIntoSelection.mockResolvedValue({ layerID: 101 });
+  boundary.photoshop.captureRelightSource.mockResolvedValue({
+    dataUrl: "data:image/png;base64,RELIGHT_SOURCE",
+    documentId: 7,
+    documentWidth: 640,
+    documentHeight: 480,
+    selectionBounds: null
+  });
+  boundary.photoshop.validateRelightSource.mockResolvedValue(undefined);
+  boundary.photoshop.placeRelitResult.mockResolvedValue({ layerId: 303 });
+  boundary.photoshop.rollbackRelitResult.mockResolvedValue(undefined);
+  boundary.photoshop.restoreRelightContext.mockResolvedValue(undefined);
   boundary.photoshop.groupLayers.mockResolvedValue(undefined);
   boundary.photoshop.moveActiveLayerToTop.mockResolvedValue(undefined);
   boundary.photoshop.onBatchAddLayer.mockResolvedValue(null);
@@ -392,6 +408,65 @@ describe("useGenerationController generation history integration", () => {
       expect(rendered.getController().toast).toMatchObject({ type: "warning" });
     }
   );
+});
+
+describe("useGenerationController relight integration", () => {
+  const geminiSettings: AppSettings = {
+    ...DEFAULT_SETTINGS,
+    imageProvider: "gemini",
+    offlineMode: false
+  };
+
+  it("runs Gemini relighting, places non-destructively, and records the light plan", async () => {
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    act(() => rendered.getController().setFormValue("positivePrompt", "gentle portrait light"));
+
+    await act(async () => rendered.getController().runRelight());
+
+    expect(rendered.getController().status).toBe("success");
+    expect(rendered.getController().relightStatus).toBe("success");
+    expect(boundary.geminiClient.editImage).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: expect.stringContaining("Additional direction: gentle portrait light"),
+      baseImageBase64: "RELIGHT_SOURCE",
+      taskId: expect.any(String)
+    }));
+    expect(boundary.photoshop.placeRelitResult).toHaveBeenCalledWith(
+      expect.objectContaining({ documentId: 7 }),
+      "data:image/png;base64,GEMINI_RESULT",
+      expect.any(Function),
+      { taskId: expect.any(String) }
+    );
+    expect(rendered.getController().history[0].params.relightConfig?.lights.map((light) => light.role))
+      .toEqual(["key", "rim"]);
+  });
+
+  it("blocks Forge relighting before Photoshop capture", async () => {
+    const rendered = trackedRender();
+    await flush();
+    await act(async () => rendered.getController().runRelight());
+    expect(rendered.getController().status).toBe("error");
+    expect(rendered.getController().relightStatus).toBe("error");
+    expect(boundary.photoshop.captureRelightSource).not.toHaveBeenCalled();
+  });
+
+  it("stops an in-flight relight before Photoshop placement", async () => {
+    let settle!: (value: string) => void;
+    boundary.geminiClient.editImage.mockReturnValueOnce(new Promise<string>((resolve) => { settle = resolve; }));
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    let run!: Promise<void>;
+    act(() => { run = rendered.getController().runRelight(); });
+    await vi.waitFor(() => expect(boundary.geminiClient.editImage).toHaveBeenCalled());
+    act(() => rendered.getController().stopGeneration());
+    await act(async () => {
+      settle("LATE_RESULT");
+      await run;
+    });
+    expect(boundary.photoshop.placeRelitResult).not.toHaveBeenCalled();
+    expect(rendered.getController().status).toBe("idle");
+    expect(rendered.getController().relightStatus).toBe("idle");
+  });
 });
 
 describe("useGenerationController history provider restoration", () => {

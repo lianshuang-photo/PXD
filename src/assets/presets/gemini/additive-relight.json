@@ -1,0 +1,7 @@
+{
+  "kind": "gemini",
+  "title": "叠加式可视化打光",
+  "category": "智能修图",
+  "subCategory": "光影",
+  "content": "Use additive relighting only. Preserve identity, pose, composition, materials, global HSL, gamma and white balance. Respect scene depth and occlusion. Do not generate visible fixtures or annotation marks."
+}
