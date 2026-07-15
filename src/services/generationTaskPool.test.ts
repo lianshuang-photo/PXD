@@ -220,6 +220,66 @@ describe("GenerationTaskPool", () => {
     expect(pool.activeCount).toBe(0);
   });
 
+  it("does not revive a cancelled awaiting-return task when return is requested immediately", async () => {
+    const finishCleanup = deferred<void>();
+    const cleanup = vi.fn().mockImplementationOnce(() => finishCleanup.promise);
+    const returnImages = vi.fn().mockResolvedValue(undefined);
+    const run = vi.fn().mockResolvedValue(["IMAGE"]);
+    const completion = await pool.enqueue(task("cancel-return", run, {
+      autoReturn: false,
+      cleanup,
+      returnImages
+    }));
+    expect(completion.status).toBe("awaiting-return");
+
+    const cancellation = pool.cancel("cancel-return");
+    const returning = pool.returnTask("cancel-return");
+    expect(pool.getSnapshot()["cancel-return"].status).toBe("cancelling");
+    finishCleanup.resolve();
+
+    const [cancelled, returned] = await Promise.all([cancellation, returning]);
+    expect(cancelled?.status).toBe("cancelled");
+    expect(returned?.status).toBe("cancelled");
+    expect(pool.getSnapshot()["cancel-return"].status).toBe("cancelled");
+    expect(returnImages).not.toHaveBeenCalled();
+
+    const retried = await pool.retry("cancel-return");
+    expect(retried?.status).toBe("success");
+    expect(returnImages).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("does not return images after cancellation cleanup fails", async () => {
+    const finishCleanup = deferred<void>();
+    const cleanup = vi.fn()
+      .mockImplementationOnce(() => finishCleanup.promise)
+      .mockResolvedValueOnce(undefined);
+    const returnImages = vi.fn().mockResolvedValue(undefined);
+    await pool.enqueue(task("cancel-return-dirty", async () => ["IMAGE"], {
+      autoReturn: false,
+      cleanup,
+      returnImages
+    }));
+
+    const cancellation = pool.cancel("cancel-return-dirty");
+    const returning = pool.returnTask("cancel-return-dirty");
+    finishCleanup.reject(new Error("cleanup failed"));
+
+    const [cancelled, returned] = await Promise.all([cancellation, returning]);
+    expect(cancelled).toMatchObject({
+      status: "error",
+      cleanupPending: true,
+      error: expect.stringContaining("cleanup failed")
+    });
+    expect(returned).toMatchObject({ status: "error", cleanupPending: true });
+    expect(returnImages).not.toHaveBeenCalled();
+    expect((await pool.retry("cancel-return-dirty"))?.status).toBe("error");
+
+    expect((await pool.cleanup("cancel-return-dirty"))?.cleanupPending).toBe(false);
+    expect((await pool.retry("cancel-return-dirty"))?.status).toBe("success");
+    expect(returnImages).toHaveBeenCalledOnce();
+  });
+
   it("keeps a cancelled task dirty when a late rollback fails", async () => {
     const returnStarted = deferred<void>();
     const releaseReturn = deferred<void>();

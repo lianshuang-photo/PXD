@@ -299,12 +299,16 @@ export class GenerationTaskPool {
       record = this.records.get(id);
       if (!record || !record.snapshot.images?.length) return record?.snapshot ?? null;
     }
+    if (record.snapshot.status === "returning" && record.returnPromise) {
+      return await record.returnPromise;
+    }
+    if (record.snapshot.status !== "awaiting-return") return { ...record.snapshot };
     if (record.snapshot.cleanupPending) return { ...record.snapshot };
     if (record.returnPromise) {
-      if (record.snapshot.status === "returning") return await record.returnPromise;
       await record.returnPromise;
       record = this.records.get(id);
       if (!record || !record.snapshot.images?.length) return record?.snapshot ?? null;
+      if (record.snapshot.status !== "awaiting-return") return { ...record.snapshot };
       if (record.snapshot.cleanupPending) return { ...record.snapshot };
     }
     const generation = record.generation;
