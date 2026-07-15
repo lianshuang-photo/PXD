@@ -34,7 +34,11 @@ const boundary = vi.hoisted(() => ({
     readJsonFile: vi.fn(),
     writeJsonFile: vi.fn()
   },
-  thumbnailDecodeFails: false
+  thumbnailDecodeFails: false,
+  listPresetMetas: vi.fn(),
+  loadPresetFile: vi.fn(),
+  savePresetFile: vi.fn(),
+  deletePresetFile: vi.fn()
 }));
 
 vi.mock("../services/apiClient", async (importOriginal) => ({
@@ -50,10 +54,10 @@ vi.mock("../services/imageModelClient", async (importOriginal) => ({
 vi.mock("../services/photoshop", () => boundary.photoshop);
 
 vi.mock("../services/presets", () => ({
-  deletePresetFile: vi.fn(),
-  listPresetMetas: vi.fn().mockResolvedValue([]),
-  loadPresetFile: vi.fn(),
-  savePresetFile: vi.fn()
+  deletePresetFile: boundary.deletePresetFile,
+  listPresetMetas: boundary.listPresetMetas,
+  loadPresetFile: boundary.loadPresetFile,
+  savePresetFile: boundary.savePresetFile
 }));
 
 vi.mock("../services/translator", () => ({
@@ -65,6 +69,7 @@ vi.mock("../services/uxpBridge", () => ({
 }));
 
 import {
+  mapForgeDataToForm,
   useGenerationController,
   type GenerationControllerState,
   type GenerationForm
@@ -226,6 +231,20 @@ beforeEach(() => {
     setInterval,
     clearInterval
   });
+  boundary.listPresetMetas.mockResolvedValue([]);
+  boundary.loadPresetFile.mockResolvedValue(null);
+  boundary.savePresetFile.mockResolvedValue({
+    meta: {
+      name: "saved",
+      fileName: "saved.json",
+      createdAt: "",
+      kind: "forge",
+      isFactory: false
+    },
+    preset: { kind: "forge", title: "saved", data: {} },
+    version: 2
+  });
+  boundary.deletePresetFile.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -655,5 +674,228 @@ describe("useGenerationController history provider restoration", () => {
     ]);
     expect(rendered.getSettings().imageProvider).toBe("forge");
     expect(rendered.getController().form).toEqual(forge.params);
+  });
+});
+
+describe("useGenerationController preset schemas", () => {
+  it("maps only valid Forge fields onto complete defaults", () => {
+    const mapped = mapForgeDataToForm({
+      positivePrompt: "restored",
+      steps: 34,
+      cfgScale: Number.NaN,
+      tiling: true,
+      unknown: "ignored"
+    });
+
+    expect(mapped).toMatchObject({
+      positivePrompt: "restored",
+      steps: 34,
+      cfgScale: 7,
+      tiling: true,
+      resolution: 768
+    });
+    expect(mapped).not.toHaveProperty("unknown");
+  });
+
+  it("switches provider before applying a Gemini factory prompt", async () => {
+    boundary.loadPresetFile.mockResolvedValueOnce({
+      meta: {
+        name: "自然光",
+        fileName: "factory:natural.json",
+        createdAt: "",
+        kind: "gemini",
+        isFactory: true
+      },
+      preset: { kind: "gemini", title: "自然光", content: "natural relight" },
+      version: 2
+    });
+    const rendered = trackedRender();
+    await flush();
+
+    await act(async () => rendered.getController().applyPreset("factory:natural.json"));
+
+    expect(rendered.updateSettings).toHaveBeenCalledWith({ imageProvider: "gemini" });
+    expect(rendered.getController().form.positivePrompt).toBe("natural relight");
+    expect(rendered.getController().form.extraPrompt).toBe("");
+    expect(rendered.getController().selectedPreset).toBe("factory:natural.json");
+  });
+
+  it("keeps the form unchanged when the Gemini provider patch fails", async () => {
+    boundary.loadPresetFile.mockResolvedValueOnce({
+      meta: { name: "失败", fileName: "factory:failed.json", createdAt: "", kind: "gemini", isFactory: true },
+      preset: { kind: "gemini", title: "失败", content: "must not apply" },
+      version: 2
+    });
+    const rendered = trackedRender({
+      updateImpl: vi.fn().mockRejectedValue(new Error("settings write failed"))
+    });
+    await flush();
+    const before = rendered.getController().form;
+    let caught: unknown;
+
+    await act(async () => {
+      caught = await rendered.getController().applyPreset("factory:failed.json").catch((error) => error);
+    });
+
+    expect(caught).toBeInstanceOf(Error);
+    expect(rendered.getController().form).toBe(before);
+    expect(rendered.getController().selectedPreset).toBeNull();
+  });
+
+  it("switches from Gemini to Forge before restoring Forge fields", async () => {
+    boundary.loadPresetFile.mockResolvedValueOnce({
+      meta: { name: "重绘", fileName: "factory:redraw.json", createdAt: "", kind: "forge", isFactory: true },
+      preset: {
+        kind: "forge",
+        title: "重绘",
+        data: { positivePrompt: "forge prompt", steps: 31, restoreFaces: true }
+      },
+      version: 2
+    });
+    const rendered = trackedRender({
+      initialSettings: {
+        ...DEFAULT_SETTINGS,
+        imageProvider: "gemini",
+        offlineMode: false,
+        geminiApiKey: "key"
+      }
+    });
+    await flush();
+
+    await act(async () => rendered.getController().applyPreset("factory:redraw.json"));
+
+    expect(rendered.updateSettings).toHaveBeenCalledWith({ imageProvider: "forge" });
+    expect(rendered.getSettings().imageProvider).toBe("forge");
+    expect(rendered.getController().form).toMatchObject({
+      positivePrompt: "forge prompt",
+      steps: 31,
+      restoreFaces: true,
+      cfgScale: 7
+    });
+  });
+
+  it("serializes rapid preset applications so the latest provider and form win", async () => {
+    const geminiPreset = {
+      meta: { name: "Gemini", fileName: "factory:gemini.json", createdAt: "", kind: "gemini", isFactory: true },
+      preset: { kind: "gemini", title: "Gemini", content: "stale prompt" },
+      version: 2
+    } as const;
+    const forgePreset = {
+      meta: { name: "Forge", fileName: "factory:forge.json", createdAt: "", kind: "forge", isFactory: true },
+      preset: { kind: "forge", title: "Forge", data: { positivePrompt: "latest prompt", steps: 42 } },
+      version: 2
+    } as const;
+    boundary.loadPresetFile
+      .mockResolvedValueOnce(geminiPreset)
+      .mockResolvedValueOnce(forgePreset);
+    let releaseFirst!: () => void;
+    const firstPatch = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const updateImpl = vi.fn()
+      .mockImplementationOnce(() => firstPatch)
+      .mockResolvedValueOnce(undefined);
+    const rendered = trackedRender({ updateImpl });
+    await flush();
+
+    let first!: Promise<void>;
+    act(() => {
+      first = rendered.getController().applyPreset(geminiPreset.meta.fileName);
+    });
+    await flush();
+    let second!: Promise<void>;
+    act(() => {
+      second = rendered.getController().applyPreset(forgePreset.meta.fileName);
+    });
+    await act(async () => {
+      releaseFirst();
+      await Promise.all([first, second]);
+    });
+
+    expect(updateImpl.mock.calls).toEqual([
+      [{ imageProvider: "gemini" }],
+      [{ imageProvider: "forge" }]
+    ]);
+    expect(rendered.getSettings().imageProvider).toBe("forge");
+    expect(rendered.getController().form).toMatchObject({ positivePrompt: "latest prompt", steps: 42 });
+    expect(rendered.getController().selectedPreset).toBe(forgePreset.meta.fileName);
+  });
+
+  it("saves the current provider schema and rejects factory deletion", async () => {
+    const factoryMeta = {
+      name: "出厂",
+      fileName: "factory:readonly.json",
+      createdAt: "",
+      kind: "gemini" as const,
+      category: "智能修图",
+      isFactory: true
+    };
+    boundary.listPresetMetas.mockResolvedValue([factoryMeta]);
+    boundary.savePresetFile.mockResolvedValueOnce({
+      meta: { ...factoryMeta, name: "我的版本", fileName: "我的版本.json", isFactory: false },
+      preset: { kind: "gemini", title: "我的版本", content: "prompt\nextra" },
+      version: 2
+    });
+    const rendered = trackedRender({
+      initialSettings: {
+        ...DEFAULT_SETTINGS,
+        imageProvider: "gemini",
+        offlineMode: false,
+        geminiApiKey: "key"
+      }
+    });
+    await flush();
+    act(() => {
+      rendered.getController().setSelectedPreset(factoryMeta.fileName);
+      rendered.getController().setFormValue("positivePrompt", "prompt");
+      rendered.getController().setFormValue("extraPrompt", "extra");
+    });
+
+    await act(async () => rendered.getController().savePreset("我的版本"));
+    expect(boundary.savePresetFile).toHaveBeenCalledWith(
+      "我的版本",
+      expect.objectContaining({
+        kind: "gemini",
+        category: "智能修图",
+        content: "prompt\nextra"
+      })
+    );
+
+    act(() => rendered.getController().setSelectedPreset(factoryMeta.fileName));
+    let caught: unknown;
+    await act(async () => {
+      caught = await rendered.getController().deletePreset(factoryMeta.fileName).catch((error) => error);
+    });
+    expect(caught).toBeInstanceOf(Error);
+    expect(boundary.deletePresetFile).not.toHaveBeenCalled();
+  });
+
+  it("preserves the selected user file name when overwriting a custom title", async () => {
+    const userMeta = {
+      name: "自定义标题",
+      fileName: "legacy.json",
+      createdAt: "",
+      kind: "forge" as const,
+      category: "用户预设",
+      isFactory: false
+    };
+    boundary.listPresetMetas.mockResolvedValue([userMeta]);
+    boundary.savePresetFile.mockResolvedValueOnce({
+      meta: userMeta,
+      preset: { kind: "forge", title: userMeta.name, data: {} },
+      version: 2
+    });
+    const rendered = trackedRender();
+    await flush();
+    act(() => rendered.getController().setSelectedPreset(userMeta.fileName));
+
+    await act(async () => rendered.getController().savePreset(userMeta.name, userMeta.fileName));
+
+    expect(boundary.savePresetFile).toHaveBeenCalledWith(
+      userMeta.name,
+      expect.objectContaining({ kind: "forge", title: userMeta.name }),
+      { targetFileName: userMeta.fileName }
+    );
+    expect(rendered.getController().selectedPreset).toBe(userMeta.fileName);
   });
 });
