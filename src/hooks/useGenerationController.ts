@@ -42,6 +42,9 @@ import {
   listPresetMetas,
   loadPresetFile,
   savePresetFile,
+  type ForgePreset,
+  type GeminiPreset,
+  type PresetDefinition,
   type PresetMeta
 } from "../services/presets";
 import { LatestLoadGate } from "../services/loadGate";
@@ -101,10 +104,6 @@ export interface BatchItem {
   };
 }
 
-interface PresetPayload {
-  form: GenerationForm;
-}
-
 const EMPTY_OPTIONS: SdOptions = {
   models: [],
   vaes: [],
@@ -150,18 +149,22 @@ const DEFAULT_FORM: GenerationForm = {
   tiling: false
 };
 
-const hydrateHistoryForm = (params: unknown, fallbackPrompt: string): GenerationForm => {
+export const mapForgeDataToForm = (data: unknown): GenerationForm => {
   const restored = { ...DEFAULT_FORM };
-  if (params && typeof params === "object" && !Array.isArray(params)) {
-    const source = params as Record<string, unknown>;
-    for (const key of Object.keys(DEFAULT_FORM) as Array<keyof GenerationForm>) {
-      const candidate = source[key];
-      const defaultValue = DEFAULT_FORM[key];
-      if (typeof candidate !== typeof defaultValue) continue;
-      if (typeof candidate === "number" && !Number.isFinite(candidate)) continue;
-      (restored as unknown as Record<string, unknown>)[key] = candidate;
-    }
+  if (!data || typeof data !== "object" || Array.isArray(data)) return restored;
+  const source = data as Record<string, unknown>;
+  for (const key of Object.keys(DEFAULT_FORM) as Array<keyof GenerationForm>) {
+    const candidate = source[key];
+    const defaultValue = DEFAULT_FORM[key];
+    if (typeof candidate !== typeof defaultValue) continue;
+    if (typeof candidate === "number" && !Number.isFinite(candidate)) continue;
+    (restored as unknown as Record<string, unknown>)[key] = candidate;
   }
+  return restored;
+};
+
+const hydrateHistoryForm = (params: unknown, fallbackPrompt: string): GenerationForm => {
+  const restored = mapForgeDataToForm(params);
   if (!restored.positivePrompt && fallbackPrompt) restored.positivePrompt = fallbackPrompt;
   return restored;
 };
@@ -190,7 +193,6 @@ const normalizeFormPrompts = (form: GenerationForm): GenerationForm => ({
   negativePrompt: normalizePromptParams(form.negativePrompt),
   extraPrompt: normalizePromptParams(form.extraPrompt)
 });
-
 const toDataUrl = (base64: string) => `data:image/png;base64,${base64}`;
 const dataUrlToBase64 = (dataUrl: string) => dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
 
@@ -401,7 +403,7 @@ export interface GenerationControllerState {
   selectedPreset: string | null;
   loadPresets: () => Promise<void>;
   applyPreset: (fileName: string) => Promise<void>;
-  savePreset: (name: string) => Promise<void>;
+  savePreset: (name: string, targetFileName?: string) => Promise<void>;
   deletePreset: (fileName: string) => Promise<void>;
   setSelectedPreset: (name: string | null) => void;
   pushToast: (type: ToastType, message: string) => void;
@@ -464,6 +466,8 @@ export const useGenerationController = (
   const settingsRef = useRef(settings);
   const historyRestoreGenerationRef = useRef(0);
   const historyRestoreQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const presetApplyGenerationRef = useRef(0);
+  const presetApplyQueueRef = useRef<Promise<void>>(Promise.resolve());
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
@@ -1166,47 +1170,108 @@ export const useGenerationController = (
 
   const applyPreset = useCallback(
     async (fileName: string) => {
-      const file = await loadPresetFile<PresetPayload>(fileName);
-      if (!file?.data?.form) {
+      const generation = presetApplyGenerationRef.current + 1;
+      presetApplyGenerationRef.current = generation;
+      let file;
+      try {
+        file = await loadPresetFile<Partial<GenerationForm>>(fileName);
+      } catch (caught) {
+        if (generation !== presetApplyGenerationRef.current) return;
+        throw caught;
+      }
+      if (generation !== presetApplyGenerationRef.current) return;
+      if (!file) {
         throw new Error("预设文件格式不正确");
       }
-      setForm((prev) => {
-        const merged = {
-          ...prev,
-          ...DEFAULT_FORM,
-          ...file.data.form
-        } as GenerationForm & { presetShortcut?: unknown };
-        delete merged.presetShortcut;
-        return normalizeFormPrompts(merged);
-      });
-      setSelectedPreset(file.meta.name);
-      pushToast("success", `已应用预设「${file.meta.name}」`);
+      const apply = presetApplyQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          if (generation !== presetApplyGenerationRef.current) return;
+          const targetProvider = file.preset.kind;
+          if (settingsRef.current.imageProvider !== targetProvider) {
+            if (settingsActions.settingsLoading) throw new Error("设置仍在加载，请稍后应用预设");
+            if (!settingsActions.updateSettings) throw new Error(`当前界面无法切换到 ${targetProvider === "gemini" ? "Gemini" : "Forge"} 引擎`);
+            await settingsActions.updateSettings({ imageProvider: targetProvider });
+            settingsRef.current = { ...settingsRef.current, imageProvider: targetProvider };
+          }
+          if (generation !== presetApplyGenerationRef.current) return;
+          if (file.preset.kind === "gemini") {
+            const content = normalizePromptParams(file.preset.content);
+            setForm((current) => ({
+              ...current,
+              positivePrompt: content,
+              extraPrompt: ""
+            }));
+          } else {
+            setForm(normalizeFormPrompts(mapForgeDataToForm(file.preset.data)));
+          }
+          setSelectedPreset(file.meta.fileName);
+          pushToast("success", `已应用预设「${file.meta.name}」`);
+        });
+      presetApplyQueueRef.current = apply.then(
+        () => undefined,
+        () => undefined
+      );
+      try {
+        await apply;
+      } catch (caught) {
+        if (generation !== presetApplyGenerationRef.current) return;
+        throw caught;
+      }
     },
-    [pushToast]
+    [pushToast, settingsActions.settingsLoading, settingsActions.updateSettings]
   );
 
   const savePreset = useCallback(
-    async (name: string) => {
+    async (name: string, targetFileName?: string) => {
       presetsLoadGateRef.current.assertReady("预设仍在加载，请稍后重试");
-      await savePresetFile<PresetPayload>(name, { form: normalizeFormPrompts(form) });
-      setSelectedPreset(name);
+      const sourceMeta = presets.find((preset) => preset.fileName === selectedPreset);
+      const targetMeta = targetFileName
+        ? presets.find((preset) => preset.fileName === targetFileName)
+        : null;
+      if (targetFileName && (targetMeta?.isFactory || targetFileName.toLowerCase().startsWith("factory:"))) {
+        throw new Error("出厂预设为只读，不能覆盖");
+      }
+      const normalizedForm = normalizeFormPrompts(form);
+      const shared = {
+        title: name,
+        category: sourceMeta?.category ?? "用户预设",
+        subCategory: sourceMeta?.subCategory
+      };
+      const preset: PresetDefinition<GenerationForm> = settingsRef.current.imageProvider === "gemini"
+        ? {
+            ...shared,
+            kind: "gemini",
+            content: [normalizedForm.positivePrompt, normalizedForm.extraPrompt].filter(Boolean).join("\n").trim()
+          } satisfies GeminiPreset
+        : {
+            ...shared,
+            kind: "forge",
+            data: normalizedForm
+          } satisfies ForgePreset<GenerationForm>;
+      const saved = targetFileName
+        ? await savePresetFile(name, preset, { targetFileName })
+        : await savePresetFile(name, preset);
+      setSelectedPreset(saved.meta.fileName);
       await loadPresets();
       pushToast("success", `预设「${name}」已保存`);
     },
-    [form, loadPresets, pushToast]
+    [form, loadPresets, presets, pushToast, selectedPreset]
   );
 
   const deletePreset = useCallback(
     async (fileName: string) => {
       presetsLoadGateRef.current.assertReady("预设仍在加载，请稍后重试");
+      const target = presets.find((preset) => preset.fileName === fileName);
+      if (target?.isFactory) throw new Error("出厂预设为只读，不能删除");
       await deletePresetFile(fileName);
       await loadPresets();
-      if (selectedPreset && fileName.startsWith(`${selectedPreset}`)) {
+      if (selectedPreset === fileName) {
         setSelectedPreset(null);
       }
       pushToast("info", "预设已删除");
     },
-    [loadPresets, selectedPreset, pushToast]
+    [loadPresets, presets, selectedPreset, pushToast]
   );
 
   return {

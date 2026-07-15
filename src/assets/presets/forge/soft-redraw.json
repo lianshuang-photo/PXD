@@ -1,0 +1,15 @@
+{
+  "kind": "forge",
+  "title": "柔和重绘",
+  "category": "基础生成",
+  "subCategory": "风格",
+  "data": {
+    "positivePrompt": "soft natural light, balanced color, realistic photography",
+    "negativePrompt": "harsh contrast, color cast, overprocessed",
+    "steps": 24,
+    "cfgScale": 5.5,
+    "denoisingStrength": 0.4,
+    "resolution": 1024,
+    "imageCount": 1
+  }
+}

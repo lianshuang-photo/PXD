@@ -4,6 +4,7 @@ import { useGenerationController } from "../hooks/useGenerationController";
 import { useLayoutExperience } from "../hooks/useLayoutExperience";
 import OverlayPortal from "../components/OverlayPortal";
 import PromptParamControls from "../components/PromptParamControls";
+import PresetCatalogSelect from "../components/PresetCatalogSelect";
 import LayoutSnapshotControls from "../components/LayoutSnapshotControls";
 import OnboardingGuide from "../components/OnboardingGuide";
 import WorkspaceSection from "../components/WorkspaceSection";
@@ -135,13 +136,13 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
       setSelectedPreset(null);
       return;
     }
-    const matched = selectedPreset ? presets.find((preset) => preset.name === selectedPreset) : null;
+    const matched = selectedPreset ? presets.find((preset) => preset.fileName === selectedPreset) : null;
     if (matched) {
       setPresetFile(matched.fileName);
     } else if (!presetFile || !presets.some((preset) => preset.fileName === presetFile)) {
       const first = presets[0];
       setPresetFile(first.fileName);
-      setSelectedPreset(first.name);
+      setSelectedPreset(first.fileName);
     }
   }, [presetFile, presets, selectedPreset, setSelectedPreset]);
 
@@ -179,8 +180,9 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
 
   const trimmedPresetName = presetName.trim();
   const isSaveMode = trimmedPresetName.length > 0;
-  const saveButtonLabel = isSaveMode ? "保存" : "覆盖";
-  const isSaveDisabled = isSaveMode ? false : !selectedPresetMeta;
+  const isFactoryPreset = selectedPresetMeta?.isFactory === true;
+  const saveButtonLabel = isFactoryPreset ? "另存为" : (isSaveMode ? "保存" : "覆盖");
+  const isSaveDisabled = isFactoryPreset ? !isSaveMode : (isSaveMode ? false : !selectedPresetMeta);
 
   const handleSavePreset = async () => {
     const name = presetName.trim();
@@ -211,7 +213,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     }
 
     try {
-      await savePreset(targetPreset.name);
+      await savePreset(targetPreset.name, targetPreset.fileName);
       await loadPresets();
       setConfirmOverwrite(false);
       clearConfirmTimer();
@@ -593,31 +595,21 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   presets: (
               <WorkspaceSection key="presets" {...sectionProps("presets")} title="预设">
                 <div style={{ display: "flex", gap: "0.12rem", marginBottom: "0.12rem" }}>
-                  <select
-                    className="input"
+                  <PresetCatalogSelect
+                    presets={presets}
                     value={presetFile}
-                    onChange={(event) => {
-                      const value = event.target.value;
+                    onChange={(value) => {
                       setPresetFile(value);
-                      const meta = presets.find((item) => item.fileName === value);
-                      setSelectedPreset(meta ? meta.name : null);
+                      setSelectedPreset(value || null);
                       setPresetName("");
                     }}
-                    style={{ flex: 1 }}
-                  >
-                    {presets.length === 0 && <option value="">选择预设</option>}
-                    {presets.map((item) => (
-                      <option key={item.fileName} value={item.fileName}>
-                        {item.name}
-                      </option>
-                    ))}
-                  </select>
+                  />
                   <input
                     className="input"
                     type="text"
                     value={presetName}
                     onChange={(event) => setPresetName(event.target.value)}
-                    placeholder="预设名称"
+                    placeholder={isFactoryPreset ? "另存为名称" : "预设名称"}
                     style={{ flex: 1 }}
                   />
                 </div>
@@ -642,7 +634,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   <button type="button" className="btn btn--ghost" onClick={handleApplyPreset} disabled={!presetFile} style={presetActionButtonStyle}>
                     应用
                   </button>
-                  <button type="button" className="btn btn--ghost" onClick={handleDeletePreset} disabled={!presetFile} style={presetActionButtonStyle}>
+                  <button type="button" className="btn btn--ghost" onClick={handleDeletePreset} disabled={!presetFile || isFactoryPreset} style={presetActionButtonStyle}>
                     删除
                   </button>
                   <button type="button" className="btn btn--ghost" onClick={resetForm} style={presetActionButtonStyle}>

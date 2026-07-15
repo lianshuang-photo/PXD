@@ -603,6 +603,35 @@ select.input::-ms-expand {
   text-align: right;
 }
 
+.preset-catalog-select {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.preset-catalog-select .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.preset-kind-badge {
+  flex: 0 0 auto;
+  padding: 2px 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  color: var(--text-secondary);
+  font-size: 9px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.preset-kind-badge--factory {
+  border-color: rgba(245, 158, 11, 0.5);
+  color: #fbbf24;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;
