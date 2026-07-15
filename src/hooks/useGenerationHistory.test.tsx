@@ -141,4 +141,35 @@ describe("useGenerationHistory", () => {
     expect(getCurrent().entries[0].prompt).toBe("second");
     act(() => renderer.unmount());
   });
+
+  it("keeps a superseded write failure out of shared error and warning state", async () => {
+    historyService.saveGenerationHistory.mockRejectedValueOnce(new Error("old disk failure"));
+    const warnings = vi.fn();
+    let current: ReturnType<typeof useGenerationHistory<TestParams>> | null = null;
+    const Harness = () => {
+      current = useGenerationHistory<TestParams>(warnings);
+      return null;
+    };
+    const getCurrent = () => current as unknown as NonNullable<typeof current>;
+    let renderer!: TestRenderer.ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(createElement(Harness));
+    });
+    await flush();
+
+    await act(async () => {
+      await getCurrent().record({
+        provider: "gemini",
+        prompt: "superseded",
+        params: { prompt: "superseded", steps: 20 },
+        resultDataUrl: "data:image/png;base64,OLD",
+        shouldReportError: () => false
+      });
+    });
+
+    expect(getCurrent().entries[0].prompt).toBe("superseded");
+    expect(getCurrent().error).toBeNull();
+    expect(warnings).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
 });

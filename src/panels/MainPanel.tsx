@@ -2,6 +2,7 @@ import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react"
 import type { AppSettings } from "../context/types";
 import { useGenerationController } from "../hooks/useGenerationController";
 import OverlayPortal from "../components/OverlayPortal";
+import GlobalPartitionControls from "../components/GlobalPartitionControls";
 import PromptParamControls from "../components/PromptParamControls";
 
 interface Props {
@@ -68,6 +69,11 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     optionsError,
     refreshOptions,
     runGeneration,
+    globalPartitionOptions,
+    globalPartitionRunning,
+    globalPartitionStopping,
+    setGlobalPartitionOptions,
+    runGlobalPartition,
     stopGeneration,
     history,
     historyLoading,
@@ -380,7 +386,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
           type="button"
           className="btn btn--secondary"
           onClick={stopGeneration}
-          disabled={status !== "running"}
+          disabled={status !== "running" || globalPartitionStopping}
           style={{
             ...compactTopActionButtonStyle,
             color: "#fca5a5",
@@ -388,7 +394,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
             borderBottomColor: "rgba(239, 68, 68, 0.45)"
           }}
         >
-          停止
+          {globalPartitionStopping ? "停止中" : "停止"}
         </button>
         <button 
           type="button" 
@@ -749,6 +755,15 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   />
                 </div>
               </div>
+
+              <GlobalPartitionControls
+                provider={settings.imageProvider}
+                options={globalPartitionOptions}
+                running={globalPartitionRunning}
+                disabled={status === "running" && !globalPartitionRunning}
+                onChange={setGlobalPartitionOptions}
+                onRun={runGlobalPartition}
+              />
               
               {/* ControlNet */}
               <hr style={{ margin: "0.2rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />

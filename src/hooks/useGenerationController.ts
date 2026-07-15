@@ -21,9 +21,11 @@ import {
   type GenerationWorkflowResult
 } from "../services/generationWorkflow";
 import {
+  captureDocumentRegions,
   closeDocument,
   closeGeneratedDocument,
   createGeneratedDocument,
+  getActiveDocumentInfo,
   getSelectionPixels,
   groupLayers,
   hasActiveSelection,
@@ -31,6 +33,7 @@ import {
   onBatchAddLayer,
   placeImageIntoDocument,
   placeImageIntoSelection,
+  placePartitionedImages,
   setSelectionBounds,
   switchToDocument,
   type GeneratedDocumentSession,
@@ -50,6 +53,15 @@ import { translateText } from "../services/translator";
 import { useGenerationHistory } from "./useGenerationHistory";
 import type { GenerationHistoryEntry } from "../services/generationHistory";
 import { normalizePromptParams, sanitizePrompt } from "../services/promptParams";
+import {
+  createGlobalPartitionPlan,
+  DEFAULT_GLOBAL_PARTITION_MAX_WORKING_BYTES,
+  DEFAULT_GLOBAL_PARTITION_OPTIONS,
+  resolveGlobalPartitionMask,
+  type GlobalPartitionOptions
+} from "../services/globalPartition";
+import { normalizeGlobalPartitionImage } from "../services/globalPartitionImage";
+import { executeGlobalPartitionWorkflow } from "../services/globalPartitionWorkflow";
 
 export type GenerationStatus = "idle" | "running" | "success" | "error";
 export type ToastType = "info" | "success" | "warning" | "error";
@@ -384,6 +396,11 @@ export interface GenerationControllerState {
   optionsError: string | null;
   refreshOptions: () => Promise<void>;
   runGeneration: () => Promise<void>;
+  globalPartitionOptions: GlobalPartitionOptions;
+  globalPartitionRunning: boolean;
+  globalPartitionStopping: boolean;
+  setGlobalPartitionOptions: (next: Partial<GlobalPartitionOptions>) => void;
+  runGlobalPartition: () => Promise<void>;
   stopGeneration: () => void;
   history: GenerationHistoryEntry<GenerationForm>[];
   historyLoading: boolean;
@@ -446,6 +463,11 @@ export const useGenerationController = (
   const [progressText, setProgressText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastImages, setLastImages] = useState<string[]>([]);
+  const [globalPartitionOptions, setGlobalPartitionOptionsState] = useState<GlobalPartitionOptions>(
+    DEFAULT_GLOBAL_PARTITION_OPTIONS
+  );
+  const [globalPartitionRunning, setGlobalPartitionRunning] = useState(false);
+  const [globalPartitionStopping, setGlobalPartitionStopping] = useState(false);
   const [options, setOptions] = useState<SdOptions>(EMPTY_OPTIONS);
   const [optionsLoading, setOptionsLoading] = useState(false);
   const [optionsError, setOptionsError] = useState<string | null>(null);
@@ -460,10 +482,12 @@ export const useGenerationController = (
   const [sourceLanguage, setSourceLanguage] = useState("zh");
   const [targetLanguage, setTargetLanguage] = useState("en");
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const globalPartitionSettlingRef = useRef(false);
   const presetsLoadGateRef = useRef(new LatestLoadGate());
   const settingsRef = useRef(settings);
   const historyRestoreGenerationRef = useRef(0);
   const historyRestoreQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const historyReportGenerationRef = useRef(0);
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
@@ -471,8 +495,11 @@ export const useGenerationController = (
   const stoppedByEngineChangeRef = useRef(false);
 
   useLayoutEffect(() => {
+    const partitionSettling = globalPartitionSettlingRef.current;
     setProgress(0);
-    setStatus((current) => current === "running" ? "idle" : current);
+    setGlobalPartitionRunning(partitionSettling);
+    setGlobalPartitionStopping(partitionSettling);
+    setStatus((current) => current === "running" && !partitionSettling ? "idle" : current);
   }, [engineToken]);
 
   useEffect(() => () => {
@@ -547,6 +574,10 @@ export const useGenerationController = (
     },
     [setFormValue]
   );
+
+  const setGlobalPartitionOptions = useCallback((next: Partial<GlobalPartitionOptions>) => {
+    setGlobalPartitionOptionsState((current) => ({ ...current, ...next }));
+  }, []);
 
   const setTranslationInput = useCallback((value: string) => {
     setTranslationError(null);
@@ -812,8 +843,10 @@ export const useGenerationController = (
   const stopGeneration = useCallback(() => {
     const activeRun = runGateRef.current.current;
     if (!activeRun) return;
+    const partitionStopping = activeRun.kind === "partition";
     runGateRef.current.stop();
     engine.cancelAll();
+    if (activeRun.taskId && !partitionStopping) clearPSLockQueue(activeRun.taskId);
     stopPolling(engineToken);
     if (activeRun.kind === "batch" && activeRun.taskId) {
       setBatchItems((items) =>
@@ -824,16 +857,148 @@ export const useGenerationController = (
         )
       );
     }
-    setStatus("idle");
+    setStatus(partitionStopping ? "running" : "idle");
+    setGlobalPartitionRunning(partitionStopping);
+    setGlobalPartitionStopping(partitionStopping);
     setProgress(0);
     setProgressPreview(null);
     setProgressText(null);
     setError(null);
-    pushToast("info", "已停止");
+    pushToast("info", partitionStopping ? "正在停止并恢复 Photoshop 文档" : "已停止");
   }, [engine, engineToken, pushToast, stopPolling]);
 
+  const runGlobalPartition = useCallback(async () => {
+    if (runGateRef.current.current || globalPartitionSettlingRef.current) return;
+    const requestToken = engineToken;
+    const requestEngine = requestToken.engine;
+    if (requestEngine.provider !== "gemini") {
+      const message = "大图全局分区仅支持 Gemini 图像引擎，请先在设置中切换引擎";
+      setError(message);
+      pushToast("warning", message);
+      return;
+    }
+    const prompt = effectivePromptFor(form);
+    if (!prompt) {
+      pushToast("warning", "请输入用于整图统一风格化的提示词");
+      return;
+    }
+    const taskId = generateId();
+    const historyReportGeneration = ++historyReportGenerationRef.current;
+    globalPartitionSettlingRef.current = true;
+    const { token: runToken } = runGateRef.current.begin("partition", taskId);
+    const isRunCurrent = () => isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken);
+    setGlobalPartitionRunning(true);
+    setGlobalPartitionStopping(false);
+    setStatus("running");
+    setError(null);
+    setProgress(0);
+    setProgressPreview(null);
+    setProgressText("正在准备大图分区");
+    dismissToast();
+    let committed = false;
+    try {
+      const document = await getActiveDocumentInfo({ taskId });
+      if (!isRunCurrent()) return;
+      const plan = createGlobalPartitionPlan({
+        width: document.width,
+        height: document.height,
+        overlap: globalPartitionOptions.overlap,
+        targetMaxEdge: clampNumber(form.resolution, 128, 2048)
+      });
+      const mask = resolveGlobalPartitionMask(plan, globalPartitionOptions);
+      const result = await executeGlobalPartitionWorkflow({
+        engine: requestEngine,
+        documentId: document.documentId,
+        plan,
+        prompt: sanitizePrompt(prompt),
+        timeoutMs: Math.max(
+          5_000,
+          Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)
+        ),
+        taskId,
+        maskContract: mask.contract,
+        maskFeather: mask.feather,
+        maxWorkingBytes: DEFAULT_GLOBAL_PARTITION_MAX_WORKING_BYTES,
+        isCurrent: isRunCurrent,
+        onProgress: (value, message) => {
+          if (!isRunCurrent()) return;
+          setProgress(value);
+          setProgressText(message);
+        },
+        adapters: {
+          captureRegion: async (documentId, tile, options) => {
+            const [capture] = await captureDocumentRegions(documentId, [tile], options);
+            if (!capture) throw new Error(`Photoshop 未返回分区 ${tile.id} 的截图`);
+            return capture;
+          },
+          normalizeImage: normalizeGlobalPartitionImage,
+          placeImages: (documentId, placements, options) =>
+            placePartitionedImages(documentId, placements, {
+              ...options,
+              groupName: "PXD 大图全局分区"
+            })
+        }
+      });
+      if (!isRunCurrent()) return;
+      committed = runGateRef.current.complete(runToken);
+      if (!committed) return;
+      globalPartitionSettlingRef.current = false;
+      setLastImages(result.images.map(toDataUrl));
+      setStatus("success");
+      setGlobalPartitionRunning(false);
+      setGlobalPartitionStopping(false);
+      setProgress(0);
+      setProgressPreview(null);
+      setProgressText(null);
+      pushToast("success", `大图分区完成，已生成 ${result.layerIds.length} 个非破坏图层`);
+      await recordHistory({
+        provider: "gemini",
+        prompt,
+        params: { ...form },
+        resultDataUrl: toDataUrl(result.images[0]),
+        shouldReportError: () => historyReportGenerationRef.current === historyReportGeneration
+      });
+    } catch (caught) {
+      if (
+        caught &&
+        typeof caught === "object" &&
+        (caught as { name?: unknown }).name === "PartitionOperationError" &&
+        (caught as { recoveryFailed?: unknown }).recoveryFailed === true
+      ) {
+        const message = formatGenerationError(caught, "大图分区恢复失败");
+        setStatus("error");
+        setError(message);
+        pushToast("error", message);
+        return;
+      }
+      if (!isRunCurrent()) return;
+      if (isGenerationCancelledError(caught)) {
+        setStatus("idle");
+        setError(null);
+        pushToast("info", "已停止");
+        return;
+      }
+      const message = formatGenerationError(caught, "大图分区生成失败");
+      setStatus("error");
+      setError(message);
+      pushToast("error", message);
+    } finally {
+      if (!committed) {
+        if (runGateRef.current.isCurrent(runToken)) runGateRef.current.complete(runToken);
+        globalPartitionSettlingRef.current = false;
+        setGlobalPartitionRunning(false);
+        setGlobalPartitionStopping(false);
+        setProgress(0);
+        setProgressPreview(null);
+        setProgressText(null);
+        setStatus((current) => current === "running" ? "idle" : current);
+      }
+    }
+  }, [dismissToast, engineToken, form, globalPartitionOptions, isEngineCurrent, pushToast, recordHistory, settings.timeoutMaxSeconds, settings.timeoutMultiplier]);
+
   const runGeneration = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (runGateRef.current.current || globalPartitionSettlingRef.current) return;
+    historyReportGenerationRef.current += 1;
     const requestToken = engineToken;
     const requestEngine = requestToken.engine;
     const taskId = generateId();
@@ -1034,7 +1199,7 @@ export const useGenerationController = (
   }, [batchItems, engine, pushToast, stopGeneration]);
 
   const runBatch = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (runGateRef.current.current || globalPartitionSettlingRef.current) return;
     const runnableItems = batchItems.filter((item) => item.status !== "success");
     if (!runnableItems.length) {
       if (batchItems.length) {
@@ -1044,6 +1209,7 @@ export const useGenerationController = (
       }
       return;
     }
+    historyReportGenerationRef.current += 1;
     const requestToken = engineToken;
     const requestEngine = requestToken.engine;
     const { token: runToken } = runGateRef.current.begin("batch");
@@ -1216,7 +1382,7 @@ export const useGenerationController = (
     setResolution,
     status,
     progress,
-    progressMode: engine.progressMode,
+    progressMode: globalPartitionRunning ? "determinate" : engine.progressMode,
     progressPreview,
     progressText,
     error,
@@ -1226,6 +1392,11 @@ export const useGenerationController = (
     optionsError,
     refreshOptions,
     runGeneration,
+    globalPartitionOptions,
+    globalPartitionRunning,
+    globalPartitionStopping,
+    setGlobalPartitionOptions,
+    runGlobalPartition,
     stopGeneration,
     history,
     historyLoading,
