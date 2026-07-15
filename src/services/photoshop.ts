@@ -1284,6 +1284,13 @@ export const placePartitionedImages = (
   }
 
   await restoreState("恢复");
+  if (!errors.length) {
+    try {
+      assertCurrent();
+    } catch (error) {
+      errors.push({ phase: "分区贴回", error });
+    }
+  }
   if (errors.length) {
     try {
       if (Number(photoshop.app.activeDocument?.id) !== sourceDocumentId) {

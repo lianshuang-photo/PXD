@@ -189,6 +189,7 @@ describe("global partition Photoshop primitives", () => {
       failMask?: boolean;
       failSelectionRestore?: boolean;
       failDocumentRestore?: boolean;
+      onSelectionRestored?: () => void;
     } = {}
   ) => {
     let activeDocumentId = 20;
@@ -267,6 +268,9 @@ describe("global partition Photoshop primitives", () => {
               bottom: descriptor.to.bottom._value
             }
           : null;
+        if (descriptor.to?._obj === "rectangle" && descriptor.to.left?._value === 3) {
+          configuration.onSelectionRestored?.();
+        }
       } else if (descriptor?._obj === "delete") {
         for (const item of descriptors) deleted.push(item._target[0]._id);
       }
@@ -371,6 +375,36 @@ describe("global partition Photoshop primitives", () => {
     )).rejects.toThrow("已取消");
 
     expect(harness.deleted).toEqual([41]);
+    expect(harness.getActiveDocumentId()).toBe(20);
+  });
+
+  it("removes the completed group when cancellation arrives during document restoration", async () => {
+    let current = true;
+    const harness = setupPartitionPlacement({
+      onSelectionRestored: () => {
+        current = false;
+      }
+    });
+    const plan = createGlobalPartitionPlan({
+      width: 1000,
+      height: 1000,
+      overlap: 80,
+      targetMaxEdge: 768
+    });
+
+    await expect(placePartitionedImages(
+      10,
+      [{ tile: plan.tiles[0], dataUrl: "data:image/png;base64,QQ==" }],
+      {
+        taskId: "partition",
+        overlap: plan.overlap,
+        maskContract: 0,
+        maskFeather: 0,
+        isCurrent: () => current
+      }
+    )).rejects.toThrow("已取消");
+
+    expect(harness.deleted).toEqual([50]);
     expect(harness.getActiveDocumentId()).toBe(20);
   });
 

@@ -893,6 +893,7 @@ export const useGenerationController = (
     setProgressPreview(null);
     setProgressText("正在准备大图分区");
     dismissToast();
+    let committed = false;
     try {
       const document = await getActiveDocumentInfo({ taskId });
       if (!isRunCurrent()) return;
@@ -937,19 +938,23 @@ export const useGenerationController = (
         }
       });
       if (!isRunCurrent()) return;
+      committed = runGateRef.current.complete(runToken);
+      if (!committed) return;
+      globalPartitionSettlingRef.current = false;
       setLastImages(result.images.map(toDataUrl));
-      setProgress(1);
-      const historyRecord = await recordHistory({
+      setStatus("success");
+      setGlobalPartitionRunning(false);
+      setGlobalPartitionStopping(false);
+      setProgress(0);
+      setProgressPreview(null);
+      setProgressText(null);
+      pushToast("success", `大图分区完成，已生成 ${result.layerIds.length} 个非破坏图层`);
+      await recordHistory({
         provider: "gemini",
         prompt,
         params: { ...form },
         resultDataUrl: toDataUrl(result.images[0])
       });
-      if (!isRunCurrent()) return;
-      setStatus("success");
-      if (historyRecord) {
-        pushToast("success", `大图分区完成，已生成 ${result.layerIds.length} 个非破坏图层`);
-      }
     } catch (caught) {
       if (
         caught &&
@@ -975,14 +980,16 @@ export const useGenerationController = (
       setError(message);
       pushToast("error", message);
     } finally {
-      if (runGateRef.current.isCurrent(runToken)) runGateRef.current.complete(runToken);
-      globalPartitionSettlingRef.current = false;
-      setGlobalPartitionRunning(false);
-      setGlobalPartitionStopping(false);
-      setProgress(0);
-      setProgressPreview(null);
-      setProgressText(null);
-      setStatus((current) => current === "running" ? "idle" : current);
+      if (!committed) {
+        if (runGateRef.current.isCurrent(runToken)) runGateRef.current.complete(runToken);
+        globalPartitionSettlingRef.current = false;
+        setGlobalPartitionRunning(false);
+        setGlobalPartitionStopping(false);
+        setProgress(0);
+        setProgressPreview(null);
+        setProgressText(null);
+        setStatus((current) => current === "running" ? "idle" : current);
+      }
     }
   }, [dismissToast, engineToken, form, globalPartitionOptions, isEngineCurrent, pushToast, recordHistory, settings.timeoutMaxSeconds, settings.timeoutMultiplier]);
 

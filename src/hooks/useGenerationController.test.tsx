@@ -400,6 +400,47 @@ describe("useGenerationController global partition", () => {
     expect(rendered.getController().globalPartitionStopping).toBe(false);
   });
 
+  it("commits Photoshop output before history persistence and does not let the old tail clobber a new run", async () => {
+    let resolveHistoryWrite!: () => void;
+    boundary.storage.writeJsonFile.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      resolveHistoryWrite = resolve;
+    }));
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    act(() => rendered.getController().setFormValue("positivePrompt", "unified style"));
+
+    let oldRun!: Promise<void>;
+    act(() => {
+      oldRun = rendered.getController().runGlobalPartition();
+    });
+    await vi.waitFor(() => expect(boundary.storage.writeJsonFile).toHaveBeenCalledOnce());
+    expect(rendered.getController().status).toBe("success");
+    expect(rendered.getController().globalPartitionRunning).toBe(false);
+    expect(rendered.getController().progress).toBe(0);
+    act(() => rendered.getController().stopGeneration());
+    expect(rendered.getController().status).toBe("success");
+
+    let resolveDocument!: (value: { documentId: number; width: number; height: number }) => void;
+    boundary.photoshop.getActiveDocumentInfo.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveDocument = resolve;
+    }));
+    let newRun!: Promise<void>;
+    act(() => {
+      newRun = rendered.getController().runGlobalPartition();
+    });
+    expect(rendered.getController().status).toBe("running");
+    expect(rendered.getController().globalPartitionRunning).toBe(true);
+
+    resolveHistoryWrite();
+    await act(async () => oldRun);
+    expect(rendered.getController().status).toBe("running");
+    expect(rendered.getController().globalPartitionRunning).toBe(true);
+
+    resolveDocument({ documentId: 7, width: 2000, height: 1000 });
+    await act(async () => newRun);
+    expect(rendered.getController().status).toBe("success");
+  });
+
   it("does not switch providers when the partition command is unavailable", async () => {
     const rendered = trackedRender();
     await flush();
