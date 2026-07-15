@@ -861,18 +861,19 @@ export const useGenerationController = (
             groupLayerId: number | null;
           }) => {
             const rollbackIds = groupLayerId ? [groupLayerId] : placedLayerIds;
-            let layersDeleted = false;
+            let preciseLayersDeleted = rollbackIds.length === 0;
+            let taskMarkersDeleted = false;
             const cleanup = async () => {
               if (returnTargetDocumentId) {
                 await switchToDocument(returnTargetDocumentId, { taskId: prepared.id });
               }
-              if (!layersDeleted) {
-                if (rollbackIds.length) {
-                  await deleteLayers(rollbackIds, { taskId: prepared.id });
-                } else {
-                  await deleteTaskLayers(prepared.id, { taskId: prepared.id });
-                }
-                layersDeleted = true;
+              if (!preciseLayersDeleted) {
+                await deleteLayers(rollbackIds, { taskId: prepared.id });
+                preciseLayersDeleted = true;
+              }
+              if (!taskMarkersDeleted) {
+                await deleteTaskLayers(prepared.id, { taskId: prepared.id });
+                taskMarkersDeleted = true;
               }
               if (returnOriginDocumentId) {
                 await switchToDocument(returnOriginDocumentId, { taskId: prepared.id });

@@ -174,7 +174,8 @@ describe("createGeneratedDocument", () => {
           id: 88,
           layers: [
             { id: 1, name: "keep" },
-            { id: 2, name: "group", layers: [{ id: 3, name: "PXD 临时任务 late-task" }] }
+            { id: 2, name: "group", layers: [{ id: 3, name: "PXD 临时任务 late-task" }] },
+            { id: 4, name: "PXD 临时任务 other-task" }
           ]
         }
       },

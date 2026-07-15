@@ -451,7 +451,7 @@ describe("useGenerationController Forge completion", () => {
     const task = harness.controller.generationTasks[0];
     expect(task.status).toBe("error");
     expect(boundary.deleteLayers).toHaveBeenCalledWith([777], { taskId: task.id });
-    expect(boundary.deleteTaskLayers).not.toHaveBeenCalled();
+    expect(boundary.deleteTaskLayers).toHaveBeenCalledWith(task.id, { taskId: task.id });
     act(() => harness.renderer.unmount());
   });
 
@@ -499,12 +499,84 @@ describe("useGenerationController Forge completion", () => {
     const taskId = harness.controller.generationTasks[0].id;
     expect(harness.controller.generationTasks[0].status).toBe("error");
     expect(boundary.deleteLayers).toHaveBeenCalledWith([301], { taskId });
+    expect(boundary.deleteTaskLayers).toHaveBeenCalledWith(taskId, { taskId });
     expect(boundary.switchToDocument).toHaveBeenCalledWith(7, { taskId });
 
     await act(async () => {
       await harness.controller.retryTask(taskId);
     });
     expect(harness.controller.generationTasks[0].status).toBe("success");
+    expect(boundary.placeImageIntoSelection).toHaveBeenCalledTimes(4);
+    act(() => harness.renderer.unmount());
+  });
+
+  it("keeps a failed post-group cleanup dirty until the marker group is removed", async () => {
+    boundary.getSelectionPixels.mockResolvedValue(selection);
+    boundary.client.img2img.mockResolvedValue({ images: ["ONE", "TWO"] });
+    const activeLayers = new Set<number>();
+    const markerGroups = new Set<number>();
+    let nextLayerId = 201;
+    let markerCleanupAvailable = false;
+    boundary.placeImageIntoSelection.mockImplementation(async () => {
+      const layerID = nextLayerId++;
+      activeLayers.add(layerID);
+      return { layerID };
+    });
+    boundary.groupLayers
+      .mockImplementationOnce(async () => {
+        markerGroups.add(301);
+        throw new Error("group get failed");
+      })
+      .mockImplementationOnce(async () => {
+        markerGroups.add(302);
+        return 302;
+      });
+    boundary.deleteLayers.mockImplementation(async (layerIds: number[]) => {
+      layerIds.forEach((layerId) => activeLayers.delete(layerId));
+    });
+    boundary.deleteTaskLayers.mockImplementation(async () => {
+      if (!markerCleanupAvailable) throw new Error("marker cleanup blocked");
+      markerGroups.delete(301);
+    });
+    const harness = mountController();
+    await flushEffects();
+
+    await act(async () => {
+      await harness.controller.runGeneration();
+    });
+    const taskId = harness.controller.generationTasks[0].id;
+    expect(harness.controller.generationTasks[0]).toMatchObject({
+      status: "error",
+      cleanupPending: true,
+      error: expect.stringContaining("marker cleanup blocked")
+    });
+    expect(activeLayers.size).toBe(0);
+    expect(markerGroups).toEqual(new Set([301]));
+    expect(boundary.deleteLayers).toHaveBeenCalledTimes(1);
+    expect(boundary.deleteTaskLayers).toHaveBeenCalledWith(taskId, { taskId });
+
+    await act(async () => {
+      await harness.controller.retryTask(taskId);
+    });
+    expect(harness.controller.generationTasks[0]).toMatchObject({
+      status: "error",
+      cleanupPending: true
+    });
+    expect(boundary.placeImageIntoSelection).toHaveBeenCalledTimes(2);
+    expect(boundary.deleteLayers).toHaveBeenCalledTimes(1);
+
+    markerCleanupAvailable = true;
+    await act(async () => {
+      await harness.controller.cleanupTask(taskId);
+    });
+    expect(harness.controller.generationTasks[0].cleanupPending).toBe(false);
+    expect(markerGroups.size).toBe(0);
+
+    await act(async () => {
+      await harness.controller.retryTask(taskId);
+    });
+    expect(harness.controller.generationTasks[0].status).toBe("success");
+    expect(markerGroups).toEqual(new Set([302]));
     expect(boundary.placeImageIntoSelection).toHaveBeenCalledTimes(4);
     act(() => harness.renderer.unmount());
   });
