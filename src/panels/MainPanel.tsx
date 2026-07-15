@@ -4,6 +4,7 @@ import { useGenerationController } from "../hooks/useGenerationController";
 import OverlayPortal from "../components/OverlayPortal";
 import PromptParamControls from "../components/PromptParamControls";
 import PresetCatalogSelect from "../components/PresetCatalogSelect";
+import ScenePackControls from "../components/ScenePackControls";
 
 interface Props {
   settings: AppSettings;
@@ -69,6 +70,22 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     optionsError,
     refreshOptions,
     runGeneration,
+    scenePacks,
+    selectedScenePackId,
+    sceneOptionSelection,
+    scenePrompt,
+    scenePromptErrors,
+    sceneProtectSubject,
+    sceneUseSelectionReference,
+    sceneStopping,
+    sceneRunning,
+    sceneLastPlacement,
+    selectScenePack,
+    setSceneOption,
+    setSceneProtectSubject,
+    setSceneUseSelectionReference,
+    runScenePack,
+    undoScenePlacement,
     stopGeneration,
     history,
     historyLoading,
@@ -382,7 +399,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
           type="button"
           className="btn btn--secondary"
           onClick={stopGeneration}
-          disabled={status !== "running"}
+          disabled={status !== "running" || sceneStopping}
           style={{
             ...compactTopActionButtonStyle,
             color: "#fca5a5",
@@ -390,7 +407,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
             borderBottomColor: "rgba(239, 68, 68, 0.45)"
           }}
         >
-          停止
+          {sceneStopping ? "恢复中" : "停止"}
         </button>
         <button 
           type="button" 
@@ -507,6 +524,27 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   </button>
                 </div>
               </div>
+
+              <ScenePackControls
+                packs={scenePacks}
+                selectedPackId={selectedScenePackId}
+                selection={sceneOptionSelection}
+                prompt={scenePrompt}
+                errors={scenePromptErrors}
+                provider={settings.imageProvider}
+                running={sceneRunning}
+                disabled={status === "running" && !sceneRunning}
+                stopping={sceneStopping}
+                protectSubject={sceneProtectSubject}
+                useSelectionReference={sceneUseSelectionReference}
+                canUndo={Boolean(sceneLastPlacement)}
+                onSelectPack={selectScenePack}
+                onChangeOption={setSceneOption}
+                onProtectSubjectChange={setSceneProtectSubject}
+                onUseSelectionReferenceChange={setSceneUseSelectionReference}
+                onRun={() => void runScenePack()}
+                onUndo={() => void undoScenePlacement()}
+              />
 
               <hr style={{ margin: "0.2rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
               <section aria-label="生成历史">

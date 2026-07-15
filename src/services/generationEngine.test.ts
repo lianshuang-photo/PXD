@@ -99,11 +99,28 @@ describe("createGenerationEngine", () => {
     expect(clients.geminiClient.editImage).toHaveBeenCalledWith({
       prompt: "edit",
       baseImageBase64: "INPUT",
+      refImagesBase64: undefined,
       aspectRatio: "Auto",
       timeoutMs: 30_000,
       taskId: undefined,
       signal: undefined
     });
+  });
+
+  it("forwards ordered scene reference images through the Gemini adapter", async () => {
+    const clients = makeClients();
+    const engine = createGenerationEngine(geminiSettings, clients.factories);
+
+    await engine.generate({
+      ...request,
+      forgeParams: undefined,
+      refImagesBase64: ["PERSON_ONE", "PERSON_TWO"]
+    });
+
+    expect(clients.geminiClient.editImage).toHaveBeenCalledWith(expect.objectContaining({
+      baseImageBase64: "INPUT",
+      refImagesBase64: ["PERSON_ONE", "PERSON_TWO"]
+    }));
   });
 
   it("wraps Forge failures in the shared actionable error contract", async () => {

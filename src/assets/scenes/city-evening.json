@@ -1,0 +1,17 @@
+{
+  "id": "city-evening",
+  "name": "城市暮色",
+  "description": "自然可信的傍晚城市环境",
+  "promptTemplate": "把背景重建为真实的城市暮色街景，环境为{location}，光线为{lighting}，镜头呈现{lens}。加入{props}，保持主体身份与外观完全一致，并匹配地面接触、反射和景深。",
+  "options": {
+    "location": ["安静的现代街角", "玻璃幕墙商业区", "雨后的人行步道"],
+    "lighting": ["蓝调时刻的柔和环境光", "暖色店铺与冷色天空的平衡光", "雨后路面反射的自然霓虹光"],
+    "lens": ["50mm 纪实视角", "35mm 环境人像视角"],
+    "props": {
+      "label": "环境元素",
+      "multiple": true,
+      "required": false,
+      "values": ["少量远景行人", "克制的路边绿植", "一辆虚化的远景车辆"]
+    }
+  }
+}

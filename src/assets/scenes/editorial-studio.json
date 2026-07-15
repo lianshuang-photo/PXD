@@ -1,0 +1,28 @@
+{
+  "id": "editorial-studio",
+  "name": "编辑棚拍",
+  "description": "克制的商业棚拍空间",
+  "promptTemplate": "将画面背景替换为高级编辑棚拍场景。使用{lighting}，采用{lens}的透视关系，道具包括{props}。保持主体身份、姿态、服装、比例和边缘细节不变，使接触阴影与环境光自然融合。",
+  "options": {
+    "lighting": [
+      { "id": "softbox", "label": "柔光箱", "prompt": "large softbox key light with gentle fill" },
+      { "id": "window", "label": "侧窗光", "prompt": "soft directional window light" },
+      { "id": "rim", "label": "轮廓光", "prompt": "controlled rim light with soft frontal fill" }
+    ],
+    "lens": [
+      { "id": "50mm", "label": "50mm 标准", "prompt": "50mm standard lens" },
+      { "id": "85mm", "label": "85mm 人像", "prompt": "85mm portrait lens compression" },
+      { "id": "35mm", "label": "35mm 环境", "prompt": "35mm environmental portrait perspective" }
+    ],
+    "props": {
+      "label": "道具",
+      "multiple": true,
+      "required": false,
+      "values": [
+        { "id": "plinth", "label": "几何台座", "prompt": "a simple geometric plinth" },
+        { "id": "curtain", "label": "织物帘幕", "prompt": "a restrained fabric backdrop" },
+        { "id": "plant", "label": "绿植", "prompt": "one subtle green plant" }
+      ]
+    }
+  }
+}

@@ -19,6 +19,7 @@ const boundary = vi.hoisted(() => ({
     cancelAll: vi.fn().mockReturnValue(0)
   },
   photoshop: {
+    captureSceneSource: vi.fn(),
     closeDocument: vi.fn(),
     getSelectionPixels: vi.fn(),
     groupLayers: vi.fn(),
@@ -26,6 +27,9 @@ const boundary = vi.hoisted(() => ({
     moveActiveLayerToTop: vi.fn(),
     onBatchAddLayer: vi.fn(),
     placeImageIntoSelection: vi.fn(),
+    placeSceneBackground: vi.fn(),
+    releaseSceneCapture: vi.fn(),
+    removeScenePlacement: vi.fn(),
     setSelectionBounds: vi.fn(),
     switchToDocument: vi.fn()
   },
@@ -189,6 +193,20 @@ beforeEach(() => {
   boundary.forgeClient.img2img.mockResolvedValue({ images: ["FORGE_RESULT"] });
   boundary.geminiClient.editImage.mockResolvedValue("GEMINI_RESULT");
   boundary.photoshop.getSelectionPixels.mockResolvedValue(selection(""));
+  boundary.photoshop.captureSceneSource.mockResolvedValue({
+    documentId: 7,
+    documentWidth: 1600,
+    documentHeight: 900,
+    baseImageDataUrl: "data:image/png;base64,QUJD",
+    baseWidth: 1024,
+    baseHeight: 576,
+    selectionBounds: { left: 10, top: 20, right: 650, bottom: 500 },
+    referenceImageDataUrl: "data:image/png;base64,REVG",
+    selectionChannelName: "__PXD_SCENE_TEST"
+  });
+  boundary.photoshop.placeSceneBackground.mockResolvedValue({ layerId: 401 });
+  boundary.photoshop.releaseSceneCapture.mockResolvedValue(undefined);
+  boundary.photoshop.removeScenePlacement.mockResolvedValue(undefined);
   boundary.photoshop.hasActiveSelection.mockResolvedValue(true);
   boundary.photoshop.placeImageIntoSelection.mockResolvedValue({ layerID: 101 });
   boundary.photoshop.groupLayers.mockResolvedValue(undefined);
@@ -256,6 +274,102 @@ const trackedRender = (options: HarnessOptions = {}) => {
   renderers.push(rendered.renderer);
   return rendered;
 };
+
+describe("useGenerationController scene packs", () => {
+  const geminiSettings: AppSettings = {
+    ...DEFAULT_SETTINGS,
+    imageProvider: "gemini",
+    offlineMode: false,
+    geminiApiKey: "key"
+  };
+
+  it("resolves scene options into the Gemini request, records history, and supports undo", async () => {
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    const controller = rendered.getController();
+    const pack = controller.scenePacks.find((candidate) =>
+      candidate.options.some((group) => group.values.length > 1 && !group.multiple)
+    )!;
+    act(() => controller.selectScenePack(pack.id));
+    const group = rendered.getController().scenePacks
+      .find(({ id }) => id === pack.id)!.options
+      .find((candidate) => candidate.values.length > 1 && !candidate.multiple)!;
+    const nextValue = group.values[1];
+    act(() => rendered.getController().setSceneOption(group.id, [nextValue.id]));
+    const expectedPrompt = rendered.getController().scenePrompt;
+    expect(expectedPrompt).toContain(nextValue.prompt);
+
+    await act(async () => rendered.getController().runScenePack());
+
+    expect(boundary.geminiClient.editImage).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: expectedPrompt,
+      baseImageBase64: "QUJD",
+      refImagesBase64: ["REVG"]
+    }));
+    expect(boundary.photoshop.placeSceneBackground).toHaveBeenCalledWith(
+      expect.objectContaining({ documentId: 7 }),
+      "data:image/png;base64,GEMINI_RESULT",
+      expect.objectContaining({ protectSubject: true, layerName: `PXD 场景 · ${pack.name}` })
+    );
+    expect(rendered.getController().status).toBe("success");
+    expect(rendered.getController().sceneLastPlacement).toEqual({ documentId: 7, layerId: 401 });
+    expect(rendered.getController().history[0]).toMatchObject({ provider: "gemini", prompt: expectedPrompt });
+
+    await act(async () => rendered.getController().undoScenePlacement());
+    expect(boundary.photoshop.removeScenePlacement).toHaveBeenCalledWith(7, 401, expect.any(Object));
+    expect(rendered.getController().sceneLastPlacement).toBeNull();
+  });
+
+  it("settles capture resources and ignores a late model result after Stop", async () => {
+    let resolve!: (value: string) => void;
+    boundary.geminiClient.editImage.mockImplementationOnce(() => new Promise((done) => {
+      resolve = done;
+    }));
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    let run!: Promise<void>;
+    act(() => { run = rendered.getController().runScenePack(); });
+    await vi.waitFor(() => expect(boundary.geminiClient.editImage).toHaveBeenCalledOnce());
+    act(() => rendered.getController().stopGeneration());
+    expect(rendered.getController().sceneStopping).toBe(true);
+    resolve("LATE_RESULT");
+    await act(async () => run);
+
+    expect(boundary.photoshop.placeSceneBackground).not.toHaveBeenCalled();
+    expect(boundary.photoshop.releaseSceneCapture).toHaveBeenCalledOnce();
+    expect(rendered.getController().sceneStopping).toBe(false);
+    expect(rendered.getController().status).toBe("idle");
+    expect(rendered.getController().history).toHaveLength(0);
+  });
+
+  it("surfaces capture recovery failures that arrive after Stop", async () => {
+    let resolve!: (value: string) => void;
+    boundary.geminiClient.editImage.mockImplementationOnce(() => new Promise((done) => {
+      resolve = done;
+    }));
+    boundary.photoshop.releaseSceneCapture.mockRejectedValueOnce(new Error("channel cleanup failed"));
+    const rendered = trackedRender({ initialSettings: geminiSettings });
+    await flush();
+    let run!: Promise<void>;
+    act(() => { run = rendered.getController().runScenePack(); });
+    await vi.waitFor(() => expect(boundary.geminiClient.editImage).toHaveBeenCalledOnce());
+    act(() => rendered.getController().stopGeneration());
+    resolve("LATE_RESULT");
+    await act(async () => run);
+
+    expect(rendered.getController().sceneStopping).toBe(false);
+    expect(rendered.getController().status).toBe("error");
+    expect(rendered.getController().error).toContain("channel cleanup failed");
+  });
+
+  it("rejects Forge before scene capture", async () => {
+    const rendered = trackedRender();
+    await flush();
+    await act(async () => rendered.getController().runScenePack());
+    expect(boundary.photoshop.captureSceneSource).not.toHaveBeenCalled();
+    expect(rendered.getController().error).toContain("Gemini");
+  });
+});
 
 describe("useGenerationController generation history integration", () => {
   it("records a single generation and restores its provider and complete form", async () => {

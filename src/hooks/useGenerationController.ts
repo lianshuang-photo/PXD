@@ -21,6 +21,7 @@ import {
   type GenerationWorkflowResult
 } from "../services/generationWorkflow";
 import {
+  captureSceneSource,
   closeDocument,
   closeGeneratedDocument,
   createGeneratedDocument,
@@ -31,6 +32,9 @@ import {
   onBatchAddLayer,
   placeImageIntoDocument,
   placeImageIntoSelection,
+  placeSceneBackground,
+  releaseSceneCapture,
+  removeScenePlacement,
   setSelectionBounds,
   switchToDocument,
   type GeneratedDocumentSession,
@@ -53,6 +57,18 @@ import { translateText } from "../services/translator";
 import { useGenerationHistory } from "./useGenerationHistory";
 import type { GenerationHistoryEntry } from "../services/generationHistory";
 import { normalizePromptParams, sanitizePrompt } from "../services/promptParams";
+import {
+  createSceneSelection,
+  listScenePacks,
+  resolveScenePrompt,
+  type SceneOptionSelection,
+  type ScenePack
+} from "../services/scenePacks";
+import {
+  DEFAULT_SCENE_MAX_INPUT_BYTES,
+  executeSceneWorkflow,
+  SceneWorkflowError
+} from "../services/sceneWorkflow";
 
 export type GenerationStatus = "idle" | "running" | "success" | "error";
 export type ToastType = "info" | "success" | "warning" | "error";
@@ -103,6 +119,14 @@ export interface BatchItem {
     newLayerId?: number;
   };
 }
+
+export interface ScenePlacementState {
+  documentId: number;
+  layerId: number;
+}
+
+const SCENE_PACKS = listScenePacks();
+const INITIAL_SCENE_PACK = SCENE_PACKS[0] ?? null;
 
 const EMPTY_OPTIONS: SdOptions = {
   models: [],
@@ -386,6 +410,22 @@ export interface GenerationControllerState {
   optionsError: string | null;
   refreshOptions: () => Promise<void>;
   runGeneration: () => Promise<void>;
+  scenePacks: ScenePack[];
+  selectedScenePackId: string;
+  sceneOptionSelection: SceneOptionSelection;
+  scenePrompt: string;
+  scenePromptErrors: string[];
+  sceneProtectSubject: boolean;
+  sceneUseSelectionReference: boolean;
+  sceneStopping: boolean;
+  sceneRunning: boolean;
+  sceneLastPlacement: ScenePlacementState | null;
+  selectScenePack: (id: string) => void;
+  setSceneOption: (groupId: string, values: string[]) => void;
+  setSceneProtectSubject: (value: boolean) => void;
+  setSceneUseSelectionReference: (value: boolean) => void;
+  runScenePack: () => Promise<void>;
+  undoScenePlacement: () => Promise<void>;
   stopGeneration: () => void;
   history: GenerationHistoryEntry<GenerationForm>[];
   historyLoading: boolean;
@@ -448,6 +488,15 @@ export const useGenerationController = (
   const [progressText, setProgressText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastImages, setLastImages] = useState<string[]>([]);
+  const [selectedScenePackId, setSelectedScenePackId] = useState(INITIAL_SCENE_PACK?.id ?? "");
+  const [sceneOptionSelection, setSceneOptionSelection] = useState<SceneOptionSelection>(
+    INITIAL_SCENE_PACK ? createSceneSelection(INITIAL_SCENE_PACK) : {}
+  );
+  const [sceneProtectSubject, setSceneProtectSubject] = useState(true);
+  const [sceneUseSelectionReference, setSceneUseSelectionReference] = useState(true);
+  const [sceneStopping, setSceneStopping] = useState(false);
+  const [sceneRunning, setSceneRunning] = useState(false);
+  const [sceneLastPlacement, setSceneLastPlacement] = useState<ScenePlacementState | null>(null);
   const [options, setOptions] = useState<SdOptions>(EMPTY_OPTIONS);
   const [optionsLoading, setOptionsLoading] = useState(false);
   const [optionsError, setOptionsError] = useState<string | null>(null);
@@ -462,6 +511,8 @@ export const useGenerationController = (
   const [sourceLanguage, setSourceLanguage] = useState("zh");
   const [targetLanguage, setTargetLanguage] = useState("en");
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sceneSettlingRef = useRef(false);
+  const sceneHistoryGenerationRef = useRef(0);
   const presetsLoadGateRef = useRef(new LatestLoadGate());
   const settingsRef = useRef(settings);
   const historyRestoreGenerationRef = useRef(0);
@@ -476,7 +527,9 @@ export const useGenerationController = (
 
   useLayoutEffect(() => {
     setProgress(0);
-    setStatus((current) => current === "running" ? "idle" : current);
+    setSceneStopping(sceneSettlingRef.current);
+    setSceneRunning(sceneSettlingRef.current);
+    setStatus((current) => current === "running" && !sceneSettlingRef.current ? "idle" : current);
   }, [engineToken]);
 
   useEffect(() => () => {
@@ -551,6 +604,22 @@ export const useGenerationController = (
     },
     [setFormValue]
   );
+
+  const selectedScenePack = SCENE_PACKS.find((pack) => pack.id === selectedScenePackId) ?? null;
+  const scenePromptResolution = selectedScenePack
+    ? resolveScenePrompt(selectedScenePack, sceneOptionSelection)
+    : { prompt: "", errors: ["没有可用的场景包"] };
+
+  const selectScenePack = useCallback((id: string) => {
+    const pack = SCENE_PACKS.find((candidate) => candidate.id === id);
+    if (!pack) return;
+    setSelectedScenePackId(pack.id);
+    setSceneOptionSelection(createSceneSelection(pack));
+  }, []);
+
+  const setSceneOption = useCallback((groupId: string, values: string[]) => {
+    setSceneOptionSelection((current) => ({ ...current, [groupId]: [...values] }));
+  }, []);
 
   const setTranslationInput = useCallback((value: string) => {
     setTranslationError(null);
@@ -816,6 +885,7 @@ export const useGenerationController = (
   const stopGeneration = useCallback(() => {
     const activeRun = runGateRef.current.current;
     if (!activeRun) return;
+    const sceneStop = activeRun.kind === "scene";
     runGateRef.current.stop();
     engine.cancelAll();
     stopPolling(engineToken);
@@ -828,16 +898,145 @@ export const useGenerationController = (
         )
       );
     }
-    setStatus("idle");
+    setStatus(sceneStop ? "running" : "idle");
+    setSceneStopping(sceneStop);
     setProgress(0);
     setProgressPreview(null);
-    setProgressText(null);
+    setProgressText(sceneStop ? "正在停止并恢复场景资源" : null);
     setError(null);
-    pushToast("info", "已停止");
+    pushToast("info", sceneStop ? "正在停止并恢复 Photoshop 文档" : "已停止");
   }, [engine, engineToken, pushToast, stopPolling]);
 
+  const runScenePack = useCallback(async () => {
+    if (runGateRef.current.current || sceneSettlingRef.current) return;
+    const pack = SCENE_PACKS.find((candidate) => candidate.id === selectedScenePackId);
+    if (!pack) {
+      pushToast("warning", "请选择可用的场景包");
+      return;
+    }
+    const resolved = resolveScenePrompt(pack, sceneOptionSelection);
+    if (resolved.errors.length) {
+      pushToast("warning", resolved.errors[0]);
+      return;
+    }
+    const requestToken = engineToken;
+    const requestEngine = requestToken.engine;
+    if (requestEngine.provider !== "gemini") {
+      const message = "场景包仅支持 Gemini 图像引擎，请先在设置中切换";
+      setError(message);
+      pushToast("warning", message);
+      return;
+    }
+    const taskId = generateId();
+    const historyGeneration = ++sceneHistoryGenerationRef.current;
+    sceneSettlingRef.current = true;
+    const { token: runToken } = runGateRef.current.begin("scene", taskId);
+    const isRunCurrent = () => isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken);
+    let committed = false;
+    setSceneStopping(false);
+    setSceneRunning(true);
+    setStatus("running");
+    setError(null);
+    setProgress(0);
+    setProgressPreview(null);
+    setProgressText("正在准备场景包");
+    dismissToast();
+    try {
+      const result = await executeSceneWorkflow({
+        engine: requestEngine,
+        pack,
+        prompt: sanitizePrompt(resolved.prompt),
+        taskId,
+        timeoutMs: Math.max(
+          5_000,
+          Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)
+        ),
+        targetMaxEdge: clampNumber(form.resolution, 128, 2048),
+        protectSubject: sceneProtectSubject,
+        useSelectionReference: sceneUseSelectionReference,
+        maxInputBytes: DEFAULT_SCENE_MAX_INPUT_BYTES,
+        isCurrent: isRunCurrent,
+        onProgress: (value, message) => {
+          if (!isRunCurrent()) return;
+          setProgress(value);
+          setProgressText(message);
+        },
+        adapters: {
+          captureSource: captureSceneSource,
+          placeBackground: placeSceneBackground,
+          removePlacement: removeScenePlacement,
+          releaseCapture: releaseSceneCapture
+        }
+      });
+      if (!isRunCurrent()) return;
+      committed = runGateRef.current.complete(runToken);
+      if (!committed) return;
+      sceneSettlingRef.current = false;
+      setSceneStopping(false);
+      setSceneRunning(false);
+      setSceneLastPlacement({ documentId: result.documentId, layerId: result.layerId });
+      setLastImages([toDataUrl(result.image)]);
+      setStatus("success");
+      setProgress(0);
+      setProgressPreview(null);
+      setProgressText(null);
+      pushToast("success", `场景「${pack.name}」已回贴，可撤销`);
+      await recordHistory({
+        provider: "gemini",
+        prompt: resolved.prompt,
+        params: { ...form, positivePrompt: resolved.prompt, extraPrompt: "" },
+        resultDataUrl: toDataUrl(result.image),
+        shouldReportError: () => sceneHistoryGenerationRef.current === historyGeneration
+      });
+    } catch (caught) {
+      if (caught instanceof SceneWorkflowError && caught.recoveryFailed) {
+        const message = formatGenerationError(caught, "场景资源恢复失败");
+        setStatus("error");
+        setError(message);
+        pushToast("error", message);
+        return;
+      }
+      if (!isRunCurrent()) return;
+      if (isGenerationCancelledError(caught)) {
+        setStatus("idle");
+        setError(null);
+        pushToast("info", "已停止");
+        return;
+      }
+      const message = formatGenerationError(caught, "场景生成失败");
+      setStatus("error");
+      setError(message);
+      pushToast("error", message);
+    } finally {
+      if (!committed) {
+        if (runGateRef.current.isCurrent(runToken)) runGateRef.current.complete(runToken);
+        sceneSettlingRef.current = false;
+        setSceneStopping(false);
+        setSceneRunning(false);
+        setProgress(0);
+        setProgressPreview(null);
+        setProgressText(null);
+        setStatus((current) => current === "running" ? "idle" : current);
+      }
+    }
+  }, [dismissToast, engineToken, form, isEngineCurrent, pushToast, recordHistory, sceneOptionSelection, sceneProtectSubject, sceneUseSelectionReference, selectedScenePackId, settings.timeoutMaxSeconds, settings.timeoutMultiplier]);
+
+  const undoScenePlacement = useCallback(async () => {
+    if (!sceneLastPlacement || runGateRef.current.current || sceneSettlingRef.current) return;
+    const placement = sceneLastPlacement;
+    try {
+      await removeScenePlacement(placement.documentId, placement.layerId, { taskId: generateId() });
+      setSceneLastPlacement(null);
+      pushToast("info", "已撤销最近一次场景背景");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "场景背景撤销失败";
+      pushToast("error", message);
+    }
+  }, [pushToast, sceneLastPlacement]);
+
   const runGeneration = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (runGateRef.current.current || sceneSettlingRef.current) return;
+    sceneHistoryGenerationRef.current += 1;
     const requestToken = engineToken;
     const requestEngine = requestToken.engine;
     const taskId = generateId();
@@ -1038,7 +1237,7 @@ export const useGenerationController = (
   }, [batchItems, engine, pushToast, stopGeneration]);
 
   const runBatch = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (runGateRef.current.current || sceneSettlingRef.current) return;
     const runnableItems = batchItems.filter((item) => item.status !== "success");
     if (!runnableItems.length) {
       if (batchItems.length) {
@@ -1048,6 +1247,7 @@ export const useGenerationController = (
       }
       return;
     }
+    sceneHistoryGenerationRef.current += 1;
     const requestToken = engineToken;
     const requestEngine = requestToken.engine;
     const { token: runToken } = runGateRef.current.begin("batch");
@@ -1291,6 +1491,22 @@ export const useGenerationController = (
     optionsError,
     refreshOptions,
     runGeneration,
+    scenePacks: SCENE_PACKS,
+    selectedScenePackId,
+    sceneOptionSelection,
+    scenePrompt: scenePromptResolution.prompt,
+    scenePromptErrors: scenePromptResolution.errors,
+    sceneProtectSubject,
+    sceneUseSelectionReference,
+    sceneStopping,
+    sceneRunning,
+    sceneLastPlacement,
+    selectScenePack,
+    setSceneOption,
+    setSceneProtectSubject,
+    setSceneUseSelectionReference,
+    runScenePack,
+    undoScenePlacement,
     stopGeneration,
     history,
     historyLoading,

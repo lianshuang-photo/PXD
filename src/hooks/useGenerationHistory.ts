@@ -14,6 +14,7 @@ interface RecordGenerationHistoryInput<TParams> {
   prompt: string;
   params: TParams;
   resultDataUrl: string;
+  shouldReportError?: () => boolean;
 }
 
 const historyErrorMessage = (action: string, caught: unknown) => {
@@ -68,14 +69,17 @@ export const useGenerationHistory = <TParams>(onWarning: (message: string) => vo
   }, [load]);
 
   const record = useCallback(async (input: RecordGenerationHistoryInput<TParams>) => {
+    const shouldReportError = () => input.shouldReportError?.() ?? true;
     await load();
     let thumbnailDataUrl: string;
     try {
       thumbnailDataUrl = await createGenerationThumbnail(input.resultDataUrl);
     } catch (caught) {
       const message = historyErrorMessage("缩略图创建", caught);
-      if (mountedRef.current) setError(message);
-      warningRef.current(message);
+      if (shouldReportError()) {
+        if (mountedRef.current) setError(message);
+        warningRef.current(message);
+      }
       return null;
     }
 
@@ -89,7 +93,7 @@ export const useGenerationHistory = <TParams>(onWarning: (message: string) => vo
     entriesRef.current = next;
     if (mountedRef.current) {
       setEntries(next);
-      setError(null);
+      if (shouldReportError()) setError(null);
     }
 
     const write = writeChainRef.current
@@ -101,8 +105,10 @@ export const useGenerationHistory = <TParams>(onWarning: (message: string) => vo
       return entry;
     } catch (caught) {
       const message = historyErrorMessage("保存", caught);
-      if (mountedRef.current) setError(message);
-      warningRef.current(message);
+      if (shouldReportError()) {
+        if (mountedRef.current) setError(message);
+        warningRef.current(message);
+      }
       return null;
     }
   }, [load]);
