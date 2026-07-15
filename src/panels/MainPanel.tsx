@@ -4,6 +4,7 @@ import { useGenerationController } from "../hooks/useGenerationController";
 import { useLayoutExperience } from "../hooks/useLayoutExperience";
 import OverlayPortal from "../components/OverlayPortal";
 import PromptParamControls from "../components/PromptParamControls";
+import CameraViewControl from "../components/CameraViewControl";
 import TiledUpscaleDialog from "../components/TiledUpscaleDialog";
 import PosterWizard from "../components/PosterWizard";
 import PresetCatalogSelect from "../components/PresetCatalogSelect";
@@ -76,6 +77,10 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     optionsError,
     refreshOptions,
     runGeneration,
+    cameraView,
+    cameraViewLoading,
+    setCameraView,
+    runCameraViewGeneration,
     stopGeneration,
     tiledUpscaleRunning,
     tiledUpscaleStopping,
@@ -689,6 +694,13 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
 
                   models: (
               <WorkspaceSection key="models" {...sectionProps("models")} title="模型与采样">
+              <CameraViewControl
+                value={cameraView}
+                disabled={cameraViewLoading || settingsLoading}
+                running={status === "running"}
+                onChange={setCameraView}
+                onGenerate={() => void runCameraViewGeneration()}
+              />
               <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", marginBottom: "0.12rem" }}>
                 <span style={{ ...compactLabelStyle, minWidth: "1.5rem" }}>模型</span>
                 <select className="input" value={form.model} onChange={(event) => setFormValue("model", event.target.value)} style={{ flex: 1, minWidth: 0 }}>

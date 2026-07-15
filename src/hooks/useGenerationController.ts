@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AppSettings } from "../context/types";
 import {
   isPxdRequestCancelledError,
@@ -9,10 +9,12 @@ import {
 } from "../services/apiClient";
 import { isImageModelCancelledError } from "../services/imageModelClient";
 import {
+  createGenerationEngine,
   formatGenerationError,
   GenerationEngineError,
   type EngineGenerateParams,
-  type EngineProgressMode
+  type EngineProgressMode,
+  type GenerationEngine
 } from "../services/generationEngine";
 import { useGenerationEngine } from "./useGenerationEngine";
 import { useEngineLifecycle } from "./useEngineLifecycle";
@@ -57,6 +59,14 @@ import { translateText } from "../services/translator";
 import { useGenerationHistory } from "./useGenerationHistory";
 import type { GenerationHistoryEntry } from "../services/generationHistory";
 import { normalizePromptParams, sanitizePrompt } from "../services/promptParams";
+import {
+  DEFAULT_CAMERA_VIEW,
+  buildCameraViewPrompt,
+  loadCameraView,
+  saveCameraView,
+  snapCameraView,
+  type CameraViewState
+} from "../services/cameraView";
 import {
   buildTiledUpscalePlan,
   executeTiledUpscale,
@@ -402,6 +412,10 @@ export interface GenerationControllerState {
   optionsError: string | null;
   refreshOptions: () => Promise<void>;
   runGeneration: () => Promise<void>;
+  cameraView: CameraViewState;
+  cameraViewLoading: boolean;
+  setCameraView: (value: CameraViewState) => void;
+  runCameraViewGeneration: () => Promise<void>;
   stopGeneration: () => void;
   tiledUpscaleRunning: boolean;
   tiledUpscaleStopping: boolean;
@@ -466,6 +480,19 @@ export const useGenerationController = (
   settingsActions: GenerationControllerSettingsActions = {}
 ): GenerationControllerState => {
   const engine = useGenerationEngine(settings);
+  const cameraEngine = useMemo(
+    () => createGenerationEngine({ ...settings, imageProvider: "gemini" }),
+    [
+      settings.geminiApiKey,
+      settings.geminiAuthMode,
+      settings.geminiEndpoint,
+      settings.geminiModel,
+      settings.offlineMode,
+      settings.timeoutMaxSeconds,
+      settings.timeoutMinSeconds,
+      settings.timeoutMultiplier
+    ]
+  );
   const {
     token: engineToken,
     isCurrent: isEngineCurrent,
@@ -476,6 +503,7 @@ export const useGenerationController = (
   const [form, setForm] = useState<GenerationForm>(DEFAULT_FORM);
   const [status, setStatus] = useState<GenerationStatus>("idle");
   const [progress, setProgress] = useState(0);
+  const [runProgressMode, setRunProgressMode] = useState<EngineProgressMode | null>(null);
   const [progressPreview, setProgressPreview] = useState<string | null>(null);
   const [progressText, setProgressText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -489,6 +517,8 @@ export const useGenerationController = (
   const [options, setOptions] = useState<SdOptions>(EMPTY_OPTIONS);
   const [optionsLoading, setOptionsLoading] = useState(false);
   const [optionsError, setOptionsError] = useState<string | null>(null);
+  const [cameraView, setCameraViewState] = useState<CameraViewState>(DEFAULT_CAMERA_VIEW);
+  const [cameraViewLoading, setCameraViewLoading] = useState(true);
   const [batchItems, setBatchItems] = useState<BatchItem[]>([]);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [presets, setPresets] = useState<PresetMeta[]>([]);
@@ -511,11 +541,13 @@ export const useGenerationController = (
     settingsRef.current = settings;
   }, [settings]);
   const runGateRef = useRef(new GenerationRunGate());
+  const activeRunEngineRef = useRef<GenerationEngine | null>(null);
   const stoppedByEngineChangeRef = useRef(false);
 
   useLayoutEffect(() => {
     const tiledUpscaleSettling = tiledUpscaleSettlingRef.current;
     setProgress(0);
+    setRunProgressMode(null);
     setTiledUpscaleRunning(tiledUpscaleSettling);
     setTiledUpscaleStopping(tiledUpscaleSettling);
     setTiledUpscaleProgress(null);
@@ -525,10 +557,19 @@ export const useGenerationController = (
 
   useEffect(() => () => {
     if (runGateRef.current.stop()) {
-      engine.cancelAll();
+      (activeRunEngineRef.current ?? engine).cancelAll();
+      activeRunEngineRef.current = null;
       stoppedByEngineChangeRef.current = true;
     }
   }, [engine]);
+  useEffect(() => () => {
+    if (activeRunEngineRef.current !== cameraEngine) return;
+    if (runGateRef.current.stop()) {
+      cameraEngine.cancelAll();
+      activeRunEngineRef.current = null;
+      stoppedByEngineChangeRef.current = true;
+    }
+  }, [cameraEngine]);
   const clearToastTimer = useCallback(() => {
     if (toastTimerRef.current) {
       clearTimeout(toastTimerRef.current);
@@ -571,9 +612,43 @@ export const useGenerationController = (
         item.status === "running" ? { ...item, status: "stopped", error: undefined } : item
       )
     );
+    setStatus((current) => current === "running" ? "idle" : current);
+    setProgress(0);
+    setRunProgressMode(null);
+    setProgressPreview(null);
+    setProgressText(null);
     setError(null);
     pushToast("info", "设置已更新，当前生成已停止");
-  }, [engine, pushToast]);
+  }, [cameraEngine, engine, pushToast]);
+
+  useEffect(() => {
+    let current = true;
+    setCameraViewLoading(true);
+    loadCameraView()
+      .then((loaded) => {
+        if (current) setCameraViewState(loaded);
+      })
+      .catch((caught) => {
+        if (!current) return;
+        const message = caught instanceof Error ? caught.message : "机位状态恢复失败";
+        pushToast("warning", `机位状态恢复失败：${message}`);
+      })
+      .finally(() => {
+        if (current) setCameraViewLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [pushToast]);
+
+  const setCameraView = useCallback((value: CameraViewState) => {
+    const next = snapCameraView(value);
+    setCameraViewState(next);
+    void saveCameraView(next).catch((caught) => {
+      const message = caught instanceof Error ? caught.message : "机位状态保存失败";
+      pushToast("warning", `机位状态保存失败：${message}`);
+    });
+  }, [pushToast]);
 
   const setFormValue = useCallback(
     <K extends keyof GenerationForm>(key: K, value: GenerationForm[K]) => {
@@ -862,7 +937,8 @@ export const useGenerationController = (
     if (!activeRun) return;
     const tiledUpscaleStopping = activeRun.kind === "tiled-upscale";
     runGateRef.current.stop();
-    engine.cancelAll();
+    (activeRunEngineRef.current ?? engine).cancelAll();
+    activeRunEngineRef.current = null;
     stopPolling(engineToken);
     if (activeRun.kind === "batch" && activeRun.taskId) {
       setBatchItems((items) =>
@@ -879,6 +955,7 @@ export const useGenerationController = (
     setTiledUpscaleProgress(null);
     setPosterRunning(false);
     setProgress(0);
+    setRunProgressMode(null);
     setProgressPreview(null);
     setProgressText(null);
     setError(null);
@@ -1161,10 +1238,12 @@ export const useGenerationController = (
     const requestEngine = requestToken.engine;
     const taskId = generateId();
     const { token: runToken } = runGateRef.current.begin("single", taskId);
+    activeRunEngineRef.current = requestEngine;
     const isRunCurrent = () => isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken);
     setStatus("running");
     setError(null);
     setProgress(0);
+    setRunProgressMode(requestEngine.progressMode);
     setProgressPreview(null);
     setProgressText(null);
     dismissToast();
@@ -1267,13 +1346,94 @@ export const useGenerationController = (
       if (runGateRef.current.isCurrent(runToken)) {
         runGateRef.current.complete(runToken);
       }
+      if (activeRunEngineRef.current === requestEngine) activeRunEngineRef.current = null;
       commitIfCurrent(requestToken, () => {
         setProgress(0);
+        setRunProgressMode(null);
         setProgressPreview(null);
         setProgressText(null);
       });
     }
   }, [commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pollProgress, pushToast, recordHistory, settings, stopPolling]);
+
+  const runCameraViewGeneration = useCallback(async () => {
+    if (runGateRef.current.current || cameraViewLoading) return;
+    const requestEngine = cameraEngine;
+    const view = snapCameraView(cameraView);
+    const prompt = buildCameraViewPrompt(view);
+    const taskId = generateId();
+    const { token: runToken } = runGateRef.current.begin("single", taskId);
+    activeRunEngineRef.current = requestEngine;
+    const isRunCurrent = () =>
+      activeRunEngineRef.current === requestEngine && runGateRef.current.isCurrent(runToken);
+    setStatus("running");
+    setError(null);
+    setProgress(0);
+    setRunProgressMode("indeterminate");
+    setProgressPreview(null);
+    setProgressText("正在重设机位");
+    dismissToast();
+    try {
+      const selection = await getSelectionPixels({ taskId });
+      if (!isRunCurrent()) return;
+      if (!selection) throw new Error("请先在 Photoshop 中选择一个主体区域");
+      const result = await executeGenerationTask(
+        requestEngine,
+        {
+          request: {
+            prompt,
+            baseImageBase64: dataUrlToBase64(selection.dataUrl),
+            timeoutMs: Math.max(
+              5_000,
+              Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)
+            ),
+            taskId
+          },
+          feather: Number.isFinite(form.maskFeather) ? form.maskFeather : DEFAULT_FORM.maskFeather,
+          taskId,
+          emptyImagesMessage: "机位生成未返回可用图像",
+          isCurrent: isRunCurrent
+        },
+        GENERATION_WORKFLOW_ADAPTERS
+      );
+      if (!isRunCurrent()) return;
+      setProgress(1);
+      setLastImages(result.images.map(toDataUrl));
+      const historyForm = { ...form, positivePrompt: prompt, extraPrompt: "" };
+      const historyRecord = await recordHistory({
+        provider: "gemini",
+        prompt,
+        params: historyForm,
+        resultDataUrl: toDataUrl(result.images[0])
+      });
+      if (!isRunCurrent()) return;
+      setStatus("success");
+      if (historyRecord) pushToast("success", "机位重设完成");
+    } catch (caught) {
+      if (!isRunCurrent()) return;
+      if (isGenerationCancelledError(caught)) {
+        runGateRef.current.complete(runToken);
+        setStatus("idle");
+        setProgress(0);
+        setError(null);
+        pushToast("info", "已停止");
+        return;
+      }
+      const message = formatGenerationError(caught, "机位生成失败");
+      setStatus("error");
+      setError(message);
+      pushToast("error", message);
+    } finally {
+      if (runGateRef.current.isCurrent(runToken)) runGateRef.current.complete(runToken);
+      if (activeRunEngineRef.current === requestEngine) activeRunEngineRef.current = null;
+      if (!runGateRef.current.current) {
+        setProgress(0);
+        setRunProgressMode(null);
+        setProgressPreview(null);
+        setProgressText(null);
+      }
+    }
+  }, [cameraEngine, cameraView, cameraViewLoading, dismissToast, form, pushToast, recordHistory, settings.timeoutMaxSeconds, settings.timeoutMultiplier]);
 
   const addToBatch = useCallback(async () => {
     const taskId = generateId();
@@ -1370,11 +1530,13 @@ export const useGenerationController = (
     const requestToken = engineToken;
     const requestEngine = requestToken.engine;
     const { token: runToken } = runGateRef.current.begin("batch");
+    activeRunEngineRef.current = requestEngine;
     const isRunCurrent = () => isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken);
     setStatus("running");
     setError(null);
     let historyRecorded = true;
     setProgress(0);
+    setRunProgressMode(requestEngine.progressMode);
     setBatchItems((items) =>
       items.map((item) =>
         item.status === "success" ? item : { ...item, status: "queued", error: undefined }
@@ -1481,9 +1643,11 @@ export const useGenerationController = (
       if (runGateRef.current.isCurrent(runToken)) {
         runGateRef.current.complete(runToken);
         setProgress(0);
+        setRunProgressMode(null);
         setProgressPreview(null);
         setProgressText(null);
       }
+      if (activeRunEngineRef.current === requestEngine) activeRunEngineRef.current = null;
     }
   }, [batchItems, engineToken, isEngineCurrent, pollProgress, pushToast, recordHistory, settings, stopPolling]);
 
@@ -1600,7 +1764,7 @@ export const useGenerationController = (
     setResolution,
     status,
     progress,
-    progressMode: engine.progressMode,
+    progressMode: runProgressMode ?? engine.progressMode,
     progressPreview,
     progressText,
     error,
@@ -1610,6 +1774,10 @@ export const useGenerationController = (
     optionsError,
     refreshOptions,
     runGeneration,
+    cameraView,
+    cameraViewLoading,
+    setCameraView,
+    runCameraViewGeneration,
     stopGeneration,
     tiledUpscaleRunning,
     tiledUpscaleStopping,

@@ -8,7 +8,7 @@
     "dev": "uxp plugin watch --path ./dist",
     "dev:browser": "vite",
     "watch": "vite build --watch",
-    "build": "vite build",
+    "build": "vite build && vite build --config vite.camera.config.ts",
     "build:plugin": "npm run build && cp -r public/* dist/ && cp manifest.json dist/ && node -e \"const fs=require('fs');const html=fs.readFileSync('dist/index.html','utf8');if(!html.includes('uxp-polyfill')){const fixed=html.replace('</title>','</title>\\n    <script src=\\\"./uxp-polyfill.js\\\"></script>');fs.writeFileSync('dist/index.html',fixed);}\"",
     "test": "npm run test:guards && npm run test:vitest",
     "test:guards": "sh -c 'trap \"rm -rf .test-dist\" EXIT; tsc src/services/atomicJson.ts src/services/loadGate.ts src/services/presetDeletion.ts --outDir .test-dist --module ES2020 --moduleResolution Node --target ES2020 --skipLibCheck && node --test tests/*.test.mjs'",
@@ -18,12 +18,14 @@
   },
   "dependencies": {
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "three": "^0.185.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@types/react-test-renderer": "^18.3.1",
+    "@types/three": "^0.185.1",
     "@vitejs/plugin-react": "^4.3.1",
     "electron-builder": "^26.0.12",
     "eslint": "^8.57.0",
