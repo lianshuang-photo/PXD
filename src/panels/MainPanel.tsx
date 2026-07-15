@@ -4,6 +4,7 @@ import { useGenerationController } from "../hooks/useGenerationController";
 import { useLayoutExperience } from "../hooks/useLayoutExperience";
 import OverlayPortal from "../components/OverlayPortal";
 import PromptParamControls from "../components/PromptParamControls";
+import PosterWizard from "../components/PosterWizard";
 import PresetCatalogSelect from "../components/PresetCatalogSelect";
 import LayoutSnapshotControls from "../components/LayoutSnapshotControls";
 import OnboardingGuide from "../components/OnboardingGuide";
@@ -75,6 +76,10 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     refreshOptions,
     runGeneration,
     stopGeneration,
+    posterRunning,
+    posterLastResult,
+    runPosterWizard,
+    undoPosterGeneration,
     history,
     historyLoading,
     historyError,
@@ -117,6 +122,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
   const [presetName, setPresetName] = useState<string>("");
   const [customResolution, setCustomResolution] = useState(false);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
+  const [posterWizardOpen, setPosterWizardOpen] = useState(false);
   const [layoutToolsOpen, setLayoutToolsOpen] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
   const confirmResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -480,6 +486,26 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
         >
           {status === "running" ? "生成中" : "开始生成"}
         </button>
+        <button
+          type="button"
+          className="btn btn--secondary"
+          onClick={() => setPosterWizardOpen(true)}
+          disabled={status === "running"}
+          style={compactTopActionButtonStyle}
+        >
+          海报向导
+        </button>
+        {posterLastResult && (
+          <button
+            type="button"
+            className="btn btn--ghost"
+            onClick={undoPosterGeneration}
+            disabled={status === "running"}
+            style={compactTopActionButtonStyle}
+          >
+            撤销海报
+          </button>
+        )}
         <button
           type="button"
           className="btn btn--secondary"
@@ -1096,6 +1122,15 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
       </div>
 
       </section>
+      {posterWizardOpen && (
+        <PosterWizard
+          provider={settings.imageProvider}
+          running={posterRunning}
+          onGenerate={runPosterWizard}
+          onCancel={stopGeneration}
+          onClose={() => setPosterWizardOpen(false)}
+        />
+      )}
       {toast && (
         <OverlayPortal>
           <div className={`toast toast--${toast.type}`}>
