@@ -4,6 +4,7 @@ import { useGenerationController } from "../hooks/useGenerationController";
 import OverlayPortal from "../components/OverlayPortal";
 import PromptParamControls from "../components/PromptParamControls";
 import GenerationTaskCards from "../components/GenerationTaskCards";
+import GenerationRecycleBin from "../components/GenerationRecycleBin";
 
 interface Props {
   settings: AppSettings;
@@ -76,6 +77,11 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     historyError,
     restoreHistoryConfig,
     pasteHistoryResult,
+    recycleBinEntries,
+    recycleBinLoading,
+    recycleBinError,
+    pasteRecycleBinResult,
+    rerunRecycleBinEntry,
     batchItems,
     addToBatch,
     removeFromBatch,
@@ -589,6 +595,16 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   </div>
                 )}
               </section>
+
+              <GenerationRecycleBin
+                entries={recycleBinEntries}
+                loading={recycleBinLoading}
+                error={recycleBinError}
+                disabled={status === "running"}
+                onReadPreview={controller.readRecycleBinPreview}
+                onPaste={pasteRecycleBinResult}
+                onRerun={rerunRecycleBinEntry}
+              />
 
               {/* 模型与采样 */}
               <hr style={{ margin: "0.2rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />

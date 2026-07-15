@@ -55,10 +55,12 @@ import {
 import { LatestLoadGate } from "../services/loadGate";
 import { translateText } from "../services/translator";
 import { useGenerationHistory } from "./useGenerationHistory";
-import type { GenerationHistoryEntry } from "../services/generationHistory";
+import { createGenerationThumbnail, type GenerationHistoryEntry } from "../services/generationHistory";
 import { normalizePromptParams, sanitizePrompt } from "../services/promptParams";
 import { useGenerationTaskPool } from "./useGenerationTaskPool";
 import type { GenerationTaskSnapshot } from "../services/generationTaskPool";
+import type { RecycleBinEntry } from "../services/generationRecycleBin";
+import { useGenerationRecycleBin } from "./useGenerationRecycleBin";
 
 export type GenerationStatus = "idle" | "running" | "success" | "error";
 export type ToastType = "info" | "success" | "warning" | "error";
@@ -119,6 +121,7 @@ interface PreparedPoolTask {
   selection: SelectionPixels | null;
   width: number;
   height: number;
+  sourceDocumentId?: number;
   groupName?: string;
   prepareReturn?: () => Promise<void>;
 }
@@ -415,6 +418,13 @@ export interface GenerationControllerState {
   historyError: string | null;
   restoreHistoryConfig: (id: string) => Promise<void>;
   pasteHistoryResult: (id: string) => Promise<void>;
+  recycleBinEntries: RecycleBinEntry[];
+  recycleBinLoading: boolean;
+  recycleBinError: string | null;
+  readRecycleBinImages: (id: string) => Promise<string[]>;
+  readRecycleBinPreview: (id: string) => Promise<string | null>;
+  pasteRecycleBinResult: (id: string) => Promise<void>;
+  rerunRecycleBinEntry: (id: string) => Promise<void>;
   batchItems: BatchItem[];
   addToBatch: () => Promise<void>;
   removeFromBatch: (id: string) => Promise<void>;
@@ -467,6 +477,7 @@ export const useGenerationController = (
 ): GenerationControllerState => {
   const engine = useGenerationEngine(settings);
   const taskPool = useGenerationTaskPool(settings.maxConcurrentTasks);
+  const recycleBin = useGenerationRecycleBin();
   const {
     token: engineToken,
     isCurrent: isEngineCurrent,
@@ -496,11 +507,13 @@ export const useGenerationController = (
   const toastRef = useRef<ToastState | null>(null);
   const presetsLoadGateRef = useRef(new LatestLoadGate());
   const settingsRef = useRef(settings);
+  const engineRef = useRef(engine);
   const historyRestoreGenerationRef = useRef(0);
   const historyRestoreQueueRef = useRef<Promise<void>>(Promise.resolve());
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
+  engineRef.current = engine;
   const clearToastTimer = useCallback(() => {
     if (toastTimerRef.current) {
       clearTimeout(toastTimerRef.current);
@@ -933,10 +946,33 @@ export const useGenerationController = (
       engine: prepared.engine.provider,
       timeoutSeconds,
       run: async ({ signal, updateProgress }) => {
+        await recycleBin.begin({
+          taskId: prepared.id,
+          prompt: effectivePromptFor(prepared.form),
+          params: prepared.form,
+          provider: prepared.engine.provider,
+          context: {
+            width: prepared.width,
+            height: prepared.height,
+            ...(prepared.sourceDocumentId ? { documentId: prepared.sourceDocumentId } : {}),
+            ...(prepared.selection?.selectionBounds
+              ? { selectionBounds: prepared.selection.selectionBounds }
+              : {})
+          }
+        });
         updateProgress(0.02);
-        const result = await prepared.engine.generate({ ...request, signal });
-        updateProgress(1);
-        return result.images;
+        try {
+          const result = await prepared.engine.generate({ ...request, signal });
+          if (signal.aborted) throw new DOMException("任务已取消", "AbortError");
+          updateProgress(1);
+          return result.images;
+        } catch (caught) {
+          const terminal = signal.aborted || isGenerationCancelledError(caught)
+            ? recycleBin.abort(prepared.id)
+            : recycleBin.fail(prepared.id, caught);
+          await terminal.catch(() => undefined);
+          throw caught;
+        }
       },
       returnImages: async (images, context) => {
         markCleanupPending = context.markCleanupPending;
@@ -966,6 +1002,7 @@ export const useGenerationController = (
         markCleanupPending = null;
       },
       cancelNetwork: () => {
+        void recycleBin.abort(prepared.id).catch(() => undefined);
         prepared.engine.cancel(prepared.id);
       },
       clearPendingReturn: () => {
@@ -988,6 +1025,7 @@ export const useGenerationController = (
       },
       onResult: async (images) => {
         setLastImages(images.map(toDataUrl));
+        await recycleBin.complete(prepared.id, images).catch(() => undefined);
         await recordHistory({
           provider: prepared.settings.imageProvider,
           prompt: effectivePromptFor(prepared.form),
@@ -999,7 +1037,141 @@ export const useGenerationController = (
       isDeferredReturnError: isPSBusyError,
       formatError: (caught) => formatGenerationError(caught, "生成任务失败")
     });
-  }, [recordHistory, taskPool]);
+  }, [recordHistory, recycleBin.abort, recycleBin.begin, recycleBin.complete, recycleBin.fail, taskPool]);
+
+  const pasteRecycleBinResult = useCallback(async (id: string) => {
+    const entry = recycleBin.entries.find(({ taskId }) => taskId === id);
+    if (!entry) {
+      pushToast("warning", "未找到这条回收站记录");
+      return;
+    }
+    try {
+      const dataUrls = await recycleBin.readImages(id);
+      if (!dataUrls.length) throw new Error("这条记录没有可恢复的图片");
+      const taskId = `recycle-${generateId()}`;
+      let useSelection = false;
+      if (entry.context.selectionBounds) {
+        if (entry.context.documentId) {
+          try {
+            await switchToDocument(entry.context.documentId, { taskId });
+            await setSelectionBounds(entry.context.selectionBounds, { taskId });
+            useSelection = true;
+          } catch {
+            useSelection = await hasActiveSelection({ taskId });
+          }
+        } else {
+          useSelection = await hasActiveSelection({ taskId });
+        }
+      }
+      const rawImages = dataUrls.map(dataUrlToBase64);
+      if (useSelection) {
+        await returnGenerationImages(
+          engineRef.current,
+          rawImages,
+          {
+            feather: hydrateHistoryForm(entry.params, entry.prompt).maskFeather,
+            taskId,
+            groupName: "PXD 回收站恢复"
+          },
+          {
+            ...GENERATION_WORKFLOW_ADAPTERS,
+            rollback: async ({ placedLayerIds, groupLayerId }) => {
+              if (groupLayerId || placedLayerIds.length) {
+                await deleteLayers(groupLayerId ? [groupLayerId] : placedLayerIds, { taskId });
+              }
+              await deleteTaskLayers(taskId, { taskId });
+            }
+          }
+        );
+      } else {
+        const session = await createGeneratedDocument(
+          entry.context.width,
+          entry.context.height,
+          "PXD 回收站恢复",
+          { taskId }
+        );
+        try {
+          await returnGenerationImages(
+            engineRef.current,
+            rawImages,
+            { feather: 0, taskId, groupName: "PXD 回收站恢复" },
+            {
+              ...GENERATION_WORKFLOW_ADAPTERS,
+              placeImage: (dataUrl, index) => placeImageIntoDocument(
+                dataUrl,
+                index,
+                session.documentId,
+                { taskId }
+              )
+            }
+          );
+        } catch (caught) {
+          await closeGeneratedDocument(session.documentId, session.previousDocumentId, { taskId })
+            .catch(() => undefined);
+          throw caught;
+        }
+      }
+      pushToast("success", "回收站图片已智能贴回");
+    } catch (caught) {
+      pushToast("error", caught instanceof Error ? caught.message : "回收站图片贴回失败");
+    }
+  }, [pushToast, recycleBin.entries, recycleBin.readImages]);
+
+  const readRecycleBinPreview = useCallback(async (id: string) => {
+    const dataUrl = await recycleBin.readPreview(id);
+    if (!dataUrl) return null;
+    return await createGenerationThumbnail(dataUrl).catch(() => dataUrl);
+  }, [recycleBin.readPreview]);
+
+  const rerunRecycleBinEntry = useCallback(async (id: string) => {
+    const entry = recycleBin.entries.find(({ taskId }) => taskId === id);
+    if (!entry) {
+      pushToast("warning", "未找到这条回收站记录");
+      return;
+    }
+    if (entry.status !== "failed" && entry.status !== "aborted") {
+      pushToast("warning", "只有失败或中断的任务可以重新生成");
+      return;
+    }
+    try {
+      const restoredForm = hydrateHistoryForm(entry.params, entry.prompt);
+      if (engineRef.current.provider !== entry.provider) {
+        if (!settingsActions.updateSettings) throw new Error("当前界面无法切换生成引擎");
+        await settingsActions.updateSettings({ imageProvider: entry.provider });
+        settingsRef.current = { ...settingsRef.current, imageProvider: entry.provider };
+        const deadline = Date.now() + 5_000;
+        while (engineRef.current.provider !== entry.provider && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        if (engineRef.current.provider !== entry.provider) throw new Error("生成引擎切换超时");
+      }
+      setForm(restoredForm);
+      const taskId = generateId();
+      const selection = await getSelectionPixels({ taskId });
+      if (!selection && entry.provider === "gemini") throw new Error("请先在 Photoshop 中选择一个区域");
+      const target = clampNumber(restoredForm.resolution, 128, 2048);
+      const { width, height } = selection
+        ? computeOverrideSize(selection.width, selection.height, target)
+        : { width: target, height: target };
+      const sourceDocumentId = await getActiveDocumentId({ taskId }).catch(() => undefined) ?? undefined;
+      const completion = await enqueuePreparedTask({
+        id: taskId,
+        title: createBatchItemName(restoredForm, taskPool.tasks.length),
+        engine: engineRef.current,
+        settings: { ...settingsRef.current, imageProvider: entry.provider },
+        form: restoredForm,
+        selection,
+        width,
+        height,
+        sourceDocumentId
+      });
+      if (completion.status === "success") pushToast("success", "回收站任务已重新生成并回传");
+      else if (completion.status === "awaiting-return") pushToast("warning", "重新生成完成，等待手动回传");
+      else if (completion.status === "error") pushToast("error", completion.error ?? "重新生成失败");
+    } catch (caught) {
+      pushToast("error", formatGenerationError(caught, "重新生成失败"));
+    }
+  }, [enqueuePreparedTask, pushToast, recycleBin.entries, settingsActions.updateSettings, taskPool.tasks.length]);
 
   useEffect(() => {
     const activeTask = taskPool.tasks.find(({ status: taskStatus }) =>
@@ -1077,6 +1249,7 @@ export const useGenerationController = (
       const { width, height } = selection
         ? computeOverrideSize(selection.width, selection.height, target)
         : { width: target, height: target };
+      const sourceDocumentId = await getActiveDocumentId({ taskId }).catch(() => undefined) ?? undefined;
       const completion = await enqueuePreparedTask({
         id: taskId,
         title: createBatchItemName(form, taskPool.tasks.length),
@@ -1085,7 +1258,8 @@ export const useGenerationController = (
         form: { ...form },
         selection,
         width,
-        height
+        height,
+        sourceDocumentId
       });
       if (completion.status === "success" && toastRef.current?.type !== "warning") {
         pushToast("success", "生成成功并已回传");
@@ -1208,6 +1382,7 @@ export const useGenerationController = (
           selection: item.selection,
           width: item.overrideWidth,
           height: item.overrideHeight,
+          sourceDocumentId: item.metadata?.activeDocumentId,
           groupName: item.name,
           prepareReturn: async () => {
             if (item.metadata?.activeDocumentId) {
@@ -1303,6 +1478,13 @@ export const useGenerationController = (
     historyError,
     restoreHistoryConfig,
     pasteHistoryResult,
+    recycleBinEntries: recycleBin.entries,
+    recycleBinLoading: recycleBin.loading,
+    recycleBinError: recycleBin.error,
+    readRecycleBinImages: recycleBin.readImages,
+    readRecycleBinPreview,
+    pasteRecycleBinResult,
+    rerunRecycleBinEntry,
     batchItems,
     addToBatch,
     removeFromBatch,

@@ -383,6 +383,84 @@ describe("useGenerationController generation history integration", () => {
   );
 });
 
+describe("useGenerationController recycle bin integration", () => {
+  it("persists pending before the network settles and archives returned assets before success", async () => {
+    let resolveGeneration!: (value: { images: string[] }) => void;
+    boundary.forgeClient.img2img.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveGeneration = resolve;
+    }));
+    const rendered = trackedRender();
+    await flush();
+
+    let generation!: Promise<void>;
+    await act(async () => {
+      generation = rendered.getController().runGeneration();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(rendered.getController().recycleBinEntries).toHaveLength(1);
+    expect(rendered.getController().recycleBinEntries[0]).toMatchObject({ status: "pending", assets: [] });
+
+    await act(async () => {
+      resolveGeneration({ images: ["AQID"] });
+      await generation;
+    });
+    expect(rendered.getController().recycleBinEntries[0]).toMatchObject({
+      status: "success",
+      assets: [{ byteLength: 3, mimeType: "image/png" }]
+    });
+    expect(await rendered.getController().readRecycleBinImages(
+      rendered.getController().recycleBinEntries[0].taskId
+    )).toEqual(["data:image/png;base64,AQID"]);
+  });
+
+  it("restores the original document and selection when intelligently pasting an asset", async () => {
+    boundary.forgeClient.img2img.mockResolvedValueOnce({ images: ["AQID"] });
+    const rendered = trackedRender();
+    await flush();
+    await act(async () => {
+      await rendered.getController().runGeneration();
+    });
+    const archived = rendered.getController().recycleBinEntries[0];
+    boundary.photoshop.switchToDocument.mockClear();
+    boundary.photoshop.setSelectionBounds.mockClear();
+    boundary.photoshop.placeImageIntoSelection.mockClear();
+
+    await act(async () => {
+      await rendered.getController().pasteRecycleBinResult(archived.taskId);
+    });
+
+    expect(boundary.photoshop.switchToDocument).toHaveBeenCalledWith(7, expect.any(Object));
+    expect(boundary.photoshop.setSelectionBounds).toHaveBeenCalledWith(selection("").selectionBounds, expect.any(Object));
+    expect(boundary.photoshop.placeImageIntoSelection).toHaveBeenCalledWith(
+      "data:image/png;base64,AQID",
+      1,
+      expect.any(Object)
+    );
+  });
+
+  it("reruns a failed archived request with a new task id", async () => {
+    boundary.forgeClient.img2img
+      .mockRejectedValueOnce(new Error("network failed"))
+      .mockResolvedValueOnce({ images: ["AQID"] });
+    const rendered = trackedRender();
+    await flush();
+    await act(async () => {
+      await rendered.getController().runGeneration();
+    });
+    const failed = rendered.getController().recycleBinEntries[0];
+    expect(failed.status).toBe("failed");
+
+    await act(async () => {
+      await rendered.getController().rerunRecycleBinEntry(failed.taskId);
+    });
+
+    expect(boundary.forgeClient.img2img).toHaveBeenCalledTimes(2);
+    expect(rendered.getController().recycleBinEntries[0]).toMatchObject({ status: "success" });
+    expect(rendered.getController().recycleBinEntries[0].taskId).not.toBe(failed.taskId);
+  });
+});
+
 describe("useGenerationController history provider restoration", () => {
   const persistedEntry = (id: string, provider: AppSettings["imageProvider"], prompt: string, offset: number) => ({
     id,
