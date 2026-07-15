@@ -335,6 +335,90 @@ describe("useGenerationController generation history integration", () => {
     expect(rendered.getController().history).toHaveLength(1);
   });
 
+  it("does not let resolved colorize history tail overwrite a newer colorize run", async () => {
+    let finishHistoryWrite: (() => void) | undefined;
+    boundary.storage.writeJsonFile.mockImplementation(() => new Promise<void>((resolve) => {
+      finishHistoryWrite = resolve;
+    }));
+    boundary.geminiClient.editImage
+      .mockResolvedValueOnce("FIRST_COLOR")
+      .mockImplementation(({ signal }) => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }));
+    const rendered = trackedRender({
+      initialSettings: { ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }
+    });
+    await flush();
+
+    let firstRun!: Promise<void>;
+    act(() => {
+      firstRun = rendered.getController().runColorize();
+    });
+    await flush();
+    expect(rendered.getController().status).toBe("success");
+
+    let secondRun!: Promise<void>;
+    act(() => {
+      secondRun = rendered.getController().runColorize();
+    });
+    await flush();
+    expect(rendered.getController().status).toBe("running");
+    expect(rendered.getController().colorizeStatus).toBe("generating");
+    expect(rendered.getController().progressText).toBe("闭源引擎正在重新上色");
+    expect(rendered.getController().toast).toBeNull();
+
+    finishHistoryWrite?.();
+    await act(async () => firstRun);
+    expect(rendered.getController().status).toBe("running");
+    expect(rendered.getController().colorizeStatus).toBe("generating");
+    expect(rendered.getController().progressText).toBe("闭源引擎正在重新上色");
+    expect(rendered.getController().toast).toBeNull();
+
+    act(() => rendered.getController().stopGeneration());
+    await act(async () => secondRun);
+  });
+
+  it("does not let rejected colorize history tail overwrite a newer normal run", async () => {
+    let failHistoryWrite: ((error: Error) => void) | undefined;
+    boundary.storage.writeJsonFile.mockImplementation(() => new Promise<void>((_resolve, reject) => {
+      failHistoryWrite = reject;
+    }));
+    let rejectSecondGeneration: ((error: Error) => void) | undefined;
+    boundary.geminiClient.editImage
+      .mockResolvedValueOnce("FIRST_COLOR")
+      .mockImplementation(() => new Promise((_resolve, reject) => {
+        rejectSecondGeneration = reject;
+      }));
+    const rendered = trackedRender({
+      initialSettings: { ...DEFAULT_SETTINGS, imageProvider: "gemini", offlineMode: false }
+    });
+    await flush();
+
+    let firstRun!: Promise<void>;
+    act(() => {
+      firstRun = rendered.getController().runColorize();
+    });
+    await flush();
+
+    let secondRun!: Promise<void>;
+    act(() => {
+      secondRun = rendered.getController().runGeneration();
+    });
+    await flush();
+    expect(rendered.getController().status).toBe("running");
+    expect(rendered.getController().toast).toBeNull();
+
+    failHistoryWrite?.(new Error("disk full"));
+    await act(async () => firstRun);
+    expect(rendered.getController().status).toBe("running");
+    expect(rendered.getController().progressText).toBeNull();
+    expect(rendered.getController().toast).toBeNull();
+
+    act(() => rendered.getController().stopGeneration());
+    rejectSecondGeneration?.(new Error("stopped"));
+    await act(async () => secondRun);
+  });
+
   it("records a single generation and restores its provider and complete form", async () => {
     const rendered = trackedRender();
     await flush();

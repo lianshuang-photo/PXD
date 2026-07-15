@@ -483,6 +483,7 @@ export const useGenerationController = (
   }, [settings]);
   const runGateRef = useRef(new GenerationRunGate());
   const colorizeAbortRef = useRef<AbortController | null>(null);
+  const colorizeHistoryTailCountRef = useRef(0);
   const stoppedByEngineChangeRef = useRef(false);
 
   useLayoutEffect(() => {
@@ -516,7 +517,10 @@ export const useGenerationController = (
     loading: historyLoading,
     error: historyError,
     record: recordHistory
-  } = useGenerationHistory<GenerationForm>((message) => pushToast("warning", message));
+  } = useGenerationHistory<GenerationForm>((message) => {
+    if (colorizeHistoryTailCountRef.current > 0) return;
+    pushToast("warning", message);
+  });
   const dismissToast = useCallback(() => {
     clearToastTimer();
     setToast(null);
@@ -1034,17 +1038,22 @@ export const useGenerationController = (
       setProgress(0);
       setProgressPreview(null);
       setProgressText(null);
-      const historyRecord = await recordHistory({
-        provider: "gemini",
-        prompt: colorizePrompt.trim() || "AI 智能调色",
-        params: {
-          ...form,
-          positivePrompt: colorizePrompt.trim() || "AI 智能调色",
-          extraPrompt: ""
-        },
-        resultDataUrl
-      });
-      if (historyRecord && isEngineCurrent(requestToken)) pushToast("success", "智能调色完成");
+      pushToast("success", "智能调色完成");
+      colorizeHistoryTailCountRef.current += 1;
+      try {
+        await recordHistory({
+          provider: "gemini",
+          prompt: colorizePrompt.trim() || "AI 智能调色",
+          params: {
+            ...form,
+            positivePrompt: colorizePrompt.trim() || "AI 智能调色",
+            extraPrompt: ""
+          },
+          resultDataUrl
+        });
+      } finally {
+        colorizeHistoryTailCountRef.current -= 1;
+      }
     } catch (caught) {
       if (photoshopCommitted) return;
       if (!isRunCurrent()) return;
@@ -1055,13 +1064,18 @@ export const useGenerationController = (
       setError(message);
       pushToast("error", message);
     } finally {
-      if (colorizeAbortRef.current === controller) colorizeAbortRef.current = null;
-      if (runGateRef.current.isCurrent(runToken)) runGateRef.current.complete(runToken);
-      commitIfCurrent(requestToken, () => {
-        setProgress(0);
-        setProgressPreview(null);
-        setProgressText(null);
-      });
+      if (!photoshopCommitted) {
+        const runIsCurrent = runGateRef.current.isCurrent(runToken);
+        if (colorizeAbortRef.current === controller) colorizeAbortRef.current = null;
+        if (runIsCurrent) {
+          runGateRef.current.complete(runToken);
+          commitIfCurrent(requestToken, () => {
+            setProgress(0);
+            setProgressPreview(null);
+            setProgressText(null);
+          });
+        }
+      }
     }
   }, [colorizePrompt, commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pushToast, recordHistory, settings]);
 
