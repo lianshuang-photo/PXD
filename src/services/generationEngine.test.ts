@@ -111,6 +111,23 @@ describe("createGenerationEngine", () => {
     });
   });
 
+  it("forwards poster system instructions and aspect ratio only to Gemini", async () => {
+    const clients = makeClients();
+    const engine = createGenerationEngine(geminiSettings, clients.factories);
+
+    await engine.generate({
+      ...request,
+      forgeParams: undefined,
+      systemPrompt: "locked constraints",
+      aspectRatio: "4:5"
+    });
+
+    expect(clients.geminiClient.editImage).toHaveBeenCalledWith(expect.objectContaining({
+      systemPrompt: "locked constraints",
+      aspectRatio: "4:5"
+    }));
+  });
+
   it("wraps Forge failures in the shared actionable error contract", async () => {
     const clients = makeClients();
     clients.forgeClient.img2img.mockRejectedValue(new Error("connection refused"));

@@ -14,8 +14,10 @@ export interface EngineResult {
 
 export interface EngineGenerateParams {
   prompt: string;
+  systemPrompt?: string;
   baseImageBase64: string;
   refImagesBase64?: string[];
+  aspectRatio?: string;
   timeoutMs: number;
   forgeParams?: Img2ImgParams;
   forgeTxt2ImgParams?: Txt2ImgParams;
@@ -118,9 +120,10 @@ export const createGenerationEngine = (
         try {
           const image = await client.editImage({
             prompt: params.prompt,
+            systemPrompt: params.systemPrompt,
             baseImageBase64: params.baseImageBase64,
             refImagesBase64: params.refImagesBase64,
-            aspectRatio: "Auto",
+            aspectRatio: params.aspectRatio ?? "Auto",
             timeoutMs: params.timeoutMs,
             taskId: params.taskId,
             signal: params.signal

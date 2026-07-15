@@ -129,6 +129,23 @@ describe("createImageModelClient", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("keeps a locked poster system instruction separate from the user prompt", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(inlineResponse());
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createImageModelClient(settings).editImage({
+      ...editParams,
+      systemPrompt: "preserve the subject",
+      prompt: "headline: Summer",
+      aspectRatio: "4:5"
+    });
+
+    const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
+    expect(body.systemInstruction).toEqual({ parts: [{ text: "preserve the subject" }] });
+    expect(body.contents[0].parts[0]).toEqual({ text: "headline: Summer" });
+    expect(body.generationConfig.imageConfig).toEqual({ aspectRatio: "4:5" });
+  });
+
   it.each([
     [{ promptFeedback: { blockReason: "PROHIBITED_CONTENT" } }, "SAFETY_INPUT", "输入内容触发安全审查"],
     [{ candidates: [{ finishReason: "SAFETY" }] }, "SAFETY_OUTPUT_SAFETY", "输出内容被拦截"],

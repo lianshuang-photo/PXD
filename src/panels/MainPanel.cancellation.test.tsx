@@ -91,6 +91,7 @@ beforeEach(() => {
     dataUrl: "data:image/png;base64,BASE",
     width: 64,
     height: 64,
+    documentId: 7,
     selectionBounds: { left: 0, top: 0, right: 64, bottom: 64 }
   });
   serviceMocks.img2img.mockImplementation(() => new Promise((_resolve, reject) => {

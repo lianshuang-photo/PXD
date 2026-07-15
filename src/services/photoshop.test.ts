@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const boundary = vi.hoisted(() => ({
   bridge: {
     photoshop: null as any,
-    uxp: undefined,
+    uxp: undefined as any,
     getDataFolder: vi.fn(),
     createSessionToken: vi.fn()
   }
@@ -15,13 +15,123 @@ import {
   closeGeneratedDocument,
   computeSelectionCaptureSize,
   createGeneratedDocument,
+  deleteLayersInDocument,
+  getDocumentPixels,
+  getSelectionMetadata,
   getSelectionPixels,
-  groupLayers
+  groupLayers,
+  isPhotoshopPartialPlacementError,
+  placeImageIntoDocumentBounds,
+  placeImageIntoSelection
 } from "./photoshop";
 
 beforeEach(() => {
   vi.clearAllMocks();
 });
+
+describe("tiled upscale Photoshop adapters", () => {
+  it("reads selection metadata and bounded pixels without exporting the whole selection", async () => {
+    const dispose = vi.fn();
+    const getPixels = vi.fn().mockResolvedValue({ imageData: { dispose } });
+    const encodeImageData = vi.fn().mockResolvedValue("TILE");
+    boundary.bridge.photoshop = {
+      app: {
+        activeDocument: {
+          id: 7,
+          selection: { bounds: { left: 10, top: 20, right: 2010, bottom: 1220 } }
+        }
+      },
+      imaging: { getPixels, encodeImageData },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+
+    await expect(getSelectionMetadata()).resolves.toEqual({
+      documentId: 7,
+      width: 2000,
+      height: 1200,
+      selectionBounds: { left: 10, top: 20, right: 2010, bottom: 1220 }
+    });
+    await expect(getDocumentPixels(7, { left: 100, top: 200, right: 612, bottom: 712 }))
+      .resolves.toBe("data:image/png;base64,TILE");
+    expect(getPixels).toHaveBeenCalledWith(expect.objectContaining({
+      documentID: 7,
+      sourceBounds: { left: 100, top: 200, right: 612, bottom: 712 }
+    }));
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it("places and transforms a feathered tile to exact output bounds", async () => {
+    const file = { write: vi.fn().mockResolvedValue(undefined) };
+    boundary.bridge.uxp = {
+      storage: {
+        formats: { binary: "binary" },
+        localFileSystem: {
+          getTemporaryFolder: vi.fn().mockResolvedValue({ createFile: vi.fn().mockResolvedValue(file) }),
+          createSessionToken: vi.fn().mockResolvedValue("token")
+        }
+      }
+    };
+    const info = {
+      layerID: 42,
+      bounds: {
+        left: { _value: 100 },
+        top: { _value: 50 },
+        right: { _value: 612 },
+        bottom: { _value: 562 }
+      }
+    };
+    const batchPlay = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([info])
+      .mockResolvedValueOnce([]);
+    boundary.bridge.photoshop = {
+      app: { activeDocument: { id: 9 }, batchPlay },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+
+    await expect(placeImageIntoDocumentBounds(
+      "data:image/png;base64,QQ==",
+      { left: 0, top: 0, right: 1024, bottom: 768 },
+      1,
+      9
+    )).resolves.toBe(info);
+
+    expect(batchPlay.mock.calls[2][0][0]).toMatchObject({
+      _obj: "transform",
+      _target: [{ _ref: "layer", _id: 42 }],
+      width: { _unit: "percentUnit", _value: 200 },
+      height: { _unit: "percentUnit", _value: 150 },
+      offset: {
+        horizontal: { _unit: "pixelsUnit", _value: 156 },
+        vertical: { _unit: "pixelsUnit", _value: 78 }
+      }
+    });
+  });
+});
+const setupPlacement = (batchPlay: ReturnType<typeof vi.fn>) => {
+  const file = { write: vi.fn().mockResolvedValue(undefined) };
+  boundary.bridge.uxp = {
+    storage: {
+      formats: { binary: "binary" },
+      localFileSystem: {
+        getTemporaryFolder: vi.fn().mockResolvedValue({
+          createFile: vi.fn().mockResolvedValue(file)
+        }),
+        createSessionToken: vi.fn().mockResolvedValue("temp-token")
+      }
+    }
+  };
+  boundary.bridge.photoshop = {
+    app: {
+      batchPlay,
+      activeDocument: {
+        id: 9,
+        selection: { bounds: { left: 0, top: 0, right: 64, bottom: 64 } }
+      }
+    },
+    core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+  };
+};
 
 describe("createGeneratedDocument", () => {
   it("creates a transparent RGB canvas through the Photoshop DOM", async () => {
@@ -151,6 +261,7 @@ describe("Photoshop selection capture", () => {
       dataUrl: "data:image/png;base64,CAPTURED",
       width: 2000,
       height: 1000,
+      documentId: 7,
       selectionBounds: { left: 10, top: 20, right: 2010, bottom: 1020 }
     });
   });
@@ -179,5 +290,136 @@ describe("Photoshop selection capture", () => {
     await expect(getSelectionPixels({ maxEdge: 768 })).resolves.toBeNull();
     expect(dispose).toHaveBeenCalledOnce();
     errorLog.mockRestore();
+  });
+});
+
+describe("deleteLayersInDocument", () => {
+  it("deletes each unique valid generated layer in one modal transaction", async () => {
+    const batchPlay = vi.fn().mockResolvedValue([]);
+    const executeAsModal = vi.fn().mockImplementation(async (callback) => await callback());
+    boundary.bridge.photoshop = {
+      app: { batchPlay, activeDocument: { id: 1 } },
+      core: { executeAsModal }
+    };
+
+    await deleteLayersInDocument(1, [42, 42, -1, Number.NaN, 77]);
+
+    expect(batchPlay).toHaveBeenCalledWith([
+      { _obj: "delete", _target: [{ _ref: "layer", _id: 42 }] },
+      { _obj: "delete", _target: [{ _ref: "layer", _id: 77 }] }
+    ], { synchronousExecution: true });
+    expect(executeAsModal).toHaveBeenCalledWith(expect.any(Function), {
+      commandName: "撤销 PXD 海报生成"
+    });
+  });
+
+  it("deletes colliding layer ids only in the source document and restores the user's document", async () => {
+    let activeDocumentId = 20;
+    const layersByDocument = new Map([
+      [10, new Set([42])],
+      [20, new Set([42])]
+    ]);
+    const batchPlay = vi.fn().mockImplementation(async (descriptors: any[]) => {
+      for (const descriptor of descriptors) {
+        if (descriptor._obj === "select" && descriptor._target?.[0]?._ref === "document") {
+          activeDocumentId = descriptor._target[0]._id;
+        }
+        if (descriptor._obj === "delete") {
+          layersByDocument.get(activeDocumentId)?.delete(descriptor._target[0]._id);
+        }
+      }
+      return [];
+    });
+    boundary.bridge.photoshop = {
+      app: {
+        batchPlay,
+        get activeDocument() {
+          return { id: activeDocumentId };
+        }
+      },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+
+    await deleteLayersInDocument(10, [42]);
+
+    expect(layersByDocument.get(10)?.has(42)).toBe(false);
+    expect(layersByDocument.get(20)?.has(42)).toBe(true);
+    expect(activeDocumentId).toBe(20);
+    expect(batchPlay.mock.calls.map(([descriptors]) => descriptors[0])).toEqual([
+      { _obj: "select", _target: [{ _ref: "document", _id: 10 }] },
+      { _obj: "delete", _target: [{ _ref: "layer", _id: 42 }] },
+      { _obj: "select", _target: [{ _ref: "document", _id: 20 }] }
+    ]);
+  });
+
+  it("surfaces Photoshop deletion failures", async () => {
+    const failure = new Error("layer is locked");
+    boundary.bridge.photoshop = {
+      app: { batchPlay: vi.fn().mockRejectedValue(failure), activeDocument: { id: 1 } },
+      core: { executeAsModal: vi.fn().mockImplementation(async (callback) => await callback()) }
+    };
+
+    await expect(deleteLayersInDocument(1, [42])).rejects.toBe(failure);
+  });
+});
+
+describe("placeImageIntoSelection partial placement", () => {
+  it("reports the placed layer before a later selection descriptor fails", async () => {
+    const selectionFailure = new Error("selection restore failed");
+    const batchPlay = vi.fn()
+      .mockResolvedValueOnce([{ layerID: 42 }])
+      .mockRejectedValueOnce(selectionFailure);
+    setupPlacement(batchPlay);
+    const onLayerPlaced = vi.fn();
+
+    const operation = placeImageIntoSelection("data:image/png;base64,QQ==", 1, { onLayerPlaced });
+
+    await expect(operation).rejects.toMatchObject({
+      name: "PhotoshopPartialPlacementError",
+      placedLayerId: 42,
+      originalError: selectionFailure
+    });
+    expect(onLayerPlaced).toHaveBeenCalledWith(42);
+    expect(batchPlay.mock.calls[0][0]).toEqual([expect.objectContaining({ _obj: "placeEvent" })]);
+    expect(batchPlay.mock.calls[1][0]).toEqual([expect.objectContaining({ _obj: "set" })]);
+  });
+
+  it("carries the already reported layer id when the active-layer get fails", async () => {
+    const getFailure = new Error("get target failed");
+    const batchPlay = vi.fn()
+      .mockResolvedValueOnce([{ layerID: 43 }])
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(getFailure);
+    setupPlacement(batchPlay);
+    const onLayerPlaced = vi.fn();
+
+    await expect(placeImageIntoSelection("data:image/png;base64,QQ==", 1, {
+      onLayerPlaced
+    })).rejects.toMatchObject({
+      name: "PhotoshopPartialPlacementError",
+      placedLayerId: 43,
+      originalError: getFailure
+    });
+
+    expect(onLayerPlaced).toHaveBeenCalledWith(43);
+    expect(onLayerPlaced).toHaveBeenCalledOnce();
+    expect(batchPlay.mock.calls[2][0][0]).toMatchObject({ _obj: "get" });
+  });
+
+  it("does not report a layer when placeEvent itself fails", async () => {
+    const placeFailure = new Error("place failed");
+    const batchPlay = vi.fn().mockRejectedValueOnce(placeFailure);
+    setupPlacement(batchPlay);
+    const onLayerPlaced = vi.fn();
+
+    const caught = await placeImageIntoSelection(
+      "data:image/png;base64,QQ==",
+      1,
+      { onLayerPlaced }
+    ).catch((error) => error);
+
+    expect(caught).toBe(placeFailure);
+    expect(isPhotoshopPartialPlacementError(caught)).toBe(false);
+    expect(onLayerPlaced).not.toHaveBeenCalled();
   });
 });
