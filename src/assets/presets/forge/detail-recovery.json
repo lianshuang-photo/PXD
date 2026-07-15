@@ -1,0 +1,15 @@
+{
+  "kind": "forge",
+  "title": "细节恢复",
+  "category": "基础生成",
+  "subCategory": "修复",
+  "data": {
+    "positivePrompt": "high quality, natural texture, coherent details",
+    "negativePrompt": "blur, artifacts, oversharpen, plastic texture",
+    "steps": 28,
+    "cfgScale": 6,
+    "denoisingStrength": 0.28,
+    "resolution": 1024,
+    "imageCount": 1
+  }
+}

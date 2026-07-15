@@ -9,7 +9,11 @@ export interface GenerationWorkflowAdapters {
   placeImage: (
     dataUrl: string,
     index: number,
-    options: { feather: number; taskId?: string }
+    options: {
+      feather: number;
+      taskId?: string;
+      onLayerPlaced?: (layerId: number) => void | Promise<void>;
+    }
   ) => Promise<unknown>;
   groupLayers: (
     layerIds: number[],
@@ -28,6 +32,7 @@ export interface GenerationWorkflowTask {
   prepare?: () => Promise<void>;
   onRequestStart?: () => void | Promise<void>;
   onRequestSettled?: () => void | Promise<void>;
+  onLayerPlaced?: (layerId: number) => void | Promise<void>;
   isCurrent?: () => boolean;
 }
 
@@ -50,6 +55,12 @@ const extractLayerId = (info: unknown): number | null => {
     0;
   const numeric = Number(candidate);
   return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+};
+
+const extractPartialLayerId = (error: unknown): number | null => {
+  if (!error || typeof error !== "object") return null;
+  const id = Number((error as { placedLayerId?: unknown }).placedLayerId);
+  return Number.isInteger(id) && id > 0 ? id : null;
 };
 
 export const executeGenerationTask = async (
@@ -88,15 +99,28 @@ export const executeGenerationTask = async (
   }
 
   const placedLayerIds: number[] = [];
+  const reportLayerPlaced = async (layerId: number) => {
+    if (placedLayerIds.includes(layerId)) return;
+    placedLayerIds.push(layerId);
+    await task.onLayerPlaced?.(layerId);
+  };
   for (let index = 0; index < result.images.length; index += 1) {
     assertCurrent();
-    const info = await adapters.placeImage(toDataUrl(result.images[index]), index + 1, {
-      feather: task.feather,
-      taskId: task.taskId
-    });
-    assertCurrent();
+    let info: unknown;
+    try {
+      info = await adapters.placeImage(toDataUrl(result.images[index]), index + 1, {
+        feather: task.feather,
+        taskId: task.taskId,
+        onLayerPlaced: reportLayerPlaced
+      });
+    } catch (error) {
+      const partialLayerId = extractPartialLayerId(error);
+      if (partialLayerId) await reportLayerPlaced(partialLayerId);
+      throw error;
+    }
     const layerId = extractLayerId(info);
-    if (layerId) placedLayerIds.push(layerId);
+    if (layerId) await reportLayerPlaced(layerId);
+    assertCurrent();
   }
   let topLayerId: number | undefined = placedLayerIds[placedLayerIds.length - 1];
   if (placedLayerIds.length > 1) {
