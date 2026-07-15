@@ -4,6 +4,7 @@ import {
   clearPSLockQueue,
   PSCircuitOpenError,
   PSLockCancelledError,
+  PSLateCleanupError,
   PSOperationTimeoutError,
   runPSExclusive
 } from "../src/services/psLock.ts";
@@ -98,4 +99,41 @@ test("clearPSLockQueue only rejects pending entries for the selected task", asyn
   await cancelledAssertion;
   const releaseRetained = await retained;
   releaseRetained();
+});
+
+test("waitForLateSettlement keeps the caller pending through cleanup", async () => {
+  let settle: ((value: number) => void) | undefined;
+  const operation = new Promise<number>((resolve) => { settle = resolve; });
+  let cleaned = false;
+  let callerSettled = false;
+  const timedOut = runPSExclusive(() => operation, {
+    taskId: "wait-late",
+    timeoutMs: 20,
+    waitForLateSettlement: true,
+    onLateSettlement: async () => { cleaned = true; }
+  }).finally(() => { callerSettled = true; });
+  await delay(220);
+  expect(callerSettled).toBe(false);
+  settle?.(42);
+  await expect(timedOut).rejects.toBeInstanceOf(PSOperationTimeoutError);
+  expect(cleaned).toBe(true);
+  await delay(200);
+});
+
+test("a failed late cleanup keeps the circuit open and reaches the waiting caller", async () => {
+  let settle: (() => void) | undefined;
+  const operation = new Promise<void>((resolve) => { settle = resolve; });
+  const timedOut = runPSExclusive(() => operation, {
+    taskId: "cleanup-failed",
+    timeoutMs: 20,
+    waitForLateSettlement: true,
+    onLateSettlement: async () => { throw new Error("cleanup failed"); }
+  });
+  await delay(220);
+  settle?.();
+  await expect(timedOut).rejects.toBeInstanceOf(PSLateCleanupError);
+  await expect(runPSExclusive(() => "must not run", {
+    taskId: "after-cleanup-failure",
+    timeoutMs: 1000
+  })).rejects.toBeInstanceOf(PSCircuitOpenError);
 });

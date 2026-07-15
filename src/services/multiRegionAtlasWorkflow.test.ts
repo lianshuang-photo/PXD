@@ -13,7 +13,8 @@ const regions: AtlasRegionCapture[] = [
     imageWidth: 400,
     imageHeight: 300,
     dataUrl: "data:image/png;base64,QQ==",
-    encodedBytes: 1
+    encodedBytes: 1,
+    selectionChannelName: "channel-one"
   },
   {
     id: "two",
@@ -24,7 +25,8 @@ const regions: AtlasRegionCapture[] = [
     imageWidth: 200,
     imageHeight: 500,
     dataUrl: "data:image/png;base64,Qg==",
-    encodedBytes: 1
+    encodedBytes: 1,
+    selectionChannelName: "channel-two"
   }
 ];
 
@@ -38,7 +40,13 @@ const createHarness = () => {
   } as unknown as GenerationEngine;
   const atlas = { base64: "ATLAS", dataUrl: "data:image/png;base64,ATLAS", width: 512, height: 512, encodedBytes: 5 };
   const resultAtlas = { ...atlas, base64: "RESULT", dataUrl: "data:image/png;base64,RESULT" };
-  const parts = regions.map((region) => ({ regionId: region.id, dataUrl: `data:${region.id}`, width: 100, height: 100 }));
+  const parts = regions.map((region) => ({
+    regionId: region.id,
+    dataUrl: `data:${region.id}`,
+    width: 100,
+    height: 100,
+    encodedBytes: 8
+  }));
   const adapters = {
     compose: vi.fn().mockResolvedValue(atlas),
     normalize: vi.fn().mockResolvedValue(resultAtlas),
@@ -51,7 +59,7 @@ const createHarness = () => {
 const execute = (harness: ReturnType<typeof createHarness>, isCurrent = () => true) =>
   executeMultiRegionAtlasWorkflow({
     engine: harness.engine,
-    regions,
+    regions: regions.map((region) => ({ ...region, bounds: { ...region.bounds } })),
     prompt: "same treatment",
     targetMaxEdge: 1024,
     timeoutMs: 30_000,
@@ -74,7 +82,10 @@ describe("multi-region atlas workflow", () => {
     }));
     expect(harness.adapters.place).toHaveBeenCalledWith(
       7,
-      regions,
+      expect.arrayContaining([
+        expect.objectContaining({ id: "one", dataUrl: "" }),
+        expect.objectContaining({ id: "two", dataUrl: "" })
+      ]),
       harness.parts,
       expect.objectContaining({ taskId: "atlas-task" })
     );
@@ -89,6 +100,9 @@ describe("multi-region atlas workflow", () => {
       expect.objectContaining({ retainedBytes: expect.any(Number) })
     );
     expect(result).toMatchObject({ layerIds: [41, 42], groupId: 50 });
+    expect(result.previewDataUrl).toBe("data:one");
+    expect(result.atlas.dataUrl).toBe("");
+    expect(result.resultAtlas.dataUrl).toBe("");
   });
 
   it("drops a late model result before normalization or Photoshop placement", async () => {

@@ -10,6 +10,7 @@ export interface AtlasRegionCapture {
   imageHeight: number;
   dataUrl: string;
   encodedBytes: number;
+  selectionChannelName: string;
 }
 
 export interface AtlasLayoutItem {

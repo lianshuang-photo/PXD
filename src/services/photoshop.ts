@@ -25,6 +25,7 @@ export interface CapturedAtlasRegion {
   imageHeight: number;
   dataUrl: string;
   encodedBytes: number;
+  selectionChannelName: string;
 }
 
 export interface AtlasPlacementPart {
@@ -32,11 +33,14 @@ export interface AtlasPlacementPart {
   dataUrl: string;
   width: number;
   height: number;
+  encodedBytes: number;
 }
 
 export interface AtlasPlacementOptions extends PhotoshopOperationOptions {
   isCurrent?: () => boolean;
   groupName?: string;
+  feather?: number;
+  maxWorkingBytes?: number;
 }
 
 export interface AtlasPlacementResult {
@@ -92,10 +96,16 @@ const executeAsModalUnlocked = <T>(
 
 const runTransaction = <T>(
   operation: () => Promise<T>,
-  options: PhotoshopOperationOptions = {}
+  options: PhotoshopOperationOptions = {},
+  onLateSettlement?: (settlement:
+    | { status: "fulfilled"; value: T }
+    | { status: "rejected"; reason: unknown }
+  ) => Promise<void> | void
 ): Promise<T> => runPSExclusive(operation, {
   taskId: options.taskId,
-  timeoutMs: options.timeoutMs
+  timeoutMs: options.timeoutMs,
+  waitForLateSettlement: Boolean(onLateSettlement),
+  onLateSettlement
 });
 
 const toBounds = (bounds: any): SelectionBounds => ({
@@ -868,6 +878,30 @@ const base64ByteLength = (value: string) => {
   return Math.max(0, Math.floor(base64.length * 3 / 4) - padding);
 };
 
+const atlasSelectionChannelName = (documentId: number) =>
+  `__PXD_ATLAS_${documentId}_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+
+const storeAtlasSelectionUnlocked = async (name: string) => {
+  const result = await runJsxCodeUnlocked(`
+    var doc = app.activeDocument;
+    var channel = doc.channels.add();
+    channel.name = ${JSON.stringify(name)};
+    doc.selection.store(channel, SelectionType.REPLACE);
+    true;
+  `);
+  if (!result) throw new Error("Photoshop 未能保存多区选区通道");
+};
+
+const removeAtlasSelectionChannelUnlocked = async (name: string) => {
+  const result = await runJsxCodeUnlocked(`
+    var doc = app.activeDocument;
+    var channel = doc.channels.getByName(${JSON.stringify(name)});
+    channel.remove();
+    true;
+  `);
+  if (!result) throw new Error("Photoshop 未能清理多区选区通道");
+};
+
 export const captureAtlasRegion = (
   targetMaxEdge: number,
   options: PhotoshopOperationOptions = {}
@@ -886,90 +920,82 @@ export const captureAtlasRegion = (
   const scale = Math.min(1, maxEdge / Math.max(sourceWidth, sourceHeight));
   const imageWidth = Math.max(1, Math.round(sourceWidth * scale));
   const imageHeight = Math.max(1, Math.round(sourceHeight * scale));
-  const encoded = await executeAsModalUnlocked(photoshop, async () => {
-    const pixels = await photoshop.imaging.getPixels({
-      documentID: documentId,
-      sourceBounds: bounds,
-      targetSize: { width: imageWidth, height: imageHeight },
-      applyAlpha: true,
-      componentSize: 8,
-      colorProfile: "sRGB IEC61966-2.1"
-    });
+  const selectionChannelName = atlasSelectionChannelName(documentId);
+  await storeAtlasSelectionUnlocked(selectionChannelName);
+  try {
+    const encoded = await executeAsModalUnlocked(photoshop, async () => {
+      const pixels = await photoshop.imaging.getPixels({
+        documentID: documentId,
+        sourceBounds: bounds,
+        targetSize: { width: imageWidth, height: imageHeight },
+        applyAlpha: true,
+        componentSize: 8,
+        colorProfile: "sRGB IEC61966-2.1"
+      });
+      try {
+        return String(await photoshop.imaging.encodeImageData({
+          imageData: pixels.imageData,
+          base64: true
+        }));
+      } finally {
+        pixels.imageData.dispose?.();
+      }
+    }, { commandName: "抓取 PXD 多区选区" });
+    if (!encoded) throw new Error("Photoshop 未返回选区图像数据");
+    return {
+      id: `atlas-${documentId}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+      documentId,
+      bounds,
+      sourceWidth,
+      sourceHeight,
+      imageWidth,
+      imageHeight,
+      dataUrl: `data:image/png;base64,${encoded}`,
+      encodedBytes: base64ByteLength(encoded),
+      selectionChannelName
+    };
+  } catch (error) {
     try {
-      return String(await photoshop.imaging.encodeImageData({
-        imageData: pixels.imageData,
-        base64: true
-      }));
-    } finally {
-      pixels.imageData.dispose?.();
+      await removeAtlasSelectionChannelUnlocked(selectionChannelName);
+    } catch (cleanupError) {
+      throw new AtlasPlacementError([
+        { phase: "多区截图", error },
+        { phase: "自动清理选区通道", error: cleanupError }
+      ]);
     }
-  }, { commandName: "抓取 PXD 多区选区" });
-  if (!encoded) throw new Error("Photoshop 未返回选区图像数据");
-  return {
-    id: `atlas-${documentId}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
-    documentId,
-    bounds,
-    sourceWidth,
-    sourceHeight,
-    imageWidth,
-    imageHeight,
-    dataUrl: `data:image/png;base64,${encoded}`,
-    encodedBytes: base64ByteLength(encoded)
-  };
+    throw error;
+  }
 }, options);
 
-const activeLayerIdUnlocked = async (): Promise<number | null> => {
+export const releaseAtlasRegions = (
+  regions: CapturedAtlasRegion[],
+  options: PhotoshopOperationOptions = {}
+): Promise<void> => runTransaction(async () => {
+  if (!regions.length) return;
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  const domId = Number(photoshop.app.activeDocument?.activeLayers?.[0]?.id ?? photoshop.app.activeDocument?.activeLayer?.id);
-  if (Number.isInteger(domId) && domId > 0) return domId;
-  const info = await executeAsModalUnlocked(photoshop, async () => {
-    const result = await photoshop.app.batchPlay(
-      [{ _obj: "get", _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }] }],
-      { synchronousExecution: true }
-    );
-    return result[0];
-  }, DEFAULT_MODAL_OPTIONS);
-  const id = Number(info?.layerID ?? info?.layerId ?? info?.targetLayerID ?? info?.targetLayerId);
-  return Number.isInteger(id) && id > 0 ? id : null;
-};
-
-const deleteLayersUnlocked = async (layerIds: number[]) => {
-  const ids = uniqueLayerIds(layerIds);
-  if (!ids.length) return;
-  const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  await executeAsModalUnlocked(photoshop, async () => {
-    await photoshop.app.batchPlay(
-      ids.map((id) => ({ _obj: "delete", _target: [{ _ref: "layer", _id: id }] })),
-      { synchronousExecution: true }
-    );
-  }, { commandName: "清理 PXD 多区输出" });
-};
-
-const renameLayerUnlocked = async (layerId: number, name: string) => {
-  const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  await executeAsModalUnlocked(photoshop, async () => {
-    await photoshop.app.batchPlay([{
-      _obj: "set",
-      _target: [{ _ref: "layer", _id: layerId }],
-      to: { _obj: "layer", name }
-    }], { synchronousExecution: true });
-  }, DEFAULT_MODAL_OPTIONS);
-};
-
-const restoreSelectionUnlocked = async (bounds: SelectionBounds | null) => {
-  if (bounds) {
-    await setSelectionBoundsUnlocked(bounds);
-    return;
+  const restoreDocumentId = Number(photoshop.app.activeDocument?.id) || null;
+  const errors: Array<{ phase: string; error: unknown }> = [];
+  for (const region of regions) {
+    if (!region.selectionChannelName) continue;
+    try {
+      if (Number(photoshop.app.activeDocument?.id) !== region.documentId) {
+        await switchToDocumentUnlocked(region.documentId);
+      }
+      await removeAtlasSelectionChannelUnlocked(region.selectionChannelName);
+      region.selectionChannelName = "";
+    } catch (error) {
+      errors.push({ phase: `清理选区 ${region.id}`, error });
+    }
   }
-  const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  await executeAsModalUnlocked(photoshop, async () => {
-    await photoshop.app.batchPlay([{
-      _obj: "set",
-      _target: [{ _ref: "channel", _property: "selection" }],
-      to: { _enum: "ordinal", _value: "none" }
-    }], { synchronousExecution: true });
-  }, DEFAULT_MODAL_OPTIONS);
-};
+  if (restoreDocumentId && Number(photoshop.app.activeDocument?.id) !== restoreDocumentId) {
+    try {
+      await switchToDocumentUnlocked(restoreDocumentId);
+    } catch (error) {
+      errors.push({ phase: "恢复活动文档", error });
+    }
+  }
+  if (errors.length) throw new AtlasPlacementError(errors);
+}, options);
 
 const atlasUnitValue = (value: unknown) => {
   if (typeof value === "number") return value;
@@ -981,12 +1007,26 @@ const atlasUnitValue = (value: unknown) => {
   return Number(value);
 };
 
-const resizeAtlasLayerUnlocked = async (
+const atlasLayerId = (info: unknown): number | null => {
+  const record = info as Record<string, unknown> | null;
+  const id = Number(record?.layerID ?? record?.layerId ?? record?.targetLayerID ?? record?.targetLayerId);
+  return Number.isInteger(id) && id > 0 ? id : null;
+};
+
+const atlasActiveLayerInfoInModal = async (photoshop: any) => {
+  const result = await photoshop.app.batchPlay(
+    [{ _obj: "get", _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }] }],
+    { synchronousExecution: true }
+  );
+  return result[0] ?? null;
+};
+
+const resizeAtlasLayerInModal = async (
+  photoshop: any,
   layerId: number,
   layerBounds: unknown,
   target: SelectionBounds
 ) => {
-  const photoshop = ensureModule(getPhotoshop, "Photoshop");
   const record = layerBounds as Record<string, unknown> | null;
   const left = atlasUnitValue(record?.left);
   const top = atlasUnitValue(record?.top);
@@ -1000,27 +1040,23 @@ const resizeAtlasLayerUnlocked = async (
       width <= 0 || height <= 0 || targetWidth <= 0 || targetHeight <= 0) {
     throw new Error("Photoshop 未返回可严格定位的多区图层");
   }
-  await executeAsModalUnlocked(photoshop, async () => {
-    await photoshop.app.batchPlay([{
-      _obj: "transform",
-      _target: [{ _ref: "layer", _id: layerId }],
-      freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
-      width: { _unit: "percentUnit", _value: targetWidth / width * 100 },
-      height: { _unit: "percentUnit", _value: targetHeight / height * 100 },
-      offset: {
-        _obj: "offset",
-        horizontal: { _unit: "pixelsUnit", _value: (target.left + target.right - left - right) / 2 },
-        vertical: { _unit: "pixelsUnit", _value: (target.top + target.bottom - top - bottom) / 2 }
-      }
-    }], { synchronousExecution: true });
-  }, { commandName: "严格定位 PXD 多区图层" });
-  const verified = await executeAsModalUnlocked(photoshop, async () => {
-    const result = await photoshop.app.batchPlay(
-      [{ _obj: "get", _target: [{ _ref: "layer", _id: layerId }] }],
-      { synchronousExecution: true }
-    );
-    return result[0];
-  }, DEFAULT_MODAL_OPTIONS);
+  await photoshop.app.batchPlay([{
+    _obj: "transform",
+    _target: [{ _ref: "layer", _id: layerId }],
+    freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
+    width: { _unit: "percentUnit", _value: targetWidth / width * 100 },
+    height: { _unit: "percentUnit", _value: targetHeight / height * 100 },
+    offset: {
+      _obj: "offset",
+      horizontal: { _unit: "pixelsUnit", _value: (target.left + target.right - left - right) / 2 },
+      vertical: { _unit: "pixelsUnit", _value: (target.top + target.bottom - top - bottom) / 2 }
+    }
+  }], { synchronousExecution: true });
+  const verifiedResult = await photoshop.app.batchPlay(
+    [{ _obj: "get", _target: [{ _ref: "layer", _id: layerId }] }],
+    { synchronousExecution: true }
+  );
+  const verified = verifiedResult[0];
   const verifiedBounds = verified?.bounds ?? verified?.boundsNoEffects;
   const actual = {
     left: atlasUnitValue(verifiedBounds?.left),
@@ -1035,114 +1071,406 @@ const resizeAtlasLayerUnlocked = async (
   }
 };
 
+const createPreparedJsxDescriptor = async (jsx: string, label: string) => {
+  const folder = await bridge.getDataFolder();
+  if (!folder) throw new Error("Photoshop 脚本目录不可用");
+  const safeLabel = label.replace(/[^a-z0-9_-]/gi, "").slice(0, 40) || "atlas";
+  const file = await folder.createFile(
+    `${safeLabel}-${Date.now()}-${Math.floor(Math.random() * 1e6)}.jsx`,
+    { overwrite: true }
+  );
+  await file.write(jsx);
+  const token = await bridge.createSessionToken?.(file);
+  if (!token) throw new Error("Photoshop 脚本 token 创建失败");
+  return {
+    _obj: "AdobeScriptAutomation Scripts",
+    javaScript: { _kind: "local", _path: token },
+    javaScriptMessage: "undefined",
+    _options: { dialogOptions: "dontDisplay" }
+  };
+};
+
+const runPreparedJsxInModal = async (photoshop: any, descriptor: unknown) => {
+  const result = await photoshop.app.batchPlay([descriptor], {
+    modalBehavior: "execute",
+    synchronousExecution: false
+  });
+  const message = String(result?.[0]?.javaScriptMessage ?? "");
+  if (message.startsWith("ERROR:")) throw new Error(message.slice(6));
+  return message;
+};
+
+const setNoSelectionInModal = async (photoshop: any) => {
+  await photoshop.app.batchPlay([{
+    _obj: "set",
+    _target: [{ _ref: "channel", _property: "selection" }],
+    to: { _enum: "ordinal", _value: "none" }
+  }], { synchronousExecution: true });
+};
+
+const selectDocumentInModal = async (photoshop: any, documentId: number) => {
+  await photoshop.app.batchPlay([{
+    _obj: "select",
+    _target: [{ _ref: "document", _id: documentId }]
+  }], { synchronousExecution: true });
+};
+
+const deleteAtlasLayersInModal = async (photoshop: any, layerIds: number[]) => {
+  const ids = uniqueLayerIds(layerIds);
+  if (!ids.length) return;
+  await photoshop.app.batchPlay(
+    ids.map((id) => ({ _obj: "delete", _target: [{ _ref: "layer", _id: id }] })),
+    { synchronousExecution: true }
+  );
+};
+
+const groupAtlasLayersInModal = async (photoshop: any, layerIds: number[], name: string) => {
+  const ids = uniqueLayerIds(layerIds);
+  if (!ids.length) throw new Error("没有可分组的多区图层");
+  const selections = ids.map((id, index) => ({
+    _obj: "select",
+    _target: [{ _ref: "layer", _id: id }],
+    makeVisible: false,
+    ...(index > 0
+      ? { selectionModifier: { _enum: "selectionModifierType", _value: "addToSelection" } }
+      : {})
+  }));
+  await photoshop.app.batchPlay(selections, { synchronousExecution: true });
+  await photoshop.app.batchPlay([{
+    _obj: "make",
+    _target: [{ _ref: "layerSection" }],
+    from: { _ref: "layer", _enum: "ordinal", _value: "targetEnum" },
+    name
+  }], { synchronousExecution: true });
+  const info = await atlasActiveLayerInfoInModal(photoshop);
+  const groupId = atlasLayerId(info);
+  const section = info?.layerSection?._value ?? info?.layerSection;
+  if (!groupId || section !== "layerSectionStart") throw new Error("Photoshop 未创建预期的多区图层组");
+  await photoshop.app.batchPlay([{
+    _obj: "move",
+    _target: [{ _ref: "layer", _id: groupId }],
+    to: { _ref: "layer", _enum: "ordinal", _value: "front" }
+  }], { synchronousExecution: true });
+  return groupId;
+};
+
+const atlasPlacementPeakBytes = (
+  parts: AtlasPlacementPart[],
+  index: number,
+  remainingStringBytes: number,
+  persistentPreviewBytes: number
+) => {
+  const part = parts[index];
+  const base64 = part.dataUrl.includes(",") ? part.dataUrl.slice(part.dataUrl.indexOf(",") + 1) : part.dataUrl;
+  const decodedBytes = base64ByteLength(base64);
+  if (part.encodedBytes !== decodedBytes) throw new Error(`区域 ${index + 1} 的实际编码字节数不一致`);
+  return remainingStringBytes + persistentPreviewBytes + base64.length * 2 + decodedBytes * 4;
+};
+
+const atlasChannelCleanupJsx = (names: string[]) => `
+  (function () {
+    try {
+      var doc = app.activeDocument;
+      var names = ${JSON.stringify(names)};
+      var errors = [];
+      for (var i = 0; i < names.length; i++) {
+        if (!names[i]) continue;
+        try { doc.channels.getByName(names[i]).remove(); }
+        catch (error) {
+          if (i !== 0) errors.push(names[i] + ": " + error.message);
+        }
+      }
+      if (errors.length) return "ERROR:" + errors.join(" | ");
+      return "OK";
+    } catch (error) { return "ERROR:" + error.message; }
+  }());
+`;
+
+const atlasChannelLoadJsx = (name: string) => `
+  (function () {
+    try {
+      var doc = app.activeDocument;
+      doc.selection.load(doc.channels.getByName(${JSON.stringify(name)}), SelectionType.REPLACE);
+      return "OK";
+    } catch (error) { return "ERROR:" + error.message; }
+  }());
+`;
+
+const atlasStoreRestoreSelectionJsx = (name: string) => `
+  (function () {
+    try {
+      var doc = app.activeDocument;
+      try { doc.selection.bounds; }
+      catch (emptyError) { return "NONE"; }
+      var channel = doc.channels.add();
+      channel.name = ${JSON.stringify(name)};
+      doc.selection.store(channel, SelectionType.REPLACE);
+      return "STORED";
+    } catch (error) { return "ERROR:" + error.message; }
+  }());
+`;
+
 export const placeMultiRegionAtlas = (
   documentId: number,
   regions: CapturedAtlasRegion[],
   parts: AtlasPlacementPart[],
   options: AtlasPlacementOptions = {}
-): Promise<AtlasPlacementResult> => runTransaction(async () => {
+): Promise<AtlasPlacementResult> => (async () => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
   const sourceDocumentId = Number(documentId);
-  const restoreDocumentId = Number(photoshop.app.activeDocument?.id) || null;
   if (!Number.isInteger(sourceDocumentId) || sourceDocumentId <= 0 || !regions.length || regions.length !== parts.length) {
     throw new Error("多区贴回参数无效");
   }
   for (let index = 0; index < regions.length; index += 1) {
-    if (regions[index].documentId !== sourceDocumentId || regions[index].id !== parts[index].regionId) {
+    if (
+      regions[index].documentId !== sourceDocumentId ||
+      regions[index].id !== parts[index].regionId ||
+      !regions[index].selectionChannelName ||
+      !parts[index].dataUrl
+    ) {
       throw new Error("多区贴回账本与 Photoshop 选区不一致");
     }
   }
   const assertCurrent = () => {
     if (options.isCurrent && !options.isCurrent()) throw new Error("多区拼接任务已取消");
   };
-  const layerIds: number[] = [];
-  let groupId: number | null = null;
-  let groupingStarted = false;
-  let sourceSelection: SelectionBounds | null = null;
-  let sourceSelectionCaptured = false;
-  const errors: Array<{ phase: string; error: unknown }> = [];
-  const restoreState = async (phase: string) => {
-    if (sourceSelectionCaptured) {
-      try {
-        if (Number(photoshop.app.activeDocument?.id) !== sourceDocumentId) {
-          await switchToDocumentUnlocked(sourceDocumentId);
-        }
-        await restoreSelectionUnlocked(sourceSelection);
-      } catch (error) {
-        errors.push({ phase: `${phase}选区`, error });
-      }
-    }
-    if (restoreDocumentId && restoreDocumentId !== sourceDocumentId) {
-      try {
-        await switchToDocumentUnlocked(restoreDocumentId);
-      } catch (error) {
-        errors.push({ phase: `${phase}文档`, error });
-      }
-    }
-  };
+  const maxWorkingBytes = Math.max(1024 * 1024, options.maxWorkingBytes ?? 96 * 1024 * 1024);
+  const persistentPreviewBytes = parts[0].dataUrl.length * 2;
+  let remainingStringBytes = parts.reduce((total, part) => total + part.dataUrl.length * 2, 0);
+  const tokens: string[] = [];
   try {
-    assertCurrent();
-    if (restoreDocumentId !== sourceDocumentId) await switchToDocumentUnlocked(sourceDocumentId);
-    sourceSelection = photoshop.app.activeDocument?.selection?.bounds
-      ? toBounds(photoshop.app.activeDocument.selection.bounds)
-      : null;
-    sourceSelectionCaptured = true;
     for (let index = 0; index < parts.length; index += 1) {
       assertCurrent();
-      const previousLayerId = await activeLayerIdUnlocked().catch(() => null);
-      try {
-        const info = await placeImageIntoDocumentUnlocked(parts[index].dataUrl, index + 1, sourceDocumentId);
-        const layerId = Number(info?.layerID ?? info?.layerId ?? info?.targetLayerID ?? info?.targetLayerId);
-        if (!Number.isInteger(layerId) || layerId <= 0) throw new Error(`Photoshop 未返回区域 ${index + 1} 的图层 ID`);
-        if (!(info?.smartObject || info?.smartObjectMore || Number(info?.layerKind) === 5)) {
-          throw new Error(`区域 ${index + 1} 未以智能对象置入`);
-        }
-        layerIds.push(layerId);
-        await resizeAtlasLayerUnlocked(layerId, info?.bounds ?? info?.boundsNoEffects, regions[index].bounds);
-        await renameLayerUnlocked(layerId, `PXD 多区 ${index + 1}`);
-      } catch (error) {
-        const landedLayerId = await activeLayerIdUnlocked().catch(() => null);
-        if (landedLayerId && landedLayerId !== previousLayerId && !layerIds.includes(landedLayerId)) {
-          layerIds.push(landedLayerId);
-        }
-        throw error;
-      }
-      assertCurrent();
+      const peak = atlasPlacementPeakBytes(parts, index, remainingStringBytes, persistentPreviewBytes);
+      if (peak > maxWorkingBytes) throw new Error("多区贴回的 base64、二进制与 Uint8Array 峰值超过 96 MiB");
+      const dataUrl = parts[index].dataUrl;
+      const base64 = dataUrl.includes(",") ? dataUrl.slice(dataUrl.indexOf(",") + 1) : dataUrl;
+      tokens.push(await createTempTokenFromBase64(base64, `atlas-${index + 1}.png`));
+      remainingStringBytes -= dataUrl.length * 2;
+      parts[index].dataUrl = "";
     }
-    groupingStarted = true;
-    groupId = await groupLayersUnlocked(layerIds, options.groupName ?? "PXD 多区拼接", { requireGroup: true });
-    if (!groupId) throw new Error("Photoshop 未创建多区输出组");
-    await moveActiveLayerToTopUnlocked(groupId);
-    assertCurrent();
   } catch (error) {
-    errors.push({ phase: "多区贴回", error });
+    try {
+      await releaseAtlasRegions(regions, options);
+    } catch (cleanupError) {
+      throw new AtlasPlacementError([
+        { phase: "准备多区贴回", error },
+        { phase: "自动清理选区通道", error: cleanupError }
+      ]);
+    }
+    throw new AtlasPlacementError([{ phase: "准备多区贴回", error }]);
   }
 
-  await restoreState("恢复");
-  if (!errors.length) {
+  const restoreDocumentId = Number(photoshop.app.activeDocument?.id) || null;
+  const restoreChannelName = atlasSelectionChannelName(sourceDocumentId).replace("__PXD_ATLAS_", "__PXD_ATLAS_RESTORE_");
+  let storeRestoreDescriptor: unknown;
+  let restoreSelectionDescriptor: unknown;
+  let regionSelectionDescriptors: unknown[];
+  let cleanupChannelsDescriptor: unknown;
+  try {
+    storeRestoreDescriptor = await createPreparedJsxDescriptor(
+      atlasStoreRestoreSelectionJsx(restoreChannelName),
+      "atlas-store-selection"
+    );
+    restoreSelectionDescriptor = await createPreparedJsxDescriptor(
+      atlasChannelLoadJsx(restoreChannelName),
+      "atlas-restore-selection"
+    );
+    regionSelectionDescriptors = await Promise.all(regions.map((region, index) =>
+      createPreparedJsxDescriptor(atlasChannelLoadJsx(region.selectionChannelName), `atlas-load-${index + 1}`)
+    ));
+    const allChannelNames = [restoreChannelName, ...regions.map((region) => region.selectionChannelName)];
+    cleanupChannelsDescriptor = await createPreparedJsxDescriptor(
+      atlasChannelCleanupJsx(allChannelNames),
+      "atlas-cleanup-channels"
+    );
+  } catch (error) {
     try {
-      assertCurrent();
-    } catch (error) {
-      errors.push({ phase: "多区贴回", error });
+      await releaseAtlasRegions(regions, options);
+    } catch (cleanupError) {
+      throw new AtlasPlacementError([
+        { phase: "准备 Photoshop 选区脚本", error },
+        { phase: "自动清理选区通道", error: cleanupError }
+      ]);
     }
+    throw new AtlasPlacementError([{ phase: "准备 Photoshop 选区脚本", error }]);
   }
-  if (errors.length) {
-    try {
-      if (Number(photoshop.app.activeDocument?.id) !== sourceDocumentId) {
-        await switchToDocumentUnlocked(sourceDocumentId);
+
+  const layerIds: number[] = [];
+  let groupId: number | null = null;
+  let sourceSelectionStored = false;
+  let rollbackCompleted = false;
+  let channelsCleaned = false;
+  const errors: Array<{ phase: string; error: unknown }> = [];
+  const restoreSelectionInModal = async () => {
+    if (sourceSelectionStored) await runPreparedJsxInModal(photoshop, restoreSelectionDescriptor);
+    else await setNoSelectionInModal(photoshop);
+  };
+  const cleanupChannelsInModal = async () => {
+    if (channelsCleaned) return;
+    await runPreparedJsxInModal(photoshop, cleanupChannelsDescriptor);
+    channelsCleaned = true;
+    for (const region of regions) region.selectionChannelName = "";
+  };
+
+  const operation = async (): Promise<AtlasPlacementResult> => {
+    await photoshop.core.executeAsModal(async (executionContext: any) => {
+      const suspension = await executionContext.hostControl.suspendHistory({
+        documentID: sourceDocumentId,
+        name: options.groupName ?? "PXD 多区拼接"
+      });
+      let operationError: unknown;
+      try {
+        assertCurrent();
+        if (Number(photoshop.app.activeDocument?.id) !== sourceDocumentId) {
+          await selectDocumentInModal(photoshop, sourceDocumentId);
+        }
+        sourceSelectionStored = (await runPreparedJsxInModal(photoshop, storeRestoreDescriptor)) === "STORED";
+        for (let index = 0; index < parts.length; index += 1) {
+          assertCurrent();
+          const previousLayerId = atlasLayerId(await atlasActiveLayerInfoInModal(photoshop));
+          const placed = await photoshop.app.batchPlay([{
+            ID: sourceDocumentId,
+            _obj: "placeEvent",
+            freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
+            null: { _kind: "local", _path: tokens[index] },
+            offset: {
+              _obj: "offset",
+              horizontal: { _unit: "pixelsUnit", _value: 0 },
+              vertical: { _unit: "pixelsUnit", _value: 0 }
+            }
+          }], { synchronousExecution: true });
+          const info = (await atlasActiveLayerInfoInModal(photoshop)) ?? placed?.[0];
+          const layerId = atlasLayerId(info);
+          if (!layerId || layerId === previousLayerId) throw new Error(`Photoshop 未返回区域 ${index + 1} 的图层 ID`);
+          layerIds.push(layerId);
+          if (!(info?.smartObject || info?.smartObjectMore || Number(info?.layerKind) === 5)) {
+            throw new Error(`区域 ${index + 1} 未以智能对象置入`);
+          }
+          await resizeAtlasLayerInModal(photoshop, layerId, info?.bounds ?? info?.boundsNoEffects, regions[index].bounds);
+          await photoshop.app.batchPlay([{
+            _obj: "set",
+            _target: [{ _ref: "layer", _id: layerId }],
+            to: { _obj: "layer", name: `PXD 多区 ${index + 1}` }
+          }], { synchronousExecution: true });
+          await runPreparedJsxInModal(photoshop, regionSelectionDescriptors[index]);
+          const maxFeather = Math.max(0, Math.floor(Math.min(regions[index].sourceWidth, regions[index].sourceHeight) / 2));
+          const feather = Math.max(0, Math.min(maxFeather, Math.round(options.feather ?? 0)));
+          if (feather > 0) {
+            await photoshop.app.batchPlay([{
+              _obj: "feather",
+              radius: { _unit: "pixelsUnit", _value: feather }
+            }], { synchronousExecution: true });
+          }
+          await photoshop.app.batchPlay([{
+            _obj: "make",
+            new: { _class: "channel" },
+            at: { _ref: "channel", _enum: "channel", _value: "mask" },
+            using: { _enum: "userMaskEnabled", _value: "revealSelection" }
+          }], { synchronousExecution: true });
+          const maskedInfo = await atlasActiveLayerInfoInModal(photoshop);
+          if (maskedInfo?.hasUserMask !== true) throw new Error(`区域 ${index + 1} 未保留精确选区蒙版`);
+          assertCurrent();
+        }
+        groupId = await groupAtlasLayersInModal(
+          photoshop,
+          layerIds,
+          options.groupName ?? "PXD 多区拼接"
+        );
+        await restoreSelectionInModal();
+        await cleanupChannelsInModal();
+        if (restoreDocumentId && restoreDocumentId !== sourceDocumentId) {
+          await selectDocumentInModal(photoshop, restoreDocumentId);
+        }
+        assertCurrent();
+      } catch (error) {
+        operationError = error;
+        errors.push({ phase: "多区贴回", error });
+        try {
+          if (Number(photoshop.app.activeDocument?.id) !== sourceDocumentId) {
+            await selectDocumentInModal(photoshop, sourceDocumentId);
+          }
+          await deleteAtlasLayersInModal(photoshop, groupId ? [groupId] : layerIds);
+          groupId = null;
+          layerIds.length = 0;
+        } catch (cleanupError) {
+          errors.push({ phase: "自动清理图层", error: cleanupError });
+        }
+        try {
+          await restoreSelectionInModal();
+        } catch (restoreError) {
+          errors.push({ phase: "恢复精确选区", error: restoreError });
+        }
+        try {
+          await cleanupChannelsInModal();
+        } catch (channelError) {
+          errors.push({ phase: "自动清理选区通道", error: channelError });
+        }
+        if (restoreDocumentId && restoreDocumentId !== sourceDocumentId) {
+          try {
+            await selectDocumentInModal(photoshop, restoreDocumentId);
+          } catch (documentError) {
+            errors.push({ phase: "恢复活动文档", error: documentError });
+          }
+        }
+        rollbackCompleted = errors.every(({ phase }) => phase === "多区贴回");
+      } finally {
+        try {
+          await executionContext.hostControl.resumeHistory(suspension);
+        } catch (resumeError) {
+          errors.push({ phase: "恢复 Photoshop 历史", error: resumeError });
+          if (!operationError) {
+            operationError = resumeError;
+            try {
+              if (Number(photoshop.app.activeDocument?.id) !== sourceDocumentId) {
+                await selectDocumentInModal(photoshop, sourceDocumentId);
+              }
+              await deleteAtlasLayersInModal(photoshop, groupId ? [groupId] : layerIds);
+              groupId = null;
+              layerIds.length = 0;
+              if (restoreDocumentId && restoreDocumentId !== sourceDocumentId) {
+                await selectDocumentInModal(photoshop, restoreDocumentId);
+              }
+              rollbackCompleted = true;
+            } catch (cleanupError) {
+              errors.push({ phase: "历史恢复失败后的自动清理", error: cleanupError });
+            }
+          }
+        }
       }
-      const possibleGroupId = await activeLayerIdUnlocked().catch(() => null);
-      const cleanupIds = groupId
-        ? [groupId]
-        : groupingStarted && possibleGroupId && !layerIds.includes(possibleGroupId)
-          ? [possibleGroupId]
-          : layerIds;
-      await deleteLayersUnlocked(cleanupIds);
-    } catch (error) {
-      errors.push({ phase: "自动清理", error });
-    }
-    await restoreState("补偿后恢复");
-    throw new AtlasPlacementError(errors);
-  }
-  return { layerIds, groupId: groupId as number };
-}, options);
+      if (operationError) throw new AtlasPlacementError(errors);
+    }, { commandName: "PXD 多区拼接贴回" });
+    return { layerIds: [...layerIds], groupId: groupId as number };
+  };
+
+  const lateCleanup = async (settlement:
+    | { status: "fulfilled"; value: AtlasPlacementResult }
+    | { status: "rejected"; reason: unknown }
+  ) => {
+    if (rollbackCompleted) return;
+    await photoshop.core.executeAsModal(async () => {
+      const cleanupErrors: unknown[] = [];
+      try {
+        if (Number(photoshop.app.activeDocument?.id) !== sourceDocumentId) {
+          await selectDocumentInModal(photoshop, sourceDocumentId);
+        }
+        const result = settlement.status === "fulfilled" ? settlement.value : null;
+        await deleteAtlasLayersInModal(photoshop, result?.groupId ? [result.groupId] : groupId ? [groupId] : layerIds);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      if (!channelsCleaned) {
+        try { await cleanupChannelsInModal(); } catch (error) { cleanupErrors.push(error); }
+      }
+      if (restoreDocumentId && restoreDocumentId !== sourceDocumentId) {
+        try { await selectDocumentInModal(photoshop, restoreDocumentId); } catch (error) { cleanupErrors.push(error); }
+      }
+      if (cleanupErrors.length) {
+        throw new Error(cleanupErrors.map((error) => error instanceof Error ? error.message : String(error)).join("; "));
+      }
+      rollbackCompleted = true;
+    }, { commandName: "清理超时的 PXD 多区拼接" });
+  };
+
+  return runTransaction(operation, options, lateCleanup);
+})();

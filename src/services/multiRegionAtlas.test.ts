@@ -15,7 +15,8 @@ const region = (index: number, width: number, height: number): AtlasRegionCaptur
   imageWidth: width,
   imageHeight: height,
   dataUrl: "data:image/png;base64,QQ==",
-  encodedBytes: 1
+  encodedBytes: 1,
+  selectionChannelName: `channel-${index}`
 });
 
 describe("multi-region atlas geometry", () => {

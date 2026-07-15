@@ -12,6 +12,14 @@ export interface AtlasImageResult {
   encodedBytes: number;
 }
 
+export interface SplitAtlasPart {
+  regionId: string;
+  dataUrl: string;
+  width: number;
+  height: number;
+  encodedBytes: number;
+}
+
 export const atlasRetainedBytes = (atlas: AtlasImageResult) =>
   atlas.base64.length * 2 + atlas.dataUrl.length * 2 + atlas.encodedBytes;
 
@@ -91,6 +99,15 @@ export const composeMultiRegionAtlas = async (
       const frame = item.frameBounds;
       context.fillRect(frame.left, frame.top, frame.right - frame.left, frame.bottom - frame.top);
       const content = item.contentBounds;
+      context.save();
+      context.beginPath();
+      context.rect(
+        content.left,
+        content.top,
+        content.right - content.left,
+        content.bottom - content.top
+      );
+      context.clip();
       context.drawImage(
         image,
         content.left,
@@ -98,6 +115,7 @@ export const composeMultiRegionAtlas = async (
         content.right - content.left,
         content.bottom - content.top
       );
+      context.restore();
     }
     assertCurrent(isCurrent);
     const dataUrl = canvas.toDataURL("image/png");
@@ -136,47 +154,24 @@ export const normalizeMultiRegionAtlasResult = async (
   assertCurrent(options.isCurrent);
   const source = imageDimensions(image);
   if (!source.width || !source.height) throw new Error("Atlas 模型结果尺寸无效");
-  const ratioError = Math.abs(source.width / source.height / (plan.width / plan.height) - 1);
-  if (ratioError > 0.01) throw new Error("Atlas 模型结果宽高比已变化，无法按布局账安全拆分");
+  if (source.width !== plan.width || source.height !== plan.height) {
+    throw new Error(
+      `Atlas 模型结果必须精确为 ${plan.width}×${plan.height}，实际为 ${source.width}×${source.height}`
+    );
+  }
   const sourcePixelBytes = source.width * source.height * 4;
   const fixedBytes = plan.captureWorkingBytes + retainedBytes + base64.length * 2 + encodedBytes + sourcePixelBytes;
   if (!Number.isSafeInteger(sourcePixelBytes) || fixedBytes > maxWorkingBytes) {
     throw new Error("Atlas 模型结果的实际尺寸超过 96 MiB 工作内存上限");
   }
-  if (source.width === plan.width && source.height === plan.height) {
-    return { base64, dataUrl, width: source.width, height: source.height, encodedBytes };
-  }
-  const canvas = document.createElement("canvas");
-  canvas.width = plan.width;
-  canvas.height = plan.height;
-  try {
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("当前环境无法校正 Atlas 模型结果尺寸");
-    context.drawImage(image, 0, 0, plan.width, plan.height);
-    assertCurrent(options.isCurrent);
-    const normalizedDataUrl = canvas.toDataURL("image/png");
-    const normalizedBase64 = cleanBase64(normalizedDataUrl);
-    const normalizedEncodedBytes = atlasBase64Bytes(normalizedBase64);
-    const peak = fixedBytes + plan.width * plan.height * 4 + normalizedBase64.length * 2 + normalizedEncodedBytes;
-    if (peak > maxWorkingBytes) throw new Error("校正后的 Atlas 结果仍超过 96 MiB 工作内存上限");
-    return {
-      base64: normalizedBase64,
-      dataUrl: `data:image/png;base64,${normalizedBase64}`,
-      width: plan.width,
-      height: plan.height,
-      encodedBytes: normalizedEncodedBytes
-    };
-  } finally {
-    canvas.width = 0;
-    canvas.height = 0;
-  }
+  return { base64, dataUrl, width: source.width, height: source.height, encodedBytes };
 };
 
 export const splitMultiRegionAtlas = async (
   atlas: AtlasImageResult,
   plan: MultiRegionAtlasPlan,
   options: { maxWorkingBytes?: number; retainedBytes?: number; isCurrent?: () => boolean } = {}
-): Promise<Array<{ regionId: string; dataUrl: string; width: number; height: number }>> => {
+): Promise<SplitAtlasPart[]> => {
   if (typeof Image === "undefined" || typeof document === "undefined") {
     throw new Error("当前环境不支持 Atlas 拆分");
   }
@@ -187,12 +182,13 @@ export const splitMultiRegionAtlas = async (
     throw new Error("Atlas 拆分尺寸与布局账不一致");
   }
   const canvas = document.createElement("canvas");
-  const results: Array<{ regionId: string; dataUrl: string; width: number; height: number }> = [];
+  const results: SplitAtlasPart[] = [];
   let retainedBytes = Math.max(0, options.retainedBytes ?? 0) +
     atlasRetainedBytes(atlas) + plan.width * plan.height * 4;
   try {
     const context = canvas.getContext("2d");
     if (!context) throw new Error("当前环境无法拆分 Atlas");
+    context.imageSmoothingEnabled = false;
     for (const item of plan.items) {
       assertCurrent(options.isCurrent);
       const bounds = item.contentBounds;
@@ -203,11 +199,12 @@ export const splitMultiRegionAtlas = async (
       context.clearRect(0, 0, width, height);
       context.drawImage(image, bounds.left, bounds.top, width, height, 0, 0, width, height);
       const dataUrl = canvas.toDataURL("image/png");
-      retainedBytes += dataUrl.length * 2 + atlasBase64Bytes(dataUrl);
+      const encodedBytes = atlasBase64Bytes(dataUrl);
+      retainedBytes += dataUrl.length * 2 + encodedBytes;
       if (plan.captureWorkingBytes + retainedBytes > maxWorkingBytes) {
         throw new Error("Atlas 拆分结果超过 96 MiB 工作内存上限");
       }
-      results.push({ regionId: item.regionId, dataUrl, width, height });
+      results.push({ regionId: item.regionId, dataUrl, width, height, encodedBytes });
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
     return results;

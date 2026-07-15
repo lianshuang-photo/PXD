@@ -15,6 +15,7 @@ export interface MultiRegionAtlasPart {
   dataUrl: string;
   width: number;
   height: number;
+  encodedBytes: number;
 }
 
 export interface MultiRegionAtlasPlacementResult {
@@ -42,7 +43,7 @@ export interface MultiRegionAtlasWorkflowAdapters {
     documentId: number,
     regions: AtlasRegionCapture[],
     parts: MultiRegionAtlasPart[],
-    options: { taskId: string; isCurrent: () => boolean }
+    options: { taskId: string; maxWorkingBytes: number; isCurrent: () => boolean }
   ) => Promise<MultiRegionAtlasPlacementResult>;
 }
 
@@ -64,6 +65,7 @@ export interface MultiRegionAtlasWorkflowResult extends MultiRegionAtlasPlacemen
   atlas: AtlasImageResult;
   resultAtlas: AtlasImageResult;
   parts: MultiRegionAtlasPart[];
+  previewDataUrl: string;
 }
 
 const staleError = (provider: GenerationEngine["provider"]) => new GenerationEngineError(
@@ -105,7 +107,7 @@ export const executeMultiRegionAtlasWorkflow = async (
     taskId: input.taskId
   });
   assertCurrent();
-  const image = generated.images[0];
+  let image = generated.images[0];
   if (!image) {
     throw new GenerationEngineError(
       "多区拼接未返回图像",
@@ -121,6 +123,8 @@ export const executeMultiRegionAtlasWorkflow = async (
     retainedBytes: inputAtlasRetainedBytes,
     isCurrent: input.isCurrent
   });
+  generated.images[0] = "";
+  image = "";
   assertCurrent();
   const parts = await input.adapters.split(resultAtlas, plan, {
     maxWorkingBytes: input.maxWorkingBytes,
@@ -132,12 +136,19 @@ export const executeMultiRegionAtlasWorkflow = async (
     throw new Error("Atlas 拆分结果与选区账本不一致");
   }
 
+  const previewDataUrl = parts[0].dataUrl;
+  atlas.base64 = "";
+  atlas.dataUrl = "";
+  resultAtlas.base64 = "";
+  resultAtlas.dataUrl = "";
+  for (const region of input.regions) region.dataUrl = "";
+
   input.onProgress?.(0.8, "正在非破坏贴回 Photoshop");
   const placement = await input.adapters.place(documentId, input.regions, parts, {
     taskId: input.taskId,
+    maxWorkingBytes: input.maxWorkingBytes,
     isCurrent: input.isCurrent
   });
-  assertCurrent();
   input.onProgress?.(1, "多区拼接完成");
-  return { plan, atlas, resultAtlas, parts, ...placement };
+  return { plan, atlas, resultAtlas, parts, previewDataUrl, ...placement };
 };

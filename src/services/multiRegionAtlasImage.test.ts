@@ -16,7 +16,8 @@ const regions: AtlasRegionCapture[] = [
     imageWidth: 400,
     imageHeight: 300,
     dataUrl: "data:image/png;base64,QQ==",
-    encodedBytes: 1
+    encodedBytes: 1,
+    selectionChannelName: "channel-one"
   },
   {
     id: "two",
@@ -27,7 +28,8 @@ const regions: AtlasRegionCapture[] = [
     imageWidth: 200,
     imageHeight: 500,
     dataUrl: "data:image/png;base64,Qg==",
-    encodedBytes: 1
+    encodedBytes: 1,
+    selectionChannelName: "channel-two"
   }
 ];
 
@@ -35,6 +37,11 @@ describe("multi-region atlas image processing", () => {
   const drawImage = vi.fn();
   const fillRect = vi.fn();
   const clearRect = vi.fn();
+  const save = vi.fn();
+  const beginPath = vi.fn();
+  const rect = vi.fn();
+  const clip = vi.fn();
+  const restore = vi.fn();
   const canvases: Array<{ width: number; height: number }> = [];
   let imageSizes = [{ width: 400, height: 300 }, { width: 200, height: 500 }];
   let imageIndex = 0;
@@ -62,7 +69,10 @@ describe("multi-region atlas image processing", () => {
         const canvas = {
           width: 0,
           height: 0,
-          getContext: vi.fn().mockReturnValue({ drawImage, fillRect, clearRect, fillStyle: "" }),
+          getContext: vi.fn().mockReturnValue({
+            drawImage, fillRect, clearRect, save, beginPath, rect, clip, restore,
+            fillStyle: "", imageSmoothingEnabled: true
+          }),
           toDataURL: vi.fn().mockReturnValue("data:image/png;base64,QQ==")
         };
         canvases.push(canvas);
@@ -91,10 +101,10 @@ describe("multi-region atlas image processing", () => {
     }
   });
 
-  it("normalizes a same-ratio model result then splits exact content rectangles", async () => {
+  it("accepts an exact-size model result then splits exact content rectangles", async () => {
     const plan = createMultiRegionAtlasPlan({ regions, targetMaxEdge: 1024 });
     imageSizes = [
-      { width: plan.width * 2, height: plan.height * 2 },
+      { width: plan.width, height: plan.height },
       { width: plan.width, height: plan.height }
     ];
     const normalized = await normalizeMultiRegionAtlasResult("QQ==", plan, { isCurrent: () => true });
@@ -110,10 +120,10 @@ describe("multi-region atlas image processing", () => {
     }
   });
 
-  it("rejects a changed result aspect ratio before splitting", async () => {
+  it("rejects any result dimension mismatch even when the aspect ratio is unchanged", async () => {
     const plan = createMultiRegionAtlasPlan({ regions, targetMaxEdge: 1024 });
-    imageSizes = [{ width: plan.width, height: Math.max(1, Math.floor(plan.height / 2)) }];
-    await expect(normalizeMultiRegionAtlasResult("QQ==", plan)).rejects.toThrow("宽高比");
+    imageSizes = [{ width: plan.width * 2, height: plan.height * 2 }];
+    await expect(normalizeMultiRegionAtlasResult("QQ==", plan)).rejects.toThrow("必须精确为");
   });
 
   it("includes a retained input atlas in the 96 MiB peak-memory check", async () => {
