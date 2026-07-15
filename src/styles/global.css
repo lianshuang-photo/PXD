@@ -1181,6 +1181,20 @@ select.input::-ms-expand {
   grid-column: 1 / -1;
 }
 
+.lighting-editor__opacity {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  color: var(--text-secondary);
+  font-size: 0.62rem;
+}
+
+.lighting-editor__opacity input {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+}
+
 .lighting-editor__prompt {
   min-height: 46px;
   resize: vertical;

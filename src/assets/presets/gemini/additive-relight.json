@@ -3,8 +3,9 @@
   "title": "叠加式可视化打光",
   "category": "智能修图",
   "subCategory": "光影",
-  "content": "Use additive relighting only. Preserve identity, pose, composition, materials, global HSL, gamma and white balance. Respect scene depth and occlusion. Do not generate visible fixtures or annotation marks.",
+  "content": "Create only a neutral-gray additive lighting contribution AOV. Preserve the source through depth-aware light falloff and occlusion, but never reproduce or alter source pixels. Do not generate visible fixtures or annotation marks.",
   "relightConfig": {
+    "opacity": 70,
     "lights": [
       {
         "id": "key-1",

@@ -9,6 +9,9 @@ const photoshop = vi.hoisted(() => ({
 }));
 
 vi.mock("./photoshop", () => photoshop);
+vi.mock("./relightEnergyLayer", () => ({
+  prepareRelightEnergyLayer: vi.fn().mockImplementation(async (dataUrl: string) => dataUrl)
+}));
 
 import { RELIGHT_PHOTOSHOP_ADAPTER } from "./relightPhotoshopAdapter";
 
@@ -28,13 +31,18 @@ describe("RELIGHT_PHOTOSHOP_ADAPTER", () => {
     photoshop.placeRelitResult.mockResolvedValue({ layerId: 8 });
     await RELIGHT_PHOTOSHOP_ADAPTER.capture("task-a");
     await RELIGHT_PHOTOSHOP_ADAPTER.validate(source, "task-a");
+    await expect(RELIGHT_PHOTOSHOP_ADAPTER.prepare(
+      "data:image/png;base64,eA==",
+      new AbortController().signal
+    ))
+      .resolves.toBe("data:image/png;base64,eA==");
     const current = () => true;
-    await RELIGHT_PHOTOSHOP_ADAPTER.apply(source, "data:image/png;base64,eA==", "task-a", current);
+    await RELIGHT_PHOTOSHOP_ADAPTER.apply(source, "data:image/png;base64,eA==", 68, "task-a", current);
     await RELIGHT_PHOTOSHOP_ADAPTER.rollback(source, 8, "task-a");
     await RELIGHT_PHOTOSHOP_ADAPTER.restore(source, "task-a");
     expect(photoshop.captureRelightSource).toHaveBeenCalledWith({ taskId: "task-a" });
     expect(photoshop.validateRelightSource).toHaveBeenCalledWith(source, { taskId: "task-a" });
-    expect(photoshop.placeRelitResult).toHaveBeenCalledWith(source, expect.any(String), current, { taskId: "task-a" });
+    expect(photoshop.placeRelitResult).toHaveBeenCalledWith(source, expect.any(String), 68, current, { taskId: "task-a" });
     expect(photoshop.rollbackRelitResult).toHaveBeenCalledWith(source, 8, { taskId: "task-a" });
     expect(photoshop.restoreRelightContext).toHaveBeenCalledWith(source, { taskId: "task-a" });
   });

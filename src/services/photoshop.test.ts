@@ -225,11 +225,24 @@ describe("relight Photoshop boundaries", () => {
 
   it("places a full-canvas result in one history step and restores no selection", async () => {
     const { batchPlay, suspendHistory, resumeHistory } = preparePlacementBoundary();
-    await expect(placeRelitResult(fullSource, "data:image/png;base64,cmVzdWx0", () => true))
+    await expect(placeRelitResult(fullSource, "data:image/png;base64,cmVzdWx0", 64, () => true))
       .resolves.toEqual({ layerId: 42 });
-    expect(suspendHistory).toHaveBeenCalledWith({ documentID: 7, name: "AI 可视化打光" });
+    expect(suspendHistory).toHaveBeenCalledOnce();
+    expect(suspendHistory).toHaveBeenCalledWith({ documentID: 7, name: "AI 无损打光" });
     expect(resumeHistory).toHaveBeenCalledWith("history-token");
     const descriptors = batchPlay.mock.calls.flatMap((call) => call[0]);
+    expect(descriptors).toContainEqual({
+      _obj: "set",
+      _target: [{ _ref: "layer", _id: 42 }],
+      to: {
+        _obj: "layer",
+        name: "AI 无损打光 · 能量层",
+        mode: { _enum: "blendMode", _value: "softLight" },
+        opacity: { _unit: "percentUnit", _value: 64 }
+      }
+    });
+    expect(descriptors.filter((descriptor) => descriptor._target?.[0]?._ref === "layer" && descriptor._target[0]._id)
+      .every((descriptor) => descriptor._target[0]._id === 42)).toBe(true);
     expect(descriptors).toContainEqual(expect.objectContaining({
       _obj: "set",
       to: { _enum: "ordinal", _value: "none" }
@@ -245,6 +258,7 @@ describe("relight Photoshop boundaries", () => {
     await expect(placeRelitResult(
       { ...fullSource, selectionBounds },
       "data:image/png;base64,cmVzdWx0",
+      70,
       current
     )).rejects.toThrow("RELIGHT_CANCELLED");
     const descriptors = batchPlay.mock.calls.flatMap((call) => call[0]);
@@ -273,12 +287,13 @@ describe("relight Photoshop boundaries", () => {
           resumeHistory: vi.fn().mockResolvedValue(undefined)
         }
       });
-      if (options?.commandName === "AI 可视化打光贴回") await modalGate;
+      if (options?.commandName === "AI 无损打光贴回") await modalGate;
       return result;
     });
     const timedOut = placeRelitResult(
       fullSource,
       "data:image/png;base64,cmVzdWx0",
+      70,
       () => true,
       { taskId: "late-relight", timeoutMs: 20 }
     );

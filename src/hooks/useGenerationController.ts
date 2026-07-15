@@ -55,8 +55,10 @@ import type { GenerationHistoryEntry } from "../services/generationHistory";
 import { normalizePromptParams, sanitizePrompt } from "../services/promptParams";
 import {
   createDefaultRelightLights,
+  DEFAULT_RELIGHT_OPACITY,
   normalizeRelightConfig,
   normalizeRelightLight,
+  normalizeRelightOpacity,
   type RelightConfig,
   type RelightLight
 } from "../services/relight";
@@ -398,12 +400,14 @@ export interface GenerationControllerState {
   runGeneration: () => Promise<void>;
   stopGeneration: () => void;
   relightLights: RelightLight[];
+  relightOpacity: number;
   selectedRelightId: string | null;
   relightStatus: "idle" | RelightPhase | "success" | "error";
   selectRelightLight: (id: string) => void;
   addRelightLight: () => void;
   removeRelightLight: (id: string) => void;
   updateRelightLight: (id: string, patch: Partial<RelightLight>) => void;
+  setRelightOpacity: (value: number) => void;
   runRelight: () => Promise<void>;
   history: GenerationHistoryEntry<GenerationForm>[];
   historyLoading: boolean;
@@ -461,6 +465,7 @@ export const useGenerationController = (
   } = useEngineLifecycle(engine);
   const [form, setForm] = useState<GenerationForm>(DEFAULT_FORM);
   const [relightLights, setRelightLights] = useState<RelightLight[]>(createDefaultRelightLights);
+  const [relightOpacity, setRelightOpacityState] = useState(DEFAULT_RELIGHT_OPACITY);
   const [selectedRelightId, setSelectedRelightId] = useState<string | null>("key-1");
   const [relightStatus, setRelightStatus] = useState<"idle" | RelightPhase | "success" | "error">("idle");
   const [status, setStatus] = useState<GenerationStatus>("idle");
@@ -741,6 +746,7 @@ export const useGenerationController = (
         );
         if (restoredRelight) {
           setRelightLights(restoredRelight.lights);
+          setRelightOpacityState(restoredRelight.opacity);
           setSelectedRelightId(restoredRelight.lights[0]?.id ?? null);
           setRelightStatus("idle");
         }
@@ -891,6 +897,10 @@ export const useGenerationController = (
     setRelightLights((current) => current.map((light) =>
       light.id === id ? normalizeRelightLight({ ...light, ...patch, id: light.id }) : light
     ));
+  }, []);
+
+  const setRelightOpacity = useCallback((value: number) => {
+    setRelightOpacityState(normalizeRelightOpacity(value));
   }, []);
 
   const stopGeneration = useCallback(() => {
@@ -1051,6 +1061,7 @@ export const useGenerationController = (
     const abortController = new AbortController();
     relightAbortRef.current = abortController;
     const lightsSnapshot = relightLights.map((light) => ({ ...light }));
+    const opacitySnapshot = relightOpacity;
     const promptSnapshot = form.positivePrompt;
     const isRunCurrent = () =>
       isEngineCurrent(requestToken) &&
@@ -1069,6 +1080,7 @@ export const useGenerationController = (
         requestEngine,
         {
           lights: lightsSnapshot,
+          opacity: opacitySnapshot,
           prompt: promptSnapshot,
           taskId,
           timeoutMs: Math.max(
@@ -1111,7 +1123,7 @@ export const useGenerationController = (
           params: {
             ...form,
             positivePrompt: promptSnapshot,
-            relightConfig: { lights: lightsSnapshot }
+            relightConfig: { lights: lightsSnapshot, opacity: opacitySnapshot }
           },
           resultDataUrl
         });
@@ -1139,7 +1151,7 @@ export const useGenerationController = (
         }
       }
     }
-  }, [commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pushToast, recordHistory, relightLights, settings]);
+  }, [commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pushToast, recordHistory, relightLights, relightOpacity, settings]);
 
   const addToBatch = useCallback(async () => {
     const taskId = generateId();
@@ -1395,6 +1407,7 @@ export const useGenerationController = (
             }));
             if (presetRelightConfig) {
               setRelightLights(presetRelightConfig.lights);
+              setRelightOpacityState(presetRelightConfig.opacity);
               setSelectedRelightId(presetRelightConfig.lights[0]?.id ?? null);
               setRelightStatus("idle");
             }
@@ -1439,7 +1452,10 @@ export const useGenerationController = (
             ...shared,
             kind: "gemini",
             content: [normalizedForm.positivePrompt, normalizedForm.extraPrompt].filter(Boolean).join("\n").trim(),
-            relightConfig: { lights: relightLights.map((light) => ({ ...light })) }
+            relightConfig: {
+              lights: relightLights.map((light) => ({ ...light })),
+              opacity: relightOpacity
+            }
           } satisfies GeminiPreset
         : {
             ...shared,
@@ -1453,7 +1469,7 @@ export const useGenerationController = (
       await loadPresets();
       pushToast("success", `预设「${name}」已保存`);
     },
-    [form, loadPresets, presets, pushToast, relightLights, selectedPreset]
+    [form, loadPresets, presets, pushToast, relightLights, relightOpacity, selectedPreset]
   );
 
   const deletePreset = useCallback(
@@ -1490,12 +1506,14 @@ export const useGenerationController = (
     runGeneration,
     stopGeneration,
     relightLights,
+    relightOpacity,
     selectedRelightId,
     relightStatus,
     selectRelightLight,
     addRelightLight,
     removeRelightLight,
     updateRelightLight,
+    setRelightOpacity,
     runRelight,
     history,
     historyLoading,

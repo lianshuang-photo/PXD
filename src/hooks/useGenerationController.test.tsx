@@ -56,6 +56,10 @@ vi.mock("../services/imageModelClient", async (importOriginal) => ({
 }));
 
 vi.mock("../services/photoshop", () => boundary.photoshop);
+vi.mock("../services/relightEnergyLayer", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/relightEnergyLayer")>()),
+  prepareRelightEnergyLayer: vi.fn().mockImplementation(async (dataUrl: string) => dataUrl)
+}));
 
 vi.mock("../services/presets", () => ({
   deletePresetFile: boundary.deletePresetFile,
@@ -424,7 +428,7 @@ describe("useGenerationController relight integration", () => {
 
     await act(async () => rendered.getController().runRelight());
 
-    expect(rendered.getController().status).toBe("success");
+    expect(rendered.getController().status, rendered.getController().error ?? undefined).toBe("success");
     expect(rendered.getController().relightStatus).toBe("success");
     expect(boundary.geminiClient.editImage).toHaveBeenCalledWith(expect.objectContaining({
       prompt: expect.stringContaining("Additional direction: gentle portrait light"),
@@ -434,6 +438,7 @@ describe("useGenerationController relight integration", () => {
     expect(boundary.photoshop.placeRelitResult).toHaveBeenCalledWith(
       expect.objectContaining({ documentId: 7 }),
       "data:image/png;base64,GEMINI_RESULT",
+      70,
       expect.any(Function),
       { taskId: expect.any(String) }
     );
@@ -597,6 +602,7 @@ describe("useGenerationController preset schemas", () => {
 
   it("applies a structured factory relight plan with its prompt", async () => {
     const relightConfig = {
+      opacity: 58,
       lights: [
         { id: "factory-key", type: "area" as const, role: "key" as const, x: 0.15, y: 0.2, direction: 25, intensity: 0.9, temperature: 4800 },
         { id: "factory-rim", type: "spot" as const, role: "rim" as const, x: 0.88, y: 0.18, direction: 155, intensity: 0.4, temperature: 7300 }
@@ -628,6 +634,7 @@ describe("useGenerationController preset schemas", () => {
 
     expect(rendered.getController().form.positivePrompt).toBe("additive factory prompt");
     expect(rendered.getController().relightLights).toEqual(relightConfig.lights);
+    expect(rendered.getController().relightOpacity).toBe(58);
     expect(rendered.getController().selectedRelightId).toBe("factory-key");
   });
 
@@ -770,6 +777,7 @@ describe("useGenerationController preset schemas", () => {
         category: "智能修图",
         content: "prompt\nextra",
         relightConfig: {
+          opacity: 70,
           lights: expect.arrayContaining([
             expect.objectContaining({ role: "key", direction: 35, temperature: 5200 }),
             expect.objectContaining({ role: "rim", direction: 145, temperature: 7000 })
@@ -809,6 +817,7 @@ describe("useGenerationController preset schemas", () => {
       rendered.getController().updateRelightLight("rim-1", {
         role: "back", x: 0.91, y: 0.16, direction: 166, intensity: 0.36, temperature: 8100
       });
+      rendered.getController().setRelightOpacity(57);
     });
     const expectedLights = rendered.getController().relightLights.map((light) => ({ ...light }));
 
@@ -817,11 +826,13 @@ describe("useGenerationController preset schemas", () => {
     act(() => {
       rendered.getController().setFormValue("positivePrompt", "changed");
       rendered.getController().updateRelightLight("key-1", { intensity: 0.1 });
+      rendered.getController().setRelightOpacity(12);
     });
     await act(async () => rendered.getController().applyPreset("portrait-relight.json"));
 
     expect(rendered.getController().form.positivePrompt).toBe("saved portrait prompt");
     expect(rendered.getController().relightLights).toEqual(expectedLights);
+    expect(rendered.getController().relightOpacity).toBe(57);
   });
 
   it("preserves the selected user file name when overwriting a custom title", async () => {

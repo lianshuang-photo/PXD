@@ -72,12 +72,14 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     runGeneration,
     stopGeneration,
     relightLights,
+    relightOpacity,
     selectedRelightId,
     relightStatus,
     selectRelightLight,
     addRelightLight,
     removeRelightLight,
     updateRelightLight,
+    setRelightOpacity,
     runRelight,
     history,
     historyLoading,
@@ -468,6 +470,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
             <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: "0.2rem", boxSizing: "border-box" }}>
               <LightingEditor
                 lights={relightLights}
+                opacity={relightOpacity}
                 selectedId={selectedRelightId}
                 prompt={form.positivePrompt}
                 disabled={status === "running"}
@@ -477,6 +480,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                 onAdd={addRelightLight}
                 onRemove={removeRelightLight}
                 onChange={updateRelightLight}
+                onOpacityChange={setRelightOpacity}
                 onPromptChange={(value) => setFormValue("positivePrompt", value)}
                 onRun={() => void runRelight()}
               />

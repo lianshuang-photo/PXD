@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildRelightPrompt,
   createDefaultRelightLights,
+  normalizeRelightConfig,
   normalizeRelightLight,
   pointFromStageCoordinates,
   relightDirectionVector
@@ -32,18 +33,24 @@ describe("relight geometry and prompt", () => {
     expect(createDefaultRelightLights().map((light) => light.role)).toEqual(["key", "rim"]);
   });
 
-  it("builds an additive-only English prompt with exact controls and preservation constraints", () => {
+  it("defaults and clamps the non-destructive energy-layer opacity", () => {
+    const lights = createDefaultRelightLights();
+    expect(normalizeRelightConfig({ lights }, { strict: true })?.opacity).toBe(70);
+    expect(normalizeRelightConfig({ lights, opacity: 140 }, { strict: true })?.opacity).toBe(100);
+    expect(normalizeRelightConfig({ lights, opacity: Number.NaN }, { strict: true })).toBeNull();
+  });
+
+  it("builds a neutral-gray AOV prompt with exact reused lighting controls", () => {
     const prompt = buildRelightPrompt([{
       id: "key", type: "softbox", role: "key", x: 0.23, y: 0.41,
       direction: 135, intensity: 0.72, temperature: 4800
     }], "soft portrait catchlight");
-    expect(prompt).toContain("only additive illumination");
-    expect(prompt).toContain("do not darken any existing pixel");
-    expect(prompt).toContain("hue, saturation, luminance, gamma");
-    expect(prompt).toContain("white balance");
-    expect(prompt).toContain("identity");
-    expect(prompt).toContain("composition");
-    expect(prompt).toContain("background geometry exactly");
+    expect(prompt).toContain("lighting-contribution AOV");
+    expect(prompt).toContain("RGB 128, 128, 128");
+    expect(prompt).toContain("every channel of every output pixel must be 128 or higher");
+    expect(prompt).toContain("Never encode shadows, negative light");
+    expect(prompt).toContain("do not return a relit copy");
+    expect(prompt).toContain("Soft Light blending");
     expect(prompt).toContain("visible lamps, fixtures");
     expect(prompt).toContain("annotation marks");
     expect(prompt).toContain("occlusion");

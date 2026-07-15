@@ -1018,6 +1018,7 @@ export const captureRelightSource = (
 const placeRelitResultUnlocked = async (
   source: RelightSource,
   dataUrl: string,
+  opacity: number,
   isCurrent: () => boolean
 ) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
@@ -1037,7 +1038,7 @@ const placeRelitResultUnlocked = async (
     await photoshop.core.executeAsModal(async (executionContext: any) => {
       const suspension = await executionContext.hostControl.suspendHistory({
         documentID: source.documentId,
-        name: "AI 可视化打光"
+        name: "AI 无损打光"
       });
       let operationError: unknown;
       try {
@@ -1104,7 +1105,15 @@ const placeRelitResultUnlocked = async (
           {
             _obj: "set",
             _target: [{ _ref: "layer", _id: layerId }],
-            to: { _obj: "layer", name: "AI 可视化打光" }
+            to: {
+              _obj: "layer",
+              name: "AI 无损打光 · 能量层",
+              mode: { _enum: "blendMode", _value: "softLight" },
+              opacity: {
+                _unit: "percentUnit",
+                _value: Math.min(100, Math.max(0, Math.round(opacity)))
+              }
+            }
           },
           {
             _obj: "move",
@@ -1145,7 +1154,7 @@ const placeRelitResultUnlocked = async (
         }
       }
       if (operationError) throw operationError;
-    }, { commandName: "AI 可视化打光贴回" });
+    }, { commandName: "AI 无损打光贴回" });
   } catch (error) {
     let cleanupError: unknown;
     if (!layerId) {
@@ -1179,15 +1188,6 @@ const placeRelitResultUnlocked = async (
   return { layerId };
 };
 
-const cleanupLateRelitResultUnlocked = async (source: RelightSource, layerId: number) => {
-  const photoshop = ensureModule(getPhotoshop, "Photoshop");
-  if (Number(photoshop.app.activeDocument?.id) !== source.documentId) {
-    await switchToDocumentUnlocked(source.documentId);
-  }
-  if (layerId > 0) await deleteLayerUnlocked(layerId);
-  await restoreRelightContextUnlocked(source);
-};
-
 const rollbackRelitResultUnlocked = async (source: RelightSource, layerId: number) => {
   let cleanupError: unknown;
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
@@ -1218,10 +1218,11 @@ export const rollbackRelitResult = (
 export const placeRelitResult = (
   source: RelightSource,
   dataUrl: string,
+  opacity: number,
   isCurrent: () => boolean,
   options: PhotoshopOperationOptions = {}
 ) => runTransaction(
-  () => placeRelitResultUnlocked(source, dataUrl, isCurrent),
+  () => placeRelitResultUnlocked(source, dataUrl, opacity, isCurrent),
   options,
   async (settlement) => {
     const layerId = settlement.status === "fulfilled"
@@ -1231,6 +1232,6 @@ export const placeRelitResult = (
             ? (settlement.reason as { placedLayerId?: unknown }).placedLayerId
             : 0
         );
-    await cleanupLateRelitResultUnlocked(source, Number.isInteger(layerId) ? layerId : 0);
+    await rollbackRelitResultUnlocked(source, Number.isInteger(layerId) ? layerId : 0);
   }
 );

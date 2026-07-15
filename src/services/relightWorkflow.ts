@@ -1,5 +1,6 @@
 import { GenerationEngineError, type GenerationEngine } from "./generationEngine";
-import { buildRelightPrompt, type RelightLight } from "./relight";
+import { buildRelightPrompt, normalizeRelightOpacity, type RelightLight } from "./relight";
+import { RELIGHT_ENERGY_MAX_BASE64_LENGTH } from "./relightEnergyLayer";
 import type { RelightSource } from "./photoshop";
 
 export type RelightPhase = "preparing" | "generating" | "applying";
@@ -7,6 +8,7 @@ export type RelightPhase = "preparing" | "generating" | "applying";
 export interface RelightWorkflowTask {
   lights: RelightLight[];
   prompt: string;
+  opacity: number;
   taskId: string;
   timeoutMs: number;
   signal: AbortSignal;
@@ -17,9 +19,11 @@ export interface RelightWorkflowTask {
 export interface RelightWorkflowAdapters {
   capture: (taskId: string) => Promise<RelightSource>;
   validate: (source: RelightSource, taskId: string) => Promise<void>;
+  prepare: (dataUrl: string, signal: AbortSignal) => Promise<string>;
   apply: (
     source: RelightSource,
     dataUrl: string,
+    opacity: number,
     taskId: string,
     isCurrent: () => boolean
   ) => Promise<{ layerId: number }>;
@@ -36,6 +40,13 @@ export interface RelightWorkflowResult {
 
 const stripDataUrl = (value: string) => value.replace(/^data:image\/[^;]+;base64,/i, "");
 const toDataUrl = (value: string) => value.startsWith("data:") ? value : `data:image/png;base64,${value}`;
+const assertBoundedImage = (value: string) => {
+  const dataUrlPrefix = value.match(/^data:image\/[^;]+;base64,/i)?.[0] ?? "";
+  const encodedLength = value.length - dataUrlPrefix.length;
+  if (encodedLength <= 0 || /\s/.test(value) || encodedLength > RELIGHT_ENERGY_MAX_BASE64_LENGTH) {
+    throw new Error(encodedLength > 0 ? "重新打光返回的能量层超过安全内存预算" : "重新打光未返回有效能量层");
+  }
+};
 
 const assertCurrent = (engine: GenerationEngine, task: RelightWorkflowTask) => {
   if (!task.isCurrent() || task.signal.aborted) {
@@ -72,25 +83,31 @@ export const executeRelightWorkflow = async (
     source = await adapters.capture(task.taskId);
     assertCurrent(engine, task);
     task.onPhase?.("generating");
-    const generated = await engine.generate({
+    let image = (await engine.generate({
       prompt,
       baseImageBase64: stripDataUrl(source.dataUrl),
       timeoutMs: task.timeoutMs,
       taskId: task.taskId,
       signal: task.signal
-    });
+    })).images[0];
     assertCurrent(engine, task);
-    const image = generated.images[0];
     if (!image) throw new Error("可视化打光未返回图像");
+    assertBoundedImage(image);
+    let modelDataUrl = toDataUrl(image);
+    image = "";
+    const energyLayer = await adapters.prepare(modelDataUrl, task.signal);
+    modelDataUrl = "";
+    assertBoundedImage(energyLayer);
+    assertCurrent(engine, task);
     await adapters.validate(source, task.taskId);
     assertCurrent(engine, task);
     task.onPhase?.("applying");
-    const placed = await adapters.apply(source, toDataUrl(image), task.taskId, () =>
+    const placed = await adapters.apply(source, energyLayer, normalizeRelightOpacity(task.opacity), task.taskId, () =>
       task.isCurrent() && !task.signal.aborted
     );
     placedLayerId = placed.layerId;
     assertCurrent(engine, task);
-    workflowResult = { image, layerId: placedLayerId, prompt, source };
+    workflowResult = { image: energyLayer, layerId: placedLayerId, prompt, source };
   } catch (error) {
     workflowError = error;
     if (source && placedLayerId > 0) {
