@@ -26,12 +26,16 @@ import {
   closeDocument,
   closeGeneratedDocument,
   createGeneratedDocument,
+  deleteLayersInDocument,
+  getDocumentPixels,
   getSelectionPixels,
+  getSelectionMetadata,
   groupLayers,
   hasActiveSelection,
   moveActiveLayerToTop,
   onBatchAddLayer,
   placeImageIntoDocument,
+  placeImageIntoDocumentBounds,
   placeImageIntoSelection,
   setSelectionBounds,
   switchToDocument,
@@ -44,6 +48,9 @@ import {
   listPresetMetas,
   loadPresetFile,
   savePresetFile,
+  type ForgePreset,
+  type GeminiPreset,
+  type PresetDefinition,
   type PresetMeta
 } from "../services/presets";
 import { LatestLoadGate } from "../services/loadGate";
@@ -60,6 +67,18 @@ import {
   snapCameraView,
   type CameraViewState
 } from "../services/cameraView";
+import {
+  buildTiledUpscalePlan,
+  executeTiledUpscale,
+  TiledUpscaleRollbackError,
+  type TiledUpscaleConfig,
+  type TiledUpscaleProgress
+} from "../services/tiledUpscale";
+import { featherTileDataUrl } from "../services/tileImage";
+import {
+  executePosterWorkflow,
+  type PosterWizardDraft
+} from "../services/posterWizard";
 
 export type GenerationStatus = "idle" | "running" | "success" | "error";
 export type ToastType = "info" | "success" | "warning" | "error";
@@ -111,10 +130,6 @@ export interface BatchItem {
   };
 }
 
-interface PresetPayload {
-  form: GenerationForm;
-}
-
 const EMPTY_OPTIONS: SdOptions = {
   models: [],
   vaes: [],
@@ -160,18 +175,22 @@ const DEFAULT_FORM: GenerationForm = {
   tiling: false
 };
 
-const hydrateHistoryForm = (params: unknown, fallbackPrompt: string): GenerationForm => {
+export const mapForgeDataToForm = (data: unknown): GenerationForm => {
   const restored = { ...DEFAULT_FORM };
-  if (params && typeof params === "object" && !Array.isArray(params)) {
-    const source = params as Record<string, unknown>;
-    for (const key of Object.keys(DEFAULT_FORM) as Array<keyof GenerationForm>) {
-      const candidate = source[key];
-      const defaultValue = DEFAULT_FORM[key];
-      if (typeof candidate !== typeof defaultValue) continue;
-      if (typeof candidate === "number" && !Number.isFinite(candidate)) continue;
-      (restored as unknown as Record<string, unknown>)[key] = candidate;
-    }
+  if (!data || typeof data !== "object" || Array.isArray(data)) return restored;
+  const source = data as Record<string, unknown>;
+  for (const key of Object.keys(DEFAULT_FORM) as Array<keyof GenerationForm>) {
+    const candidate = source[key];
+    const defaultValue = DEFAULT_FORM[key];
+    if (typeof candidate !== typeof defaultValue) continue;
+    if (typeof candidate === "number" && !Number.isFinite(candidate)) continue;
+    (restored as unknown as Record<string, unknown>)[key] = candidate;
   }
+  return restored;
+};
+
+const hydrateHistoryForm = (params: unknown, fallbackPrompt: string): GenerationForm => {
+  const restored = mapForgeDataToForm(params);
   if (!restored.positivePrompt && fallbackPrompt) restored.positivePrompt = fallbackPrompt;
   return restored;
 };
@@ -200,7 +219,6 @@ const normalizeFormPrompts = (form: GenerationForm): GenerationForm => ({
   negativePrompt: normalizePromptParams(form.negativePrompt),
   extraPrompt: normalizePromptParams(form.extraPrompt)
 });
-
 const toDataUrl = (base64: string) => `data:image/png;base64,${base64}`;
 const dataUrlToBase64 = (dataUrl: string) => dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
 
@@ -399,6 +417,16 @@ export interface GenerationControllerState {
   setCameraView: (value: CameraViewState) => void;
   runCameraViewGeneration: () => Promise<void>;
   stopGeneration: () => void;
+  tiledUpscaleRunning: boolean;
+  tiledUpscaleStopping: boolean;
+  tiledUpscaleProgress: TiledUpscaleProgress | null;
+  tiledUpscaleSourceSize: { width: number; height: number } | null;
+  inspectTiledUpscaleSelection: () => Promise<boolean>;
+  runTiledUpscale: (config: TiledUpscaleConfig) => Promise<boolean>;
+  posterRunning: boolean;
+  posterLastResult: PosterGenerationResult | null;
+  runPosterWizard: (draft: PosterWizardDraft) => Promise<boolean>;
+  undoPosterGeneration: () => Promise<void>;
   history: GenerationHistoryEntry<GenerationForm>[];
   historyLoading: boolean;
   historyError: string | null;
@@ -415,7 +443,7 @@ export interface GenerationControllerState {
   selectedPreset: string | null;
   loadPresets: () => Promise<void>;
   applyPreset: (fileName: string) => Promise<void>;
-  savePreset: (name: string) => Promise<void>;
+  savePreset: (name: string, targetFileName?: string) => Promise<void>;
   deletePreset: (fileName: string) => Promise<void>;
   setSelectedPreset: (name: string | null) => void;
   pushToast: (type: ToastType, message: string) => void;
@@ -434,6 +462,12 @@ export interface GenerationControllerState {
   appendTranslationToNegative: () => void;
   appendExtraPromptToPositive: () => void;
   appendExtraPromptToNegative: () => void;
+}
+
+export interface PosterGenerationResult {
+  taskId: string;
+  documentId: number;
+  placedLayerIds: number[];
 }
 
 export interface GenerationControllerSettingsActions {
@@ -474,6 +508,12 @@ export const useGenerationController = (
   const [progressText, setProgressText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastImages, setLastImages] = useState<string[]>([]);
+  const [tiledUpscaleRunning, setTiledUpscaleRunning] = useState(false);
+  const [tiledUpscaleStopping, setTiledUpscaleStopping] = useState(false);
+  const [tiledUpscaleProgress, setTiledUpscaleProgress] = useState<TiledUpscaleProgress | null>(null);
+  const [tiledUpscaleSourceSize, setTiledUpscaleSourceSize] = useState<{ width: number; height: number } | null>(null);
+  const [posterRunning, setPosterRunning] = useState(false);
+  const [posterLastResult, setPosterLastResult] = useState<PosterGenerationResult | null>(null);
   const [options, setOptions] = useState<SdOptions>(EMPTY_OPTIONS);
   const [optionsLoading, setOptionsLoading] = useState(false);
   const [optionsError, setOptionsError] = useState<string | null>(null);
@@ -490,10 +530,13 @@ export const useGenerationController = (
   const [sourceLanguage, setSourceLanguage] = useState("zh");
   const [targetLanguage, setTargetLanguage] = useState("en");
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tiledUpscaleSettlingRef = useRef(false);
   const presetsLoadGateRef = useRef(new LatestLoadGate());
   const settingsRef = useRef(settings);
   const historyRestoreGenerationRef = useRef(0);
   const historyRestoreQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const presetApplyGenerationRef = useRef(0);
+  const presetApplyQueueRef = useRef<Promise<void>>(Promise.resolve());
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
@@ -502,9 +545,14 @@ export const useGenerationController = (
   const stoppedByEngineChangeRef = useRef(false);
 
   useLayoutEffect(() => {
+    const tiledUpscaleSettling = tiledUpscaleSettlingRef.current;
     setProgress(0);
     setRunProgressMode(null);
-    setStatus((current) => current === "running" ? "idle" : current);
+    setTiledUpscaleRunning(tiledUpscaleSettling);
+    setTiledUpscaleStopping(tiledUpscaleSettling);
+    setTiledUpscaleProgress(null);
+    setPosterRunning(false);
+    setStatus((current) => current === "running" && !tiledUpscaleSettling ? "idle" : current);
   }, [engineToken]);
 
   useEffect(() => () => {
@@ -887,6 +935,7 @@ export const useGenerationController = (
   const stopGeneration = useCallback(() => {
     const activeRun = runGateRef.current.current;
     if (!activeRun) return;
+    const tiledUpscaleStopping = activeRun.kind === "tiled-upscale";
     runGateRef.current.stop();
     (activeRunEngineRef.current ?? engine).cancelAll();
     activeRunEngineRef.current = null;
@@ -900,17 +949,291 @@ export const useGenerationController = (
         )
       );
     }
-    setStatus("idle");
+    setStatus(tiledUpscaleStopping ? "running" : "idle");
+    setTiledUpscaleRunning(tiledUpscaleStopping);
+    setTiledUpscaleStopping(tiledUpscaleStopping);
+    setTiledUpscaleProgress(null);
+    setPosterRunning(false);
     setProgress(0);
     setRunProgressMode(null);
     setProgressPreview(null);
     setProgressText(null);
     setError(null);
-    pushToast("info", "已停止");
+    pushToast("info", tiledUpscaleStopping ? "正在停止并恢复源文档" : "已停止");
   }, [engine, engineToken, pushToast, stopPolling]);
 
+  const inspectTiledUpscaleSelection = useCallback(async () => {
+    if (runGateRef.current.current || tiledUpscaleSettlingRef.current) return false;
+    const metadata = await getSelectionMetadata();
+    if (!metadata) {
+      setTiledUpscaleSourceSize(null);
+      pushToast("warning", "请先在 Photoshop 中选择需要放大的区域");
+      return false;
+    }
+    setTiledUpscaleSourceSize({ width: metadata.width, height: metadata.height });
+    return true;
+  }, [pushToast]);
+
+  const runTiledUpscale = useCallback(async (config: TiledUpscaleConfig): Promise<boolean> => {
+    if (runGateRef.current.current || tiledUpscaleSettlingRef.current) return false;
+    tiledUpscaleSettlingRef.current = true;
+    const requestToken = engineToken;
+    const requestEngine = requestToken.engine;
+    const taskId = generateId();
+    const { token: runToken } = runGateRef.current.begin("tiled-upscale", taskId);
+    const isRunCurrent = () => isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken);
+    setTiledUpscaleRunning(true);
+    setTiledUpscaleStopping(false);
+    setTiledUpscaleProgress(null);
+    setStatus("running");
+    setError(null);
+    dismissToast();
+    try {
+      const source = await getSelectionMetadata({ taskId });
+      if (!isRunCurrent()) return false;
+      if (!source) throw new Error("请先在 Photoshop 中选择需要放大的区域");
+      setTiledUpscaleSourceSize({ width: source.width, height: source.height });
+      const plan = buildTiledUpscalePlan(source.width, source.height, config);
+      if (requestEngine.provider === "forge" && config.tileSize * config.scale > 2048) {
+        throw new Error("Forge 单瓦片输出不能超过 2048 像素，请减小瓦片或倍率");
+      }
+      await executeTiledUpscale({
+        engine: requestEngine,
+        source: {
+          documentId: source.documentId,
+          bounds: source.selectionBounds,
+          width: source.width,
+          height: source.height
+        },
+        config,
+        taskId,
+        isCurrent: isRunCurrent,
+        onProgress: (next) => {
+          if (!isRunCurrent()) return;
+          setTiledUpscaleProgress(next);
+          setProgress(next.completed / next.total);
+          setProgressText(`瓦片 ${Math.min(next.completed + 1, next.total)}/${next.total}`);
+        },
+        adapters: {
+          readTile: (documentId, bounds, tileTaskId) =>
+            getDocumentPixels(documentId, bounds, { taskId: tileTaskId }),
+          enhanceTile: async (activeEngine, dataUrl, tile, activeConfig, tileTaskId) => {
+            const outputWidth = tile.output.right - tile.output.left;
+            const outputHeight = tile.output.bottom - tile.output.top;
+            const alignForgeDimension = (value: number) =>
+              Math.min(2048, Math.max(64, Math.round(value / 8) * 8));
+            const prompt = sanitizePrompt([
+              activeConfig.prompt || "Enhance fine texture and edge detail.",
+              "Preserve the exact composition, geometry, colors, text, identity, and tile boundary content.",
+              "Do not add, remove, crop, or move any object. Return only the enhanced image tile."
+            ].join("\n"));
+            const result = await activeEngine.generate({
+              prompt,
+              baseImageBase64: dataUrlToBase64(dataUrl),
+              timeoutMs: Math.max(5_000, Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)),
+              taskId: `${tileTaskId}-${tile.id}`,
+              forgeParams: activeEngine.provider === "forge"
+                ? {
+                    ...buildImg2ImgParams(
+                      { ...form, imageCount: 1 },
+                      dataUrl,
+                      alignForgeDimension(outputWidth),
+                      alignForgeDimension(outputHeight)
+                    ),
+                    prompt
+                  }
+                : undefined
+            });
+            if (!result.images[0]) throw new Error(`瓦片 ${tile.id} 未返回增强结果`);
+            return toDataUrl(result.images[0]);
+          },
+          featherTile: featherTileDataUrl,
+          createOutput: (width, height, name, outputTaskId) =>
+            createGeneratedDocument(width, height, name, { taskId: outputTaskId }),
+          placeTile: (dataUrl, bounds, index, documentId, placeTaskId) =>
+            placeImageIntoDocumentBounds(dataUrl, bounds, index, documentId, { taskId: placeTaskId }),
+          finalize: async (layerIds, documentId, finalizeTaskId) => {
+            await switchToDocument(documentId, { taskId: finalizeTaskId });
+            const groupId = await groupLayers(layerIds, "PXD 分块放大", {
+              taskId: finalizeTaskId,
+              requireGroup: true
+            });
+            if (groupId) await moveActiveLayerToTop({ layerId: groupId, taskId: finalizeTaskId });
+          },
+          rollback: (session, rollbackTaskId) => closeGeneratedDocument(
+            session.documentId,
+            session.previousDocumentId,
+            { taskId: rollbackTaskId }
+          )
+        }
+      });
+      if (!isRunCurrent()) return false;
+      setStatus("success");
+      setProgress(1);
+      setProgressText(`${plan.tiles.length} 个瓦片已完成`);
+      pushToast("success", `分块放大完成：${plan.outputWidth}×${plan.outputHeight}`);
+      return true;
+    } catch (caught) {
+      if (caught instanceof TiledUpscaleRollbackError) {
+        const message = formatGenerationError(caught, "分块放大恢复失败");
+        setStatus("error");
+        setError(message);
+        pushToast("error", message);
+        return false;
+      }
+      if (!isRunCurrent()) return false;
+      if (isGenerationCancelledError(caught)) {
+        setStatus("idle");
+        setError(null);
+        return false;
+      }
+      const message = formatGenerationError(caught, "分块放大失败");
+      setStatus("error");
+      setError(message);
+      pushToast("error", message);
+      return false;
+    } finally {
+      if (runGateRef.current.isCurrent(runToken)) runGateRef.current.complete(runToken);
+      tiledUpscaleSettlingRef.current = false;
+      setTiledUpscaleRunning(false);
+      setTiledUpscaleStopping(false);
+      setProgress(0);
+      setStatus((current) => current === "running" ? "idle" : current);
+    }
+  }, [dismissToast, engineToken, form, isEngineCurrent, pushToast, settings.timeoutMaxSeconds, settings.timeoutMultiplier]);
+
+  const runPosterWizard = useCallback(async (draft: PosterWizardDraft): Promise<boolean> => {
+    if (runGateRef.current.current) return false;
+    const requestToken = engineToken;
+    const requestEngine = requestToken.engine;
+    if (requestEngine.provider !== "gemini") {
+      const message = "海报排版向导仅支持 Gemini 图像引擎；建议：请先在设置中将图像引擎切换为 Gemini。";
+      setError(message);
+      pushToast("warning", message);
+      return false;
+    }
+    const taskId = generateId();
+    const { token: runToken } = runGateRef.current.begin("poster", taskId);
+    const isRunCurrent = () => isEngineCurrent(requestToken) && runGateRef.current.isCurrent(runToken);
+    setPosterRunning(true);
+    setStatus("running");
+    setError(null);
+    setProgress(0);
+    setProgressPreview(null);
+    setProgressText(null);
+    dismissToast();
+    try {
+      const selection = await getSelectionPixels({ taskId });
+      if (!isRunCurrent()) return false;
+      if (!selection) {
+        throw new Error("请先在 Photoshop 中选择需要保留的主体区域");
+      }
+      if (!Number.isInteger(selection.documentId) || selection.documentId <= 0) {
+        throw new Error("无法确定海报源 Photoshop 文档");
+      }
+      const placedLayerIds: number[] = [];
+      const trackPlacedLayer = (layerId: number) => {
+        if (!placedLayerIds.includes(layerId)) placedLayerIds.push(layerId);
+        setPosterLastResult({
+          taskId,
+          documentId: selection.documentId,
+          placedLayerIds: [...placedLayerIds]
+        });
+      };
+      const posterAdapters = {
+        ...GENERATION_WORKFLOW_ADAPTERS,
+        placeImage: async (
+          dataUrl: string,
+          index: number,
+          options: {
+            feather: number;
+            taskId?: string;
+            onLayerPlaced?: (layerId: number) => void | Promise<void>;
+          }
+        ) => {
+          await switchToDocument(selection.documentId, { taskId: options.taskId });
+          return placeImageIntoSelection(dataUrl, index, options);
+        }
+      };
+      const result = await executePosterWorkflow({
+        engine: requestEngine,
+        draft,
+        baseImageBase64: dataUrlToBase64(selection.dataUrl),
+        timeoutMs: Math.max(
+          5_000,
+          Math.round(settings.timeoutMaxSeconds * 1_000 * settings.timeoutMultiplier)
+        ),
+        feather: Number.isFinite(form.maskFeather) ? form.maskFeather : DEFAULT_FORM.maskFeather,
+        taskId,
+        adapters: posterAdapters,
+        isCurrent: isRunCurrent,
+        onRequestStart: () => {
+          if (requestEngine.progressMode === "determinate") pollProgress();
+        },
+        onRequestSettled: () => stopPolling(requestToken),
+        onLayerPlaced: trackPlacedLayer
+      });
+      if (!isRunCurrent()) return false;
+      setLastImages(result.images.map(toDataUrl));
+      setPosterLastResult({
+        taskId,
+        documentId: selection.documentId,
+        placedLayerIds: result.placedLayerIds
+      });
+      setProgress(1);
+      const historyRecord = await recordHistory({
+        provider: "gemini",
+        prompt: result.prompt.userPrompt,
+        params: { ...form },
+        resultDataUrl: toDataUrl(result.images[0])
+      });
+      if (!isRunCurrent()) return false;
+      setStatus("success");
+      if (historyRecord) pushToast("success", "海报已生成并贴入 Photoshop");
+      return true;
+    } catch (caught) {
+      stopPolling(requestToken);
+      if (!isRunCurrent()) return false;
+      if (isGenerationCancelledError(caught)) {
+        setStatus("idle");
+        setError(null);
+        pushToast("info", "已停止");
+        return false;
+      }
+      const message = formatGenerationError(caught, "海报生成失败");
+      setStatus("error");
+      setError(message);
+      pushToast("error", message);
+      return false;
+    } finally {
+      stopPolling(requestToken);
+      if (runGateRef.current.isCurrent(runToken)) {
+        runGateRef.current.complete(runToken);
+        setPosterRunning(false);
+      }
+      commitIfCurrent(requestToken, () => {
+        setProgress(0);
+        setProgressPreview(null);
+        setProgressText(null);
+      });
+    }
+  }, [commitIfCurrent, dismissToast, engineToken, form, isEngineCurrent, pollProgress, pushToast, recordHistory, settings.timeoutMaxSeconds, settings.timeoutMultiplier, stopPolling]);
+
+  const undoPosterGeneration = useCallback(async () => {
+    const result = posterLastResult;
+    if (!result || posterRunning) return;
+    try {
+      await deleteLayersInDocument(result.documentId, result.placedLayerIds, { taskId: result.taskId });
+      setPosterLastResult(null);
+      pushToast("success", "已移除上一次海报生成图层");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "海报图层移除失败";
+      pushToast("error", `撤销海报生成失败：${message}`);
+    }
+  }, [posterLastResult, posterRunning, pushToast]);
+
   const runGeneration = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (runGateRef.current.current || tiledUpscaleSettlingRef.current) return;
     const requestToken = engineToken;
     const requestEngine = requestToken.engine;
     const taskId = generateId();
@@ -1194,7 +1517,7 @@ export const useGenerationController = (
   }, [batchItems, engine, pushToast, stopGeneration]);
 
   const runBatch = useCallback(async () => {
-    if (runGateRef.current.current) return;
+    if (runGateRef.current.current || tiledUpscaleSettlingRef.current) return;
     const runnableItems = batchItems.filter((item) => item.status !== "success");
     if (!runnableItems.length) {
       if (batchItems.length) {
@@ -1330,47 +1653,108 @@ export const useGenerationController = (
 
   const applyPreset = useCallback(
     async (fileName: string) => {
-      const file = await loadPresetFile<PresetPayload>(fileName);
-      if (!file?.data?.form) {
+      const generation = presetApplyGenerationRef.current + 1;
+      presetApplyGenerationRef.current = generation;
+      let file;
+      try {
+        file = await loadPresetFile<Partial<GenerationForm>>(fileName);
+      } catch (caught) {
+        if (generation !== presetApplyGenerationRef.current) return;
+        throw caught;
+      }
+      if (generation !== presetApplyGenerationRef.current) return;
+      if (!file) {
         throw new Error("预设文件格式不正确");
       }
-      setForm((prev) => {
-        const merged = {
-          ...prev,
-          ...DEFAULT_FORM,
-          ...file.data.form
-        } as GenerationForm & { presetShortcut?: unknown };
-        delete merged.presetShortcut;
-        return normalizeFormPrompts(merged);
-      });
-      setSelectedPreset(file.meta.name);
-      pushToast("success", `已应用预设「${file.meta.name}」`);
+      const apply = presetApplyQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          if (generation !== presetApplyGenerationRef.current) return;
+          const targetProvider = file.preset.kind;
+          if (settingsRef.current.imageProvider !== targetProvider) {
+            if (settingsActions.settingsLoading) throw new Error("设置仍在加载，请稍后应用预设");
+            if (!settingsActions.updateSettings) throw new Error(`当前界面无法切换到 ${targetProvider === "gemini" ? "Gemini" : "Forge"} 引擎`);
+            await settingsActions.updateSettings({ imageProvider: targetProvider });
+            settingsRef.current = { ...settingsRef.current, imageProvider: targetProvider };
+          }
+          if (generation !== presetApplyGenerationRef.current) return;
+          if (file.preset.kind === "gemini") {
+            const content = normalizePromptParams(file.preset.content);
+            setForm((current) => ({
+              ...current,
+              positivePrompt: content,
+              extraPrompt: ""
+            }));
+          } else {
+            setForm(normalizeFormPrompts(mapForgeDataToForm(file.preset.data)));
+          }
+          setSelectedPreset(file.meta.fileName);
+          pushToast("success", `已应用预设「${file.meta.name}」`);
+        });
+      presetApplyQueueRef.current = apply.then(
+        () => undefined,
+        () => undefined
+      );
+      try {
+        await apply;
+      } catch (caught) {
+        if (generation !== presetApplyGenerationRef.current) return;
+        throw caught;
+      }
     },
-    [pushToast]
+    [pushToast, settingsActions.settingsLoading, settingsActions.updateSettings]
   );
 
   const savePreset = useCallback(
-    async (name: string) => {
+    async (name: string, targetFileName?: string) => {
       presetsLoadGateRef.current.assertReady("预设仍在加载，请稍后重试");
-      await savePresetFile<PresetPayload>(name, { form: normalizeFormPrompts(form) });
-      setSelectedPreset(name);
+      const sourceMeta = presets.find((preset) => preset.fileName === selectedPreset);
+      const targetMeta = targetFileName
+        ? presets.find((preset) => preset.fileName === targetFileName)
+        : null;
+      if (targetFileName && (targetMeta?.isFactory || targetFileName.toLowerCase().startsWith("factory:"))) {
+        throw new Error("出厂预设为只读，不能覆盖");
+      }
+      const normalizedForm = normalizeFormPrompts(form);
+      const shared = {
+        title: name,
+        category: sourceMeta?.category ?? "用户预设",
+        subCategory: sourceMeta?.subCategory
+      };
+      const preset: PresetDefinition<GenerationForm> = settingsRef.current.imageProvider === "gemini"
+        ? {
+            ...shared,
+            kind: "gemini",
+            content: [normalizedForm.positivePrompt, normalizedForm.extraPrompt].filter(Boolean).join("\n").trim()
+          } satisfies GeminiPreset
+        : {
+            ...shared,
+            kind: "forge",
+            data: normalizedForm
+          } satisfies ForgePreset<GenerationForm>;
+      const saved = targetFileName
+        ? await savePresetFile(name, preset, { targetFileName })
+        : await savePresetFile(name, preset);
+      setSelectedPreset(saved.meta.fileName);
       await loadPresets();
       pushToast("success", `预设「${name}」已保存`);
     },
-    [form, loadPresets, pushToast]
+    [form, loadPresets, presets, pushToast, selectedPreset]
   );
 
   const deletePreset = useCallback(
     async (fileName: string) => {
       presetsLoadGateRef.current.assertReady("预设仍在加载，请稍后重试");
+      const target = presets.find((preset) => preset.fileName === fileName);
+      if (target?.isFactory) throw new Error("出厂预设为只读，不能删除");
       await deletePresetFile(fileName);
       await loadPresets();
-      if (selectedPreset && fileName.startsWith(`${selectedPreset}`)) {
+      if (selectedPreset === fileName) {
         setSelectedPreset(null);
       }
       pushToast("info", "预设已删除");
     },
-    [loadPresets, selectedPreset, pushToast]
+    [loadPresets, presets, selectedPreset, pushToast]
   );
 
   return {
@@ -1395,6 +1779,16 @@ export const useGenerationController = (
     setCameraView,
     runCameraViewGeneration,
     stopGeneration,
+    tiledUpscaleRunning,
+    tiledUpscaleStopping,
+    tiledUpscaleProgress,
+    tiledUpscaleSourceSize,
+    inspectTiledUpscaleSelection,
+    runTiledUpscale,
+    posterRunning,
+    posterLastResult,
+    runPosterWizard,
+    undoPosterGeneration,
     history,
     historyLoading,
     historyError,

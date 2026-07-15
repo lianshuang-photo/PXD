@@ -2,6 +2,7 @@ import type { AppSettings } from "../context/types";
 
 export interface EditImageParams {
   prompt: string;
+  systemPrompt?: string;
   baseImageBase64: string;
   refImagesBase64?: string[];
   aspectRatio?: string;
@@ -390,7 +391,9 @@ export const createImageModelClient = (settings: AppSettings): ImageModelClient 
       inlineData: { mimeType: "image/png", data: stripDataUrl(data) }
     }));
     const aspectRatio = params.aspectRatio?.trim();
+    const systemPrompt = params.systemPrompt?.trim();
     const body = {
+      ...(systemPrompt ? { systemInstruction: { parts: [{ text: systemPrompt }] } } : {}),
       contents: [{ role: "user", parts: [{ text: params.prompt }, ...imageParts] }],
       generationConfig: {
         responseModalities: ["IMAGE", "TEXT"],

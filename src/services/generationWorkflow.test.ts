@@ -93,7 +93,10 @@ describe("generation workflow", () => {
         1,
         `data:image/png;base64,${provider}-one`,
         1,
-        { feather: 12 }
+        expect.objectContaining({
+          feather: 12,
+          onLayerPlaced: expect.any(Function)
+        })
       );
       if (provider === "forge") {
         expect(harness.adapters.groupLayers).toHaveBeenCalledWith([100, 101], "single", {
@@ -165,5 +168,79 @@ describe("generation workflow", () => {
       harness.adapters
     )).rejects.toMatchObject({ code: "ENGINE_STALE" });
     expect(harness.adapters.placeImage).not.toHaveBeenCalled();
+  });
+
+  it("reports a layer placed during a Photoshop modal before rejecting a cancelled run", async () => {
+    const harness = makeHarness("gemini", [["poster"]]);
+    let current = true;
+    let resolvePlacement!: (value: { layerID: number }) => void;
+    const placement = new Promise<{ layerID: number }>((resolve) => {
+      resolvePlacement = resolve;
+    });
+    (harness.adapters.placeImage as ReturnType<typeof vi.fn>).mockReturnValueOnce(placement);
+    const onLayerPlaced = vi.fn();
+
+    const run = executeGenerationTask(
+      harness.engine,
+      {
+        request: requestFor("gemini"),
+        feather: 0,
+        emptyImagesMessage: "no image",
+        isCurrent: () => current,
+        onLayerPlaced
+      },
+      harness.adapters
+    );
+    await vi.waitFor(() => expect(harness.adapters.placeImage).toHaveBeenCalledOnce());
+    current = false;
+    resolvePlacement({ layerID: 303 });
+
+    await expect(run).rejects.toMatchObject({ code: "ENGINE_STALE" });
+    expect(onLayerPlaced).toHaveBeenCalledWith(303);
+  });
+
+  it("reports a placed layer before a later move operation fails", async () => {
+    const harness = makeHarness("gemini", [["poster"]]);
+    const moveFailure = new Error("move failed");
+    (harness.adapters.moveActiveLayerToTop as ReturnType<typeof vi.fn>).mockRejectedValueOnce(moveFailure);
+    const onLayerPlaced = vi.fn();
+
+    await expect(executeGenerationTask(
+      harness.engine,
+      {
+        request: requestFor("gemini"),
+        feather: 0,
+        emptyImagesMessage: "no image",
+        onLayerPlaced
+      },
+      harness.adapters
+    )).rejects.toBe(moveFailure);
+
+    expect(onLayerPlaced).toHaveBeenCalledWith(100);
+    expect(onLayerPlaced.mock.invocationCallOrder[0])
+      .toBeLessThan((harness.adapters.moveActiveLayerToTop as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]);
+  });
+
+  it("reports a layer id carried by a partial placement error before preserving the original rejection", async () => {
+    const harness = makeHarness("gemini", [["poster"]]);
+    const partialFailure = Object.assign(new Error("selection restore failed"), {
+      placedLayerId: 909
+    });
+    (harness.adapters.placeImage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(partialFailure);
+    const onLayerPlaced = vi.fn();
+
+    await expect(executeGenerationTask(
+      harness.engine,
+      {
+        request: requestFor("gemini"),
+        feather: 0,
+        emptyImagesMessage: "no image",
+        onLayerPlaced
+      },
+      harness.adapters
+    )).rejects.toBe(partialFailure);
+
+    expect(onLayerPlaced).toHaveBeenCalledWith(909);
+    expect(harness.adapters.moveActiveLayerToTop).not.toHaveBeenCalled();
   });
 });

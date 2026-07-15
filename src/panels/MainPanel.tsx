@@ -1,9 +1,17 @@
-import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { AppSettings } from "../context/types";
 import { useGenerationController } from "../hooks/useGenerationController";
+import { useLayoutExperience } from "../hooks/useLayoutExperience";
 import OverlayPortal from "../components/OverlayPortal";
 import PromptParamControls from "../components/PromptParamControls";
 import CameraViewControl from "../components/CameraViewControl";
+import TiledUpscaleDialog from "../components/TiledUpscaleDialog";
+import PosterWizard from "../components/PosterWizard";
+import PresetCatalogSelect from "../components/PresetCatalogSelect";
+import LayoutSnapshotControls from "../components/LayoutSnapshotControls";
+import OnboardingGuide from "../components/OnboardingGuide";
+import WorkspaceSection from "../components/WorkspaceSection";
+import type { LayoutSectionId } from "../services/layoutExperience";
 
 interface Props {
   settings: AppSettings;
@@ -74,6 +82,16 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     setCameraView,
     runCameraViewGeneration,
     stopGeneration,
+    tiledUpscaleRunning,
+    tiledUpscaleStopping,
+    tiledUpscaleProgress,
+    tiledUpscaleSourceSize,
+    inspectTiledUpscaleSelection,
+    runTiledUpscale,
+    posterRunning,
+    posterLastResult,
+    runPosterWizard,
+    undoPosterGeneration,
     history,
     historyLoading,
     historyError,
@@ -116,7 +134,19 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
   const [presetName, setPresetName] = useState<string>("");
   const [customResolution, setCustomResolution] = useState(false);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
+  const [tiledUpscaleOpen, setTiledUpscaleOpen] = useState(false);
+  const [posterWizardOpen, setPosterWizardOpen] = useState(false);
+  const [layoutToolsOpen, setLayoutToolsOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
   const confirmResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const guideAutoStartChecked = useRef(false);
+  const layoutExperience = useLayoutExperience();
+
+  useEffect(() => {
+    if (layoutExperience.loading || guideAutoStartChecked.current) return;
+    guideAutoStartChecked.current = true;
+    if (!layoutExperience.store.guide.completed) setGuideOpen(true);
+  }, [layoutExperience.loading, layoutExperience.store.guide.completed]);
 
   useEffect(() => {
     if (!presets.length) {
@@ -125,13 +155,13 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
       setSelectedPreset(null);
       return;
     }
-    const matched = selectedPreset ? presets.find((preset) => preset.name === selectedPreset) : null;
+    const matched = selectedPreset ? presets.find((preset) => preset.fileName === selectedPreset) : null;
     if (matched) {
       setPresetFile(matched.fileName);
     } else if (!presetFile || !presets.some((preset) => preset.fileName === presetFile)) {
       const first = presets[0];
       setPresetFile(first.fileName);
-      setSelectedPreset(first.name);
+      setSelectedPreset(first.fileName);
     }
   }, [presetFile, presets, selectedPreset, setSelectedPreset]);
 
@@ -169,8 +199,9 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
 
   const trimmedPresetName = presetName.trim();
   const isSaveMode = trimmedPresetName.length > 0;
-  const saveButtonLabel = isSaveMode ? "保存" : "覆盖";
-  const isSaveDisabled = isSaveMode ? false : !selectedPresetMeta;
+  const isFactoryPreset = selectedPresetMeta?.isFactory === true;
+  const saveButtonLabel = isFactoryPreset ? "另存为" : (isSaveMode ? "保存" : "覆盖");
+  const isSaveDisabled = isFactoryPreset ? !isSaveMode : (isSaveMode ? false : !selectedPresetMeta);
 
   const handleSavePreset = async () => {
     const name = presetName.trim();
@@ -201,7 +232,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     }
 
     try {
-      await savePreset(targetPreset.name);
+      await savePreset(targetPreset.name, targetPreset.fileName);
       await loadPresets();
       setConfirmOverwrite(false);
       clearConfirmTimer();
@@ -349,6 +380,90 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
     setTargetLanguage(sourceLanguage);
   };
 
+  const visibleSectionIds = layoutExperience.store.layout.order.filter((sectionId) =>
+    (sectionId !== "batch" || batchItems.length > 0) &&
+    (sectionId !== "outputs" || lastImages.length > 0)
+  );
+
+  const sectionProps = (id: LayoutSectionId) => {
+    const index = visibleSectionIds.indexOf(id);
+    return {
+      id,
+      collapsed: layoutExperience.store.layout.collapsed.includes(id),
+      first: index === 0,
+      last: index === visibleSectionIds.length - 1,
+      busy: layoutExperience.saving,
+      onToggle: (sectionId: LayoutSectionId, collapsed: boolean) => {
+        void layoutExperience.setSectionCollapsed(sectionId, collapsed).catch(() => undefined);
+      },
+      onMove: (sectionId: LayoutSectionId, direction: -1 | 1) => {
+        void layoutExperience.moveSection(sectionId, direction, visibleSectionIds).catch(() => undefined);
+      }
+    };
+  };
+
+  const startGuide = async () => {
+    try {
+      if (layoutExperience.store.guide.completed) await layoutExperience.restartGuide();
+      setGuideOpen(true);
+    } catch {
+      setLayoutToolsOpen(true);
+    }
+  };
+
+  const renderHistorySection = () => (
+    <section key="history" aria-label="生成历史">
+      <div className="generation-history__header">
+        <span style={compactLabelStyle}>生成历史</span>
+        <span className="generation-history__count">{history.length}/50</span>
+      </div>
+      {historyError && <div className="generation-history__error">{historyError}</div>}
+      {historyLoading ? (
+        <div className="generation-history__empty">正在加载…</div>
+      ) : history.length === 0 ? (
+        <div className="generation-history__empty">暂无生成记录</div>
+      ) : (
+        <div className="generation-history__stream">
+          {history.map((entry) => (
+            <div className="generation-history__item" key={entry.id}>
+              <img
+                className="generation-history__thumbnail"
+                src={entry.thumbnailDataUrl}
+                alt={entry.prompt || "生成结果"}
+              />
+              <div className="generation-history__content">
+                <div className="generation-history__prompt" title={entry.prompt}>
+                  {entry.prompt || "未命名生成"}
+                </div>
+                <div className="generation-history__meta">
+                  <span>{entry.provider === "forge" ? "Forge" : "Gemini"}</span>
+                  <span>{formatDateTime(entry.ts)}</span>
+                </div>
+                <div className="generation-history__actions">
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() => void restoreHistoryConfig(entry.id)}
+                  >
+                    回填配置
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    disabled={status === "running"}
+                    onClick={() => void pasteHistoryResult(entry.id)}
+                  >
+                    再次贴回
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+
   return (
     <>
       <section
@@ -364,7 +479,9 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
         }}
       >
       {/* 简化的操作栏 */}
-      <div style={{ 
+      <div
+        data-guide="primary-actions"
+        style={{
         display: "flex", 
         gap: "0.12rem", 
         padding: "0.12rem 0.18rem", 
@@ -373,6 +490,7 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
         flexShrink: 0
       }}>
         <button
+          data-guide="generate-button"
           type="button"
           className="btn btn--primary"
           onClick={runGeneration}
@@ -381,6 +499,35 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
         >
           {status === "running" ? "生成中" : "开始生成"}
         </button>
+        <button
+          type="button"
+          className="btn btn--secondary"
+          onClick={() => setTiledUpscaleOpen(true)}
+          disabled={status === "running"}
+          style={compactTopActionButtonStyle}
+        >
+          分块放大
+        </button>
+        <button
+          type="button"
+          className="btn btn--secondary"
+          onClick={() => setPosterWizardOpen(true)}
+          disabled={status === "running"}
+          style={compactTopActionButtonStyle}
+        >
+          海报向导
+        </button>
+        {posterLastResult && (
+          <button
+            type="button"
+            className="btn btn--ghost"
+            onClick={undoPosterGeneration}
+            disabled={status === "running"}
+            style={compactTopActionButtonStyle}
+          >
+            撤销海报
+          </button>
+        )}
         <button
           type="button"
           className="btn btn--secondary"
@@ -422,7 +569,38 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
         >
           {optionsLoading ? "同步中" : "刷新"}
         </button>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          data-guide="layout-controls"
+          aria-expanded={layoutToolsOpen}
+          onClick={() => setLayoutToolsOpen((current) => !current)}
+          style={compactTopActionButtonStyle}
+        >
+          布局
+        </button>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          onClick={() => void startGuide()}
+          style={compactTopActionButtonStyle}
+        >
+          引导
+        </button>
       </div>
+      {layoutToolsOpen && (
+        <LayoutSnapshotControls
+          snapshots={layoutExperience.store.snapshots}
+          canUndo={Boolean(layoutExperience.store.undoLayout)}
+          busy={layoutExperience.saving || layoutExperience.loading}
+          error={layoutExperience.error}
+          onSave={layoutExperience.saveSnapshot}
+          onApply={layoutExperience.applySnapshot}
+          onDelete={layoutExperience.deleteSnapshot}
+          onUndo={layoutExperience.undoLayout}
+          onReset={layoutExperience.resetLayout}
+        />
+      )}
       
       {/* 进度条和错误提示 */}
       {status === "running" && (
@@ -460,34 +638,26 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
         <div style={{ maxWidth: "100%", width: "100%", boxSizing: "border-box" }}>
           <article style={{ width: "100%", padding: "0.25rem", background: "var(--bg-panel)", borderRadius: "4px", boxSizing: "border-box" }}>
             <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: "0.2rem", boxSizing: "border-box" }}>
-              {/* 预设 */}
-              <div>
+              {(() => {
+                const workspaceSections: Record<LayoutSectionId, ReactNode> = {
+                  presets: (
+              <WorkspaceSection key="presets" {...sectionProps("presets")} title="预设">
                 <div style={{ display: "flex", gap: "0.12rem", marginBottom: "0.12rem" }}>
-                  <select
-                    className="input"
+                  <PresetCatalogSelect
+                    presets={presets}
                     value={presetFile}
-                    onChange={(event) => {
-                      const value = event.target.value;
+                    onChange={(value) => {
                       setPresetFile(value);
-                      const meta = presets.find((item) => item.fileName === value);
-                      setSelectedPreset(meta ? meta.name : null);
+                      setSelectedPreset(value || null);
                       setPresetName("");
                     }}
-                    style={{ flex: 1 }}
-                  >
-                    {presets.length === 0 && <option value="">选择预设</option>}
-                    {presets.map((item) => (
-                      <option key={item.fileName} value={item.fileName}>
-                        {item.name}
-                      </option>
-                    ))}
-                  </select>
+                  />
                   <input
                     className="input"
                     type="text"
                     value={presetName}
                     onChange={(event) => setPresetName(event.target.value)}
-                    placeholder="预设名称"
+                    placeholder={isFactoryPreset ? "另存为名称" : "预设名称"}
                     style={{ flex: 1 }}
                   />
                 </div>
@@ -512,67 +682,18 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   <button type="button" className="btn btn--ghost" onClick={handleApplyPreset} disabled={!presetFile} style={presetActionButtonStyle}>
                     应用
                   </button>
-                  <button type="button" className="btn btn--ghost" onClick={handleDeletePreset} disabled={!presetFile} style={presetActionButtonStyle}>
+                  <button type="button" className="btn btn--ghost" onClick={handleDeletePreset} disabled={!presetFile || isFactoryPreset} style={presetActionButtonStyle}>
                     删除
                   </button>
                   <button type="button" className="btn btn--ghost" onClick={resetForm} style={presetActionButtonStyle}>
                     清空
                   </button>
                 </div>
-              </div>
+              </WorkspaceSection>
+                  ),
 
-              <hr style={{ margin: "0.2rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
-              <section aria-label="生成历史">
-                <div className="generation-history__header">
-                  <span style={compactLabelStyle}>生成历史</span>
-                  <span className="generation-history__count">{history.length}/50</span>
-                </div>
-                {historyError && <div className="generation-history__error">{historyError}</div>}
-                {historyLoading ? (
-                  <div className="generation-history__empty">正在加载…</div>
-                ) : history.length === 0 ? (
-                  <div className="generation-history__empty">暂无生成记录</div>
-                ) : (
-                  <div className="generation-history__stream">
-                    {history.map((entry) => (
-                      <div className="generation-history__item" key={entry.id}>
-                        <img
-                          className="generation-history__thumbnail"
-                          src={entry.thumbnailDataUrl}
-                          alt={entry.prompt || "生成结果"}
-                        />
-                        <div className="generation-history__content">
-                          <div className="generation-history__prompt" title={entry.prompt}>
-                            {entry.prompt || "未命名生成"}
-                          </div>
-                          <div className="generation-history__meta">
-                            <span>{entry.provider === "forge" ? "Forge" : "Gemini"}</span>
-                            <span>{formatDateTime(entry.ts)}</span>
-                          </div>
-                          <div className="generation-history__actions">
-                            <button
-                              type="button"
-                              className="btn btn--ghost"
-                              onClick={() => void restoreHistoryConfig(entry.id)}
-                            >
-                              回填配置
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn--ghost"
-                              disabled={status === "running"}
-                              onClick={() => void pasteHistoryResult(entry.id)}
-                            >
-                              再次贴回
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
-
+                  models: (
+              <WorkspaceSection key="models" {...sectionProps("models")} title="模型与采样">
               <CameraViewControl
                 value={cameraView}
                 disabled={cameraViewLoading || settingsLoading}
@@ -580,9 +701,6 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                 onChange={setCameraView}
                 onGenerate={() => void runCameraViewGeneration()}
               />
-
-              {/* 模型与采样 */}
-              <hr style={{ margin: "0.2rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
               <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", marginBottom: "0.12rem" }}>
                 <span style={{ ...compactLabelStyle, minWidth: "1.5rem" }}>模型</span>
                 <select className="input" value={form.model} onChange={(event) => setFormValue("model", event.target.value)} style={{ flex: 1, minWidth: 0 }}>
@@ -629,9 +747,11 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   />
                 </div>
               </div>
+              </WorkspaceSection>
+                  ),
               
-              {/* 生成参数 */}
-              <hr style={{ margin: "0.2rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
+                  generation: (
+              <WorkspaceSection key="generation" {...sectionProps("generation")} title="生成参数">
               <div style={{ display: "flex", gap: "0.12rem", marginBottom: "0.12rem" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", flex: 1, minWidth: 0 }}>
                   <span style={{ ...compactLabelStyle, minWidth: "1.2rem" }}>步数</span>
@@ -762,9 +882,11 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   />
                 </div>
               </div>
+              </WorkspaceSection>
+                  ),
               
-              {/* ControlNet */}
-              <hr style={{ margin: "0.2rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
+                  controlnet: (
+              <WorkspaceSection key="controlnet" {...sectionProps("controlnet")} title="ControlNet">
               <div style={{ display: "flex", alignItems: "center", gap: "0.12rem", marginBottom: "0.12rem" }}>
                 <span style={{ ...compactLabelStyle, minWidth: "1.5rem" }}>模型</span>
                 <select
@@ -804,9 +926,11 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                   />
                 </div>
               </div>
+              </WorkspaceSection>
+                  ),
               
-              {/* 提示词 */}
-              <hr style={{ margin: "0.5rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
+                  prompts: (
+              <WorkspaceSection key="prompts" {...sectionProps("prompts")} title="提示词">
               <textarea
                 className="input input--multiline"
                 value={form.positivePrompt}
@@ -896,9 +1020,11 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                 label="追加提示词"
                 onChange={(value) => setFormValue("extraPrompt", value)}
               />
+              </WorkspaceSection>
+                  ),
               
-              {/* 翻译 */}
-              <hr style={{ margin: "0.5rem 0", border: "none", borderTop: "1px solid rgba(128, 128, 128, 0.25)" }} />
+                  translation: (
+              <WorkspaceSection key="translation" {...sectionProps("translation")} title="翻译助手">
               <div style={{ fontSize: "0.7rem", fontWeight: 500, marginBottom: "0.25rem", color: "var(--text-secondary)" }}>翻译助手（这个懒得找api也没啥用，如果你向下滑看到了就当没看见吧～）</div>
               <div style={{ display: "flex", gap: "0.35rem", marginBottom: "0.35rem" }}>
                 <select
@@ -973,13 +1099,12 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                 style={{ marginBottom: "0.5rem" }}
               />
               {translationError && <div style={{ color: "var(--error-color)", fontSize: "0.875rem", marginTop: "-0.35rem", marginBottom: "0.5rem" }}>{translationError}</div>}
+              </WorkspaceSection>
+                  ),
               
-              {/* 批次队列 */}
-              {batchItems.length > 0 && (
-                <>
-                  <hr style={{ margin: "1rem 0", border: "none", borderTop: "1px solid var(--border-color)" }} />
+                  batch: batchItems.length > 0 ? (
+                <WorkspaceSection key="batch" {...sectionProps("batch")} title={`批次队列 (${batchItems.length})`}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
-                    <span style={{ fontSize: "0.875rem", fontWeight: 500 }}>批次队列 ({batchItems.length})</span>
                     <button type="button" className="btn btn--ghost" onClick={clearBatch} disabled={status === "running"} style={{ padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}>
                       清空
                     </button>
@@ -1000,26 +1125,54 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
                       </li>
                     ))}
                   </ul>
-                </>
-              )}
+                </WorkspaceSection>
+                  ) : null,
               
-              {/* 最近输出 */}
-              {lastImages.length > 0 && (
-                <>
-                  <hr style={{ margin: "1rem 0", border: "none", borderTop: "1px solid var(--border-color)" }} />
+                  outputs: lastImages.length > 0 ? (
+                <WorkspaceSection key="outputs" {...sectionProps("outputs")} title="最近输出">
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(100px, 1fr))", gap: "0.5rem" }}>
                     {lastImages.map((src, index) => (
                       <img key={`${src}-${index}`} src={src} alt={`result-${index}`} style={{ width: "100%", borderRadius: "4px" }} />
                     ))}
                   </div>
-                </>
-              )}
+                </WorkspaceSection>
+                  ) : null
+                };
+
+                return visibleSectionIds.flatMap((sectionId) =>
+                  sectionId === "presets"
+                    ? [workspaceSections[sectionId], renderHistorySection()]
+                    : [workspaceSections[sectionId]]
+                );
+              })()}
             </div>
           </article>
         </div>
       </div>
 
       </section>
+      {tiledUpscaleOpen && (
+        <TiledUpscaleDialog
+          provider={settings.imageProvider}
+          running={tiledUpscaleRunning}
+          stopping={tiledUpscaleStopping}
+          progress={tiledUpscaleProgress}
+          sourceSize={tiledUpscaleSourceSize}
+          onInspect={inspectTiledUpscaleSelection}
+          onRun={runTiledUpscale}
+          onStop={stopGeneration}
+          onClose={() => setTiledUpscaleOpen(false)}
+        />
+      )}
+      {posterWizardOpen && (
+        <PosterWizard
+          provider={settings.imageProvider}
+          running={posterRunning}
+          onGenerate={runPosterWizard}
+          onCancel={stopGeneration}
+          onClose={() => setPosterWizardOpen(false)}
+        />
+      )}
       {toast && (
         <OverlayPortal>
           <div className={`toast toast--${toast.type}`}>
@@ -1030,6 +1183,20 @@ const MainPanel = ({ settings, settingsLoading, onUpdateSettings, onOpenSettings
           </div>
         </OverlayPortal>
       )}
+      <OnboardingGuide
+        open={guideOpen}
+        stepIndex={layoutExperience.store.guide.stepIndex}
+        onStepChange={layoutExperience.setGuideStep}
+        onComplete={async () => {
+          await layoutExperience.completeGuide();
+          setGuideOpen(false);
+        }}
+        onPause={() => setGuideOpen(false)}
+        onSkip={async () => {
+          await layoutExperience.completeGuide();
+          setGuideOpen(false);
+        }}
+      />
     </>
   );
 };

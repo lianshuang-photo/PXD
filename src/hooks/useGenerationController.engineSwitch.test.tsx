@@ -208,6 +208,7 @@ describe("useGenerationController engine switching", () => {
       dataUrl: "data:image/png;base64,INPUT",
       width: 512,
       height: 512,
+      documentId: 7,
       selectionBounds: { left: 0, top: 0, right: 512, bottom: 512 }
     });
     let controller: GenerationControllerState | null = null;

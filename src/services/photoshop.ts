@@ -12,6 +12,14 @@ export interface SelectionPixels {
   dataUrl: string;
   width: number;
   height: number;
+  documentId: number;
+  selectionBounds: SelectionBounds;
+}
+
+export interface SelectionMetadata {
+  documentId: number;
+  width: number;
+  height: number;
   selectionBounds: SelectionBounds;
 }
 
@@ -22,6 +30,7 @@ export interface PhotoshopOperationOptions {
 
 export interface PlaceImageOptions extends PhotoshopOperationOptions {
   feather?: number;
+  onLayerPlaced?: (layerId: number) => void | Promise<void>;
 }
 
 export interface MoveLayerOptions extends PhotoshopOperationOptions {
@@ -39,6 +48,33 @@ const ensureModule = <T>(moduleGetter: () => T | undefined, name: string): T => 
     throw new Error(`${name} module is not available in this environment`);
   }
   return mod;
+};
+
+export class PhotoshopPartialPlacementError extends Error {
+  readonly code = "PHOTOSHOP_PARTIAL_PLACEMENT";
+  readonly placedLayerId: number;
+  readonly originalError: unknown;
+
+  constructor(placedLayerId: number, originalError: unknown) {
+    super(originalError instanceof Error ? originalError.message : "Photoshop 图层已创建，但后处理失败");
+    this.name = "PhotoshopPartialPlacementError";
+    this.placedLayerId = placedLayerId;
+    this.originalError = originalError;
+  }
+}
+
+export const isPhotoshopPartialPlacementError = (
+  error: unknown
+): error is PhotoshopPartialPlacementError =>
+  error instanceof PhotoshopPartialPlacementError;
+
+const extractPhotoshopLayerId = (value: unknown): number | null => {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const candidate =
+    record.layerID ?? record.layerId ?? record.targetLayerID ?? record.targetLayerId ?? record.ID ?? record.id;
+  const id = Number(candidate);
+  return Number.isInteger(id) && id > 0 ? id : null;
 };
 
 const executeAsModalUnlocked = <T>(
@@ -330,6 +366,53 @@ export const groupLayers = (
   options: GroupLayersOptions = {}
 ): Promise<number | null> => runTransaction(() => groupLayersUnlocked(layerIds, groupName, options), options);
 
+export const deleteLayersInDocument = (
+  documentId: number,
+  layerIds: number[],
+  options: PhotoshopOperationOptions = {}
+): Promise<void> => runTransaction(async () => {
+  const ids = uniqueLayerIds(layerIds);
+  if (!ids.length) return;
+  const sourceDocumentId = Number(documentId);
+  if (!Number.isInteger(sourceDocumentId) || sourceDocumentId <= 0) {
+    throw new Error("海报源文档 ID 无效");
+  }
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const restoreDocumentId = Number(photoshop.app.activeDocument?.id) || null;
+  await executeAsModalUnlocked(photoshop, async () => {
+    let operationError: unknown;
+    try {
+      if (restoreDocumentId !== sourceDocumentId) {
+        await photoshop.app.batchPlay(
+          [{ _obj: "select", _target: [{ _ref: "document", _id: sourceDocumentId }] }],
+          { synchronousExecution: true }
+        );
+      }
+      await photoshop.app.batchPlay(
+        ids.map((id) => ({
+          _obj: "delete",
+          _target: [{ _ref: "layer", _id: id }]
+        })),
+        { synchronousExecution: true }
+      );
+    } catch (error) {
+      operationError = error;
+    } finally {
+      if (restoreDocumentId && restoreDocumentId !== sourceDocumentId) {
+        try {
+          await photoshop.app.batchPlay(
+            [{ _obj: "select", _target: [{ _ref: "document", _id: restoreDocumentId }] }],
+            { synchronousExecution: true }
+          );
+        } catch (error) {
+          operationError ??= error;
+        }
+      }
+    }
+    if (operationError) throw operationError;
+  }, { commandName: "撤销 PXD 海报生成" });
+}, options);
+
 const hasActiveSelectionUnlocked = async (): Promise<boolean> => {
   try {
     const photoshop = ensureModule(getPhotoshop, "Photoshop");
@@ -374,6 +457,7 @@ const getSelectionPixelsUnlocked = async (): Promise<SelectionPixels | null> => 
           dataUrl: `data:image/png;base64,${encoded}`,
           width,
           height,
+          documentId: Number(doc.id),
           selectionBounds: bounds
         };
       },
@@ -388,6 +472,57 @@ const getSelectionPixelsUnlocked = async (): Promise<SelectionPixels | null> => 
 export const getSelectionPixels = (
   options: PhotoshopOperationOptions = {}
 ): Promise<SelectionPixels | null> => runTransaction(getSelectionPixelsUnlocked, options);
+
+const getSelectionMetadataUnlocked = async (): Promise<SelectionMetadata | null> => {
+  try {
+    const photoshop = ensureModule(getPhotoshop, "Photoshop");
+    const doc = photoshop.app.activeDocument;
+    if (!doc?.selection?.bounds) return null;
+    const selectionBounds = toBounds(doc.selection.bounds);
+    return {
+      documentId: Number(doc.id),
+      width: selectionBounds.right - selectionBounds.left,
+      height: selectionBounds.bottom - selectionBounds.top,
+      selectionBounds
+    };
+  } catch {
+    return null;
+  }
+};
+
+export const getSelectionMetadata = (
+  options: PhotoshopOperationOptions = {}
+): Promise<SelectionMetadata | null> => runTransaction(getSelectionMetadataUnlocked, options);
+
+const getDocumentPixelsUnlocked = async (
+  documentId: number,
+  bounds: SelectionBounds
+): Promise<string> => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const pixels = await executeAsModalUnlocked(photoshop, async () =>
+    photoshop.imaging.getPixels({
+      documentID: documentId,
+      sourceBounds: bounds,
+      applyAlpha: true,
+      componentSize: 8,
+      colorProfile: "sRGB IEC61966-2.1"
+    }), DEFAULT_MODAL_OPTIONS);
+  try {
+    const encoded = await photoshop.imaging.encodeImageData({
+      imageData: pixels.imageData,
+      base64: true
+    });
+    return `data:image/png;base64,${encoded}`;
+  } finally {
+    pixels.imageData.dispose?.();
+  }
+};
+
+export const getDocumentPixels = (
+  documentId: number,
+  bounds: SelectionBounds,
+  options: PhotoshopOperationOptions = {}
+): Promise<string> => runTransaction(() => getDocumentPixelsUnlocked(documentId, bounds), options);
 
 const setSelectionBoundsUnlocked = async (bounds: SelectionBounds) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
@@ -429,63 +564,92 @@ const placeImageIntoSelectionUnlocked = async (
 
   const token = await createTempTokenFromBase64(base64, `img-${index}.png`);
 
-  await executeAsModalUnlocked(
-    photoshop,
-    async () => {
-      const steps: any[] = [
-        {
-          ID: doc.id,
-          _obj: "placeEvent",
-          freeTransformCenterState: {
-            _enum: "quadCenterState",
-            _value: "QCSAverage"
-          },
-          null: {
-            _kind: "local",
-            _path: token
-          },
-          offset: {
-            _obj: "offset",
-            horizontal: { _unit: "pixelsUnit", _value: 0 },
-            vertical: { _unit: "pixelsUnit", _value: 0 }
+  let placedLayerId: number | null = null;
+  try {
+    const placeResult = await executeAsModalUnlocked(
+      photoshop,
+      async () => await photoshop.app.batchPlay(
+        [
+          {
+            ID: doc.id,
+            _obj: "placeEvent",
+            freeTransformCenterState: {
+              _enum: "quadCenterState",
+              _value: "QCSAverage"
+            },
+            null: {
+              _kind: "local",
+              _path: token
+            },
+            offset: {
+              _obj: "offset",
+              horizontal: { _unit: "pixelsUnit", _value: 0 },
+              vertical: { _unit: "pixelsUnit", _value: 0 }
+            }
           }
-        }
-      ];
-      if (cachedBounds) {
-        steps.push({
-          _obj: "set",
-          _target: [{ _ref: "channel", _property: "selection" }],
-          to: selectionToRectangle(cachedBounds)
-        });
-      }
-      await photoshop.app.batchPlay(steps, {});
-    },
-    { commandName: "import image file" }
-  );
-
-  const info = await executeAsModalUnlocked(photoshop, async () => {
-    const result = await photoshop.app.batchPlay(
-      [
-        {
-          _obj: "get",
-          _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }]
-        }
-      ],
-      { synchronousExecution: true }
+        ],
+        {}
+      ),
+      { commandName: "import image file" }
     );
-    return result[0];
-  }, DEFAULT_MODAL_OPTIONS);
-  if (cachedBounds) {
-    await setSelectionBoundsUnlocked(cachedBounds).catch((error) => console.warn("restore selection failed", error));
-    await resizeActiveLayerToBounds(cachedBounds);
-    await setSelectionBoundsUnlocked(cachedBounds).catch((error) => console.warn("restore selection failed", error));
-    await adjustSelectionForMask(cachedBounds, userFeather);
-    await tryCreateMaskFromSelection(true);
-    await setSelectionBoundsUnlocked(cachedBounds).catch((error) => console.warn("restore selection failed", error));
-  } else {
-    await tryCreateMaskFromSelection(false);
+    placedLayerId =
+      extractPhotoshopLayerId(placeResult?.[0]) ??
+      extractPhotoshopLayerId(doc.activeLayers?.[0]) ??
+      extractPhotoshopLayerId(doc.activeLayer);
+    if (!placedLayerId) {
+      const placedInfo = await executeAsModalUnlocked(photoshop, async () => {
+        const result = await photoshop.app.batchPlay(
+          [{ _obj: "get", _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }] }],
+          { synchronousExecution: true }
+        );
+        return result[0];
+      }, DEFAULT_MODAL_OPTIONS);
+      placedLayerId = extractPhotoshopLayerId(placedInfo);
+    }
+    if (!placedLayerId) {
+      throw new Error("Photoshop 已放置图像，但未返回图层 ID");
+    }
+    await options.onLayerPlaced?.(placedLayerId);
+
+    if (cachedBounds) {
+      await executeAsModalUnlocked(photoshop, async () => {
+        await photoshop.app.batchPlay(
+          [{
+            _obj: "set",
+            _target: [{ _ref: "channel", _property: "selection" }],
+            to: selectionToRectangle(cachedBounds as SelectionBounds)
+          }],
+          {}
+        );
+      }, DEFAULT_MODAL_OPTIONS);
+    }
+
+    const info = await executeAsModalUnlocked(photoshop, async () => {
+      const result = await photoshop.app.batchPlay(
+        [{ _obj: "get", _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }] }],
+        { synchronousExecution: true }
+      );
+      return result[0];
+    }, DEFAULT_MODAL_OPTIONS);
+    if (!extractPhotoshopLayerId(info)) {
+      throw new Error("Photoshop 无法确认已放置图层");
+    }
+    if (cachedBounds) {
+      await resizeActiveLayerToBounds(cachedBounds);
+      await setSelectionBoundsUnlocked(cachedBounds).catch((error) => console.warn("restore selection failed", error));
+      await adjustSelectionForMask(cachedBounds, userFeather);
+      await tryCreateMaskFromSelection(true);
+      await setSelectionBoundsUnlocked(cachedBounds).catch((error) => console.warn("restore selection failed", error));
+    } else {
+      await tryCreateMaskFromSelection(false);
+    }
+    return { ...info, layerID: placedLayerId };
+  } catch (error) {
+    if (placedLayerId && !isPhotoshopPartialPlacementError(error)) {
+      throw new PhotoshopPartialPlacementError(placedLayerId, error);
+    }
+    throw error;
   }
-  return info;
 };
 
 export interface GeneratedDocumentSession {
@@ -672,6 +836,68 @@ export const placeImageIntoDocument = (
   docId?: number,
   options: PhotoshopOperationOptions = {}
 ) => runTransaction(() => placeImageIntoDocumentUnlocked(dataUrl, index, docId), options);
+
+const unitValue = (value: unknown) => {
+  if (typeof value === "number") return value;
+  if (value && typeof value === "object") {
+    const candidate = Number((value as { _value?: unknown })._value);
+    if (Number.isFinite(candidate)) return candidate;
+  }
+  return Number(value);
+};
+
+const placeImageIntoDocumentBoundsUnlocked = async (
+  dataUrl: string,
+  bounds: SelectionBounds,
+  index: number,
+  documentId: number
+) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const info = await placeImageIntoDocumentUnlocked(dataUrl, index, documentId);
+  const layerId = Number(info?.layerID ?? info?.layerId ?? info?.ID ?? info?.id);
+  const layerBounds = info?.bounds ?? info?.boundsNoEffects;
+  const left = unitValue(layerBounds?.left);
+  const top = unitValue(layerBounds?.top);
+  const right = unitValue(layerBounds?.right);
+  const bottom = unitValue(layerBounds?.bottom);
+  const width = right - left;
+  const height = bottom - top;
+  if (!Number.isInteger(layerId) || layerId <= 0 || ![left, top, right, bottom, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+    throw new Error("Photoshop 未返回可定位的瓦片图层");
+  }
+  const targetWidth = bounds.right - bounds.left;
+  const targetHeight = bounds.bottom - bounds.top;
+  const currentCenterX = (left + right) / 2;
+  const currentCenterY = (top + bottom) / 2;
+  const targetCenterX = (bounds.left + bounds.right) / 2;
+  const targetCenterY = (bounds.top + bounds.bottom) / 2;
+  await executeAsModalUnlocked(photoshop, async () => {
+    await photoshop.app.batchPlay([{
+      _obj: "transform",
+      _target: [{ _ref: "layer", _id: layerId }],
+      freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
+      width: { _unit: "percentUnit", _value: targetWidth / width * 100 },
+      height: { _unit: "percentUnit", _value: targetHeight / height * 100 },
+      offset: {
+        _obj: "offset",
+        horizontal: { _unit: "pixelsUnit", _value: targetCenterX - currentCenterX },
+        vertical: { _unit: "pixelsUnit", _value: targetCenterY - currentCenterY }
+      }
+    }], { synchronousExecution: true });
+  }, { commandName: "定位 PXD 放大瓦片" });
+  return info;
+};
+
+export const placeImageIntoDocumentBounds = (
+  dataUrl: string,
+  bounds: SelectionBounds,
+  index: number,
+  documentId: number,
+  options: PhotoshopOperationOptions = {}
+) => runTransaction(
+  () => placeImageIntoDocumentBoundsUnlocked(dataUrl, bounds, index, documentId),
+  options
+);
 
 const moveActiveLayerToTopUnlocked = async (layerId: number) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
