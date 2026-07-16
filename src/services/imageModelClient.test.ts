@@ -77,7 +77,7 @@ describe("createImageModelClient", () => {
 
     await createImageModelClient({ ...settings, geminiAuthMode: "bearer" }).editImage({
       ...editParams,
-      refImagesBase64: ["REF_ONE", "data:image/png;base64,REF_TWO"],
+      refImagesBase64: ["UkVGX09ORQ==", "data:image/png;base64,UkVGX1RXTw=="],
       aspectRatio: "16:9"
     });
 
@@ -89,8 +89,61 @@ describe("createImageModelClient", () => {
     });
     const body = JSON.parse(String(init.body));
     expect(body.contents[0].parts.slice(1).map((part: { inlineData: { data: string } }) => part.inlineData.data))
-      .toEqual(["BASE_IMAGE", "REF_ONE", "REF_TWO"]);
+      .toEqual(["BASE_IMAGE", "UkVGX09ORQ==", "UkVGX1RXTw=="]);
     expect(body.generationConfig.imageConfig).toEqual({ aspectRatio: "16:9" });
+  });
+
+  it("rejects more than four reference images before making a request", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createImageModelClient(settings).editImage({
+      ...editParams,
+      refImagesBase64: ["T05F", "VFdP", "VEhSRUU=", "Rk9VUg==", "RklWRQ=="]
+    })).rejects.toMatchObject({ code: "CONFIG_REFERENCE_LIMIT" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["%%%%", "A===", "AAA", "TQ==\n", "text/plain;base64,TQ=="])(
+    "rejects malformed reference base64 %s before making a request",
+    async (malformed) => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(createImageModelClient(settings).editImage({
+        ...editParams,
+        refImagesBase64: [malformed]
+      })).rejects.toMatchObject({ code: "CONFIG_REFERENCE_DATA" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+  );
+
+  it("rejects an oversized reference image before making a request", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createImageModelClient(settings).editImage({
+      ...editParams,
+      refImagesBase64: ["A".repeat(6 * 1024 * 1024)]
+    })).rejects.toMatchObject({ code: "CONFIG_REFERENCE_SIZE" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps a locked poster system instruction separate from the user prompt", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(inlineResponse());
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createImageModelClient(settings).editImage({
+      ...editParams,
+      systemPrompt: "preserve the subject",
+      prompt: "headline: Summer",
+      aspectRatio: "4:5"
+    });
+
+    const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
+    expect(body.systemInstruction).toEqual({ parts: [{ text: "preserve the subject" }] });
+    expect(body.contents[0].parts[0]).toEqual({ text: "headline: Summer" });
+    expect(body.generationConfig.imageConfig).toEqual({ aspectRatio: "4:5" });
   });
 
   it.each([

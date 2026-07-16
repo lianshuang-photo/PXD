@@ -85,6 +85,7 @@ const selection = {
   dataUrl: "data:image/png;base64,SELECTION",
   width: 640,
   height: 480,
+  documentId: 7,
   selectionBounds: { left: 10, top: 20, right: 650, bottom: 500 }
 };
 

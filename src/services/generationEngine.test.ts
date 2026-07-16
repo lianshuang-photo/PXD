@@ -88,7 +88,11 @@ describe("createGenerationEngine", () => {
     const clients = makeClients();
     const engine = createGenerationEngine(geminiSettings, clients.factories);
 
-    await expect(engine.generate({ ...request, forgeParams: undefined })).resolves.toEqual({
+    await expect(engine.generate({
+      ...request,
+      forgeParams: undefined,
+      refImagesBase64: ["REFERENCE"]
+    })).resolves.toEqual({
       images: ["GEMINI_IMAGE"]
     });
     expect(engine).toMatchObject({ provider: "gemini", progressMode: "indeterminate" });
@@ -99,11 +103,29 @@ describe("createGenerationEngine", () => {
     expect(clients.geminiClient.editImage).toHaveBeenCalledWith({
       prompt: "edit",
       baseImageBase64: "INPUT",
+      refImagesBase64: ["REFERENCE"],
       aspectRatio: "Auto",
       timeoutMs: 30_000,
       taskId: undefined,
       signal: undefined
     });
+  });
+
+  it("forwards poster system instructions and aspect ratio only to Gemini", async () => {
+    const clients = makeClients();
+    const engine = createGenerationEngine(geminiSettings, clients.factories);
+
+    await engine.generate({
+      ...request,
+      forgeParams: undefined,
+      systemPrompt: "locked constraints",
+      aspectRatio: "4:5"
+    });
+
+    expect(clients.geminiClient.editImage).toHaveBeenCalledWith(expect.objectContaining({
+      systemPrompt: "locked constraints",
+      aspectRatio: "4:5"
+    }));
   });
 
   it("wraps Forge failures in the shared actionable error contract", async () => {

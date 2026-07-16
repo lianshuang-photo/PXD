@@ -9,7 +9,11 @@ export interface GenerationWorkflowAdapters {
   placeImage: (
     dataUrl: string,
     index: number,
-    options: { feather: number; taskId?: string }
+    options: {
+      feather: number;
+      taskId?: string;
+      onLayerPlaced?: (layerId: number) => void | Promise<void>;
+    }
   ) => Promise<unknown>;
   groupLayers: (
     layerIds: number[],
@@ -26,7 +30,7 @@ export interface GenerationRollbackState {
 }
 
 export interface GenerationWorkflowTask {
-  request: EngineGenerateParams;
+  request: EngineGenerateParams | (() => EngineGenerateParams);
   feather: number;
   taskId?: string;
   groupName?: string;
@@ -34,6 +38,7 @@ export interface GenerationWorkflowTask {
   prepare?: () => Promise<void>;
   onRequestStart?: () => void | Promise<void>;
   onRequestSettled?: () => void | Promise<void>;
+  onLayerPlaced?: (layerId: number) => void | Promise<void>;
   isCurrent?: () => boolean;
 }
 
@@ -87,10 +92,16 @@ const placeGeneratedImages = async (
   images: string[],
   task: GenerationReturnTask,
   adapters: GenerationWorkflowAdapters,
-  assertCurrent: () => void
+  assertCurrent: () => void,
+  onLayerPlaced?: (layerId: number) => void | Promise<void>
 ): Promise<GenerationWorkflowResult> => {
   const placedLayerIds: number[] = [];
   let groupLayerId: number | null = null;
+  const reportLayerPlaced = async (layerId: number) => {
+    if (placedLayerIds.includes(layerId)) return;
+    placedLayerIds.push(layerId);
+    await onLayerPlaced?.(layerId);
+  };
   try {
     for (let index = 0; index < images.length; index += 1) {
       assertCurrent();
@@ -98,18 +109,17 @@ const placeGeneratedImages = async (
       try {
         info = await adapters.placeImage(toDataUrl(images[index]), index + 1, {
           feather: task.feather,
-          taskId: task.taskId
+          taskId: task.taskId,
+          onLayerPlaced: reportLayerPlaced
         });
       } catch (error) {
         const partialLayerId = extractPartialLayerId(error);
-        if (partialLayerId && !placedLayerIds.includes(partialLayerId)) {
-          placedLayerIds.push(partialLayerId);
-        }
+        if (partialLayerId) await reportLayerPlaced(partialLayerId);
         throw error;
       }
-      assertCurrent();
       const layerId = extractLayerId(info);
-      if (layerId) placedLayerIds.push(layerId);
+      if (layerId) await reportLayerPlaced(layerId);
+      assertCurrent();
     }
     let topLayerId: number | undefined = placedLayerIds[placedLayerIds.length - 1];
     if (placedLayerIds.length > 1) {
@@ -127,7 +137,9 @@ const placeGeneratedImages = async (
     assertCurrent();
     return { images, placedLayerIds };
   } catch (error) {
-    await adapters.rollback?.({ placedLayerIds: placedLayerIds.slice(), groupLayerId }).catch(() => undefined);
+    await adapters
+      .rollback?.({ placedLayerIds: placedLayerIds.slice(), groupLayerId })
+      .catch(() => undefined);
     throw error;
   }
 };
@@ -162,10 +174,11 @@ export const executeGenerationTask = async (
   assertCurrent();
   await task.prepare?.();
   assertCurrent();
+  const request = typeof task.request === "function" ? task.request() : task.request;
   await task.onRequestStart?.();
   let result: EngineResult;
   try {
-    result = await engine.generate(task.request);
+    result = await engine.generate(request);
   } finally {
     await task.onRequestSettled?.();
   }
@@ -179,7 +192,13 @@ export const executeGenerationTask = async (
     );
   }
 
-  return await placeGeneratedImages(result.images, task, adapters, assertCurrent);
+  return await placeGeneratedImages(
+    result.images,
+    task,
+    adapters,
+    assertCurrent,
+    task.onLayerPlaced
+  );
 };
 
 export const executeGenerationBatch = async (
