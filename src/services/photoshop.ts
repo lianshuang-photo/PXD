@@ -41,19 +41,6 @@ export interface MoveLayerOptions extends PhotoshopOperationOptions {
   layerId: number;
 }
 
-const DEFAULT_MODAL_OPTIONS = { commandName: "PXDUI" };
-
-const getPhotoshop = () => bridge.photoshop;
-const getUxp = () => bridge.uxp;
-
-const ensureModule = <T>(moduleGetter: () => T | undefined, name: string): T => {
-  const mod = moduleGetter();
-  if (!mod) {
-    throw new Error(`${name} module is not available in this environment`);
-  }
-  return mod;
-};
-
 export class PhotoshopPartialPlacementError extends Error {
   readonly code = "PHOTOSHOP_PARTIAL_PLACEMENT";
   readonly placedLayerId: number;
@@ -69,8 +56,20 @@ export class PhotoshopPartialPlacementError extends Error {
 
 export const isPhotoshopPartialPlacementError = (
   error: unknown
-): error is PhotoshopPartialPlacementError =>
-  error instanceof PhotoshopPartialPlacementError;
+): error is PhotoshopPartialPlacementError => error instanceof PhotoshopPartialPlacementError;
+
+const DEFAULT_MODAL_OPTIONS = { commandName: "PXDUI" };
+
+const getPhotoshop = () => bridge.photoshop;
+const getUxp = () => bridge.uxp;
+
+const ensureModule = <T>(moduleGetter: () => T | undefined, name: string): T => {
+  const mod = moduleGetter();
+  if (!mod) {
+    throw new Error(`${name} module is not available in this environment`);
+  }
+  return mod;
+};
 
 const extractPhotoshopLayerId = (value: unknown): number | null => {
   if (!value || typeof value !== "object") return null;
@@ -128,6 +127,7 @@ const MASK_FEATHER_RATIO = 0.08;
 const MASK_MAX_CONTRACT = 120;
 const MASK_MAX_FEATHER = 1200;
 const DEFAULT_GROUP_NAME = "PXD生成结果";
+const taskLayerName = (taskId: string) => `PXD 临时任务 ${taskId}`;
 
 const runJsxCodeUnlocked = async (jsx: string) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
@@ -648,6 +648,16 @@ const placeImageIntoSelectionUnlocked = async (
       }, DEFAULT_MODAL_OPTIONS);
     }
 
+    if (options.taskId) {
+      await executeAsModalUnlocked(photoshop, async () => {
+        await photoshop.app.batchPlay([{
+          _obj: "set",
+          _target: [{ _ref: "layer", _id: placedLayerId }],
+          to: { _obj: "layer", name: taskLayerName(options.taskId!) }
+        }], {});
+      }, DEFAULT_MODAL_OPTIONS);
+    }
+
     const info = await executeAsModalUnlocked(photoshop, async () => {
       const result = await photoshop.app.batchPlay(
         [{ _obj: "get", _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }] }],
@@ -806,7 +816,12 @@ export const placeImageIntoSelection = (
   options: PlaceImageOptions = {}
 ) => runTransaction(() => placeImageIntoSelectionUnlocked(dataUrl, index, options), options);
 
-const placeImageIntoDocumentUnlocked = async (dataUrl: string, index = 1, docId?: number) => {
+const placeImageIntoDocumentUnlocked = async (
+  dataUrl: string,
+  index = 1,
+  docId?: number,
+  taskId?: string
+) => {
   const photoshop = ensureModule(getPhotoshop, "Photoshop");
   const doc = photoshop.app.activeDocument;
   const base64 = dataUrl.includes(",") ? dataUrl.split(",").pop() ?? dataUrl : dataUrl;
@@ -851,6 +866,16 @@ const placeImageIntoDocumentUnlocked = async (dataUrl: string, index = 1, docId?
     );
     return result[0];
   }, DEFAULT_MODAL_OPTIONS);
+  const placedLayerId = Number(info?.layerID ?? info?.layerId ?? 0);
+  if (taskId && placedLayerId > 0) {
+    await executeAsModalUnlocked(photoshop, async () => {
+      await photoshop.app.batchPlay([{
+        _obj: "set",
+        _target: [{ _ref: "layer", _id: placedLayerId }],
+        to: { _obj: "layer", name: taskLayerName(taskId) }
+      }], {});
+    }, DEFAULT_MODAL_OPTIONS);
+  }
   return info;
 };
 
@@ -859,7 +884,7 @@ export const placeImageIntoDocument = (
   index = 1,
   docId?: number,
   options: PhotoshopOperationOptions = {}
-) => runTransaction(() => placeImageIntoDocumentUnlocked(dataUrl, index, docId), options);
+) => runTransaction(() => placeImageIntoDocumentUnlocked(dataUrl, index, docId, options.taskId), options);
 
 const unitValue = (value: unknown) => {
   if (typeof value === "number") return value;
@@ -942,6 +967,69 @@ const moveActiveLayerToTopUnlocked = async (layerId: number) => {
 export const moveActiveLayerToTop = (
   options: MoveLayerOptions
 ): Promise<void> => runTransaction(() => moveActiveLayerToTopUnlocked(options.layerId), options);
+
+const getActiveDocumentIdUnlocked = async () => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const documentId = Number(photoshop.app.activeDocument?.id);
+  return Number.isFinite(documentId) && documentId > 0 ? documentId : null;
+};
+
+export const getActiveDocumentId = (
+  options: PhotoshopOperationOptions = {}
+): Promise<number | null> => runTransaction(getActiveDocumentIdUnlocked, options);
+
+const deleteLayersUnlocked = async (layerIds: number[]) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const ids = uniqueLayerIds(layerIds);
+  if (!ids.length) return;
+  await executeAsModalUnlocked(photoshop, async () => {
+    await photoshop.app.batchPlay(
+      ids.map((layerId) => ({
+        _obj: "delete",
+        _target: [{ _ref: "layer", _id: layerId }]
+      })),
+      {}
+    );
+  }, { commandName: "回滚 PXD 生成图层" });
+};
+
+export const deleteLayers = (
+  layerIds: number[],
+  options: PhotoshopOperationOptions = {}
+): Promise<void> => runTransaction(() => deleteLayersUnlocked(layerIds), options);
+
+const deleteTaskLayersUnlocked = async (taskId: string) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  const marker = taskLayerName(taskId);
+  const collect = (layers: any[]): number[] => layers.flatMap((layer) => {
+    if (layer?.name === marker) return [Number(layer.id)];
+    return layer?.layers ? collect(Array.from(layer.layers)) : [];
+  }).filter((id) => Number.isFinite(id) && id > 0);
+  const ids = collect(Array.from(photoshop.app.activeDocument?.layers ?? []));
+  await deleteLayersUnlocked(ids);
+};
+
+export const deleteTaskLayers = (
+  taskId: string,
+  options: PhotoshopOperationOptions = {}
+): Promise<void> => runTransaction(() => deleteTaskLayersUnlocked(taskId), options);
+
+const renameLayerUnlocked = async (layerId: number, name: string) => {
+  const photoshop = ensureModule(getPhotoshop, "Photoshop");
+  await executeAsModalUnlocked(photoshop, async () => {
+    await photoshop.app.batchPlay([{
+      _obj: "set",
+      _target: [{ _ref: "layer", _id: layerId }],
+      to: { _obj: "layer", name }
+    }], {});
+  }, DEFAULT_MODAL_OPTIONS);
+};
+
+export const renameLayer = (
+  layerId: number,
+  name: string,
+  options: PhotoshopOperationOptions = {}
+): Promise<void> => runTransaction(() => renameLayerUnlocked(layerId, name), options);
 
 const closeDocumentUnlocked = async (docId: number, activeDocId: number, newLayerId: number) => {
   const jsx = `

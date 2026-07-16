@@ -263,6 +263,28 @@ const SettingsPanel = ({ settings, onUpdate, onRefresh, saving, loading }: Props
         </div>
 
         <label className="form-field">
+          <span className="form-field__label">并行任务上限</span>
+          <input
+            className="input"
+            type="number"
+            min={1}
+            max={8}
+            step={1}
+            value={form.maxConcurrentTasks}
+            onChange={(event) => {
+              const value = Number.parseInt(event.target.value, 10);
+              setForm((prev) => ({
+                ...prev,
+                maxConcurrentTasks: Number.isFinite(value)
+                  ? Math.max(1, Math.min(8, value))
+                  : prev.maxConcurrentTasks
+              }));
+            }}
+          />
+          <small className="form-field__hint">只限制并行网络生成；Photoshop 回传仍逐个执行。</small>
+        </label>
+
+        <label className="form-field">
           <span className="form-field__label">品牌色</span>
           <input
             className="input"

@@ -10,6 +10,7 @@ export interface AppSettings {
   timeoutMultiplier: number;
   timeoutMinSeconds: number;
   timeoutMaxSeconds: number;
+  maxConcurrentTasks: number;
 }
 
 export interface AppContextValue {

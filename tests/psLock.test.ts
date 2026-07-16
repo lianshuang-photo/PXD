@@ -2,11 +2,27 @@ import { expect, test } from "vitest";
 import {
   acquirePSLock,
   clearPSLockQueue,
+  isPSBusyError,
   PSCircuitOpenError,
   PSLockCancelledError,
   PSOperationTimeoutError,
   runPSExclusive
 } from "../src/services/psLock.ts";
+
+test("isPSBusyError recognizes retryable Photoshop busy conditions through wrappers", () => {
+  expect(isPSBusyError({ number: 9, message: "executeAsModal rejected" })).toBe(true);
+  expect(isPSBusyError(new Error("Photoshop is busy while a brush dialog is open"))).toBe(true);
+  expect(isPSBusyError(new PSOperationTimeoutError(100, "timeout"))).toBe(true);
+  expect(isPSBusyError(new PSCircuitOpenError("timeout", "next"))).toBe(true);
+  expect(isPSBusyError({ originalError: { code: 9 } })).toBe(true);
+  expect(isPSBusyError({ cause: new Error("A modal dialog is currently active") })).toBe(true);
+});
+
+test("isPSBusyError excludes cancellation and ordinary Photoshop failures", () => {
+  expect(isPSBusyError(new PSLockCancelledError("cancelled"))).toBe(false);
+  expect(isPSBusyError(new Error("Could not complete because the layer is locked"))).toBe(false);
+  expect(isPSBusyError({ number: 7, message: "Program error" })).toBe(false);
+});
 
 const delay = (milliseconds: number) =>
   new Promise<void>((resolve) => {

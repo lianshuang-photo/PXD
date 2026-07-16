@@ -194,6 +194,121 @@ body {
   background: rgba(60, 131, 246, 0.1);
 }
 
+.generation-tasks {
+  flex: 0 0 auto;
+  max-height: 15rem;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.generation-tasks__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.22rem 0.35rem;
+  color: var(--text-secondary);
+  font-size: 0.62rem;
+}
+
+.generation-tasks__list {
+  display: grid;
+  gap: 1px;
+  max-height: 13rem;
+  overflow-y: auto;
+  background: var(--border-color);
+}
+
+.generation-task {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.28rem 0.35rem;
+  background: var(--bg-panel);
+}
+
+.generation-task__heading,
+.generation-task__progress-row,
+.generation-task__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.generation-task__heading {
+  justify-content: space-between;
+}
+
+.generation-task__title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.generation-task__meta,
+.generation-task__progress-value,
+.generation-task__countdown {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 0.58rem;
+}
+
+.generation-task__track {
+  flex: 1 1 auto;
+  height: 0.2rem;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.generation-task__fill {
+  height: 100%;
+  background: var(--brand-color, #4f9cf9);
+  transition: width 160ms linear;
+}
+
+.generation-task--error .generation-task__fill,
+.generation-task--cancelled .generation-task__fill {
+  background: #dc6464;
+}
+
+.generation-task__error {
+  overflow: hidden;
+  color: #fca5a5;
+  font-size: 0.58rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.generation-task__actions {
+  justify-content: flex-end;
+  min-height: 1.35rem;
+}
+
+.generation-task__actions .btn {
+  min-height: 1.2rem;
+  padding: 0.08rem 0.28rem;
+  font-size: 0.56rem;
+}
+
+.generation-task__auto-return {
+  display: flex;
+  align-items: center;
+  gap: 0.18rem;
+  margin-right: auto;
+  color: var(--text-secondary);
+  font-size: 0.58rem;
+  white-space: nowrap;
+}
+
+.generation-task__stop {
+  color: #fca5a5;
+}
+
 .generation-progress__preview {
   width: 64px;
   height: 64px;

@@ -22,14 +22,19 @@ const boundary = vi.hoisted(() => ({
     closeDocument: vi.fn(),
     closeGeneratedDocument: vi.fn(),
     createGeneratedDocument: vi.fn(),
+    deleteLayers: vi.fn(),
     deleteLayersInDocument: vi.fn(),
+    deleteTaskLayers: vi.fn(),
+    getActiveDocumentId: vi.fn(),
     getDocumentPixels: vi.fn(),
     getSelectionMetadata: vi.fn(),
+    placeImageIntoDocument: vi.fn(),
     placeImageIntoDocumentBounds: vi.fn(),
     getSelectionPixels: vi.fn(),
     groupLayers: vi.fn(),
     hasActiveSelection: vi.fn(),
     moveActiveLayerToTop: vi.fn(),
+    renameLayer: vi.fn(),
     onBatchAddLayer: vi.fn(),
     placeImageIntoSelection: vi.fn(),
     setSelectionBounds: vi.fn(),
@@ -201,6 +206,10 @@ beforeEach(() => {
   boundary.forgeClient.img2img.mockResolvedValue({ images: ["FORGE_RESULT"] });
   boundary.geminiClient.editImage.mockResolvedValue("GEMINI_RESULT");
   boundary.photoshop.getSelectionPixels.mockResolvedValue(selection(""));
+  boundary.photoshop.getActiveDocumentId.mockResolvedValue(7);
+  boundary.photoshop.deleteLayers.mockResolvedValue(undefined);
+  boundary.photoshop.deleteTaskLayers.mockResolvedValue(undefined);
+  boundary.photoshop.renameLayer.mockResolvedValue(undefined);
   boundary.photoshop.deleteLayersInDocument.mockResolvedValue(undefined);
   boundary.photoshop.getSelectionMetadata.mockResolvedValue({
     documentId: 7,

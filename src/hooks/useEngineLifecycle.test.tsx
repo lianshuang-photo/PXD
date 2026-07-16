@@ -13,6 +13,8 @@ const makeEngine = (
   provider,
   progressMode: provider === "forge" ? "determinate" : "indeterminate",
   generate: vi.fn(),
+  cancel: vi.fn().mockReturnValue(false),
+  cancelAll: vi.fn().mockReturnValue(0),
   fetchProgress
 });
 
@@ -116,7 +118,7 @@ describe("useEngineLifecycle", () => {
     await act(async () => {
       renderer = TestRenderer.create(createElement(App, { engine: forge }), {
         unstable_isConcurrent: true
-      } as TestRenderer.TestRendererOptions);
+      } as unknown as TestRenderer.TestRendererOptions);
     });
     const committedLifecycle = lifecycle as unknown as ReturnType<typeof useEngineLifecycle>;
     const committedToken = committedLifecycle.token;

@@ -9,6 +9,7 @@ import {
 import {
   executeGenerationBatch,
   executeGenerationTask,
+  returnGenerationImages,
   type GenerationWorkflowAdapters,
   type GenerationWorkflowTask
 } from "./generationWorkflow";
@@ -168,6 +169,113 @@ describe("generation workflow", () => {
       harness.adapters
     )).rejects.toMatchObject({ code: "ENGINE_STALE" });
     expect(harness.adapters.placeImage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["place", [100], null],
+    ["group", [100, 101], null],
+    ["move", [100, 101], 300]
+  ] as const)("rolls back precise layers when %s fails", async (stage, placedLayerIds, groupLayerId) => {
+    const harness = makeHarness("forge", []);
+    const failure = new Error(`${stage} failed`);
+    const rollback = vi.fn().mockRejectedValue(new Error("rollback failed"));
+    let nextId = 100;
+    harness.adapters.placeImage = vi.fn().mockImplementation(async () => {
+      if (stage === "place" && nextId === 101) throw failure;
+      return { layerID: nextId++ };
+    });
+    harness.adapters.groupLayers = stage === "group"
+      ? vi.fn().mockRejectedValue(failure)
+      : vi.fn().mockResolvedValue(300);
+    harness.adapters.moveActiveLayerToTop = stage === "move"
+      ? vi.fn().mockRejectedValue(failure)
+      : vi.fn().mockResolvedValue(undefined);
+    harness.adapters.rollback = rollback;
+
+    await expect(returnGenerationImages(
+      harness.engine,
+      ["ONE", "TWO"],
+      { feather: 0, taskId: "rollback" },
+      harness.adapters
+    )).rejects.toBe(failure);
+    expect(rollback).toHaveBeenCalledWith({ placedLayerIds: [...placedLayerIds], groupLayerId });
+  });
+
+  it("leaves no duplicate layers when a failed return is retried manually", async () => {
+    const harness = makeHarness("forge", []);
+    const activeLayers = new Set<number>();
+    let nextId = 100;
+    let failMove = true;
+    harness.adapters.placeImage = vi.fn().mockImplementation(async () => {
+      const layerId = nextId++;
+      activeLayers.add(layerId);
+      return { layerID: layerId };
+    });
+    harness.adapters.groupLayers = vi.fn().mockResolvedValue(null);
+    harness.adapters.moveActiveLayerToTop = vi.fn().mockImplementation(async () => {
+      if (failMove) {
+        failMove = false;
+        throw new Error("move failed");
+      }
+    });
+    harness.adapters.rollback = vi.fn().mockImplementation(async ({ placedLayerIds }) => {
+      placedLayerIds.forEach((layerId) => activeLayers.delete(layerId));
+    });
+
+    await expect(returnGenerationImages(
+      harness.engine,
+      ["ONE", "TWO"],
+      { feather: 0 },
+      harness.adapters
+    )).rejects.toThrow("move failed");
+    expect(activeLayers.size).toBe(0);
+
+    await returnGenerationImages(
+      harness.engine,
+      ["ONE", "TWO"],
+      { feather: 0 },
+      harness.adapters
+    );
+    expect(activeLayers.size).toBe(2);
+  });
+
+  it("rolls back a partially placed layer before retrying without duplicates", async () => {
+    const harness = makeHarness("forge", []);
+    const activeLayers = new Set<number>();
+    let nextId = 500;
+    let failAfterFirstPlacement = true;
+    harness.adapters.placeImage = vi.fn().mockImplementation(async () => {
+      const layerId = nextId++;
+      activeLayers.add(layerId);
+      if (failAfterFirstPlacement) {
+        failAfterFirstPlacement = false;
+        throw Object.assign(new Error("marker write failed"), { placedLayerId: layerId });
+      }
+      return { layerID: layerId };
+    });
+    harness.adapters.rollback = vi.fn().mockImplementation(async ({ placedLayerIds }) => {
+      placedLayerIds.forEach((layerId) => activeLayers.delete(layerId));
+    });
+
+    await expect(returnGenerationImages(
+      harness.engine,
+      ["ONE"],
+      { feather: 0 },
+      harness.adapters
+    )).rejects.toThrow("marker write failed");
+    expect(harness.adapters.rollback).toHaveBeenLastCalledWith({
+      placedLayerIds: [500],
+      groupLayerId: null
+    });
+    expect(activeLayers.size).toBe(0);
+
+    await returnGenerationImages(
+      harness.engine,
+      ["ONE"],
+      { feather: 0 },
+      harness.adapters
+    );
+    expect(activeLayers).toEqual(new Set([501]));
   });
 
   it("reports a layer placed during a Photoshop modal before rejecting a cancelled run", async () => {

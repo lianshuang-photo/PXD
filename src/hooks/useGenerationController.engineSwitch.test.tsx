@@ -9,9 +9,13 @@ import { DEFAULT_SETTINGS } from "../services/settings";
 const boundary = vi.hoisted(() => ({
   engine: null as unknown as GenerationEngine,
   getSelectionPixels: vi.fn(),
+  deleteLayers: vi.fn(),
+  deleteTaskLayers: vi.fn(),
+  getActiveDocumentId: vi.fn(),
   placeImageIntoSelection: vi.fn(),
   groupLayers: vi.fn(),
   moveActiveLayerToTop: vi.fn(),
+  renameLayer: vi.fn(),
   listPresetMetas: vi.fn()
 }));
 
@@ -21,9 +25,13 @@ vi.mock("./useGenerationEngine", () => ({
 
 vi.mock("../services/photoshop", () => ({
   closeDocument: vi.fn(),
+  deleteLayers: boundary.deleteLayers,
+  deleteTaskLayers: boundary.deleteTaskLayers,
+  getActiveDocumentId: boundary.getActiveDocumentId,
   getSelectionPixels: boundary.getSelectionPixels,
   groupLayers: boundary.groupLayers,
   moveActiveLayerToTop: boundary.moveActiveLayerToTop,
+  renameLayer: boundary.renameLayer,
   onBatchAddLayer: vi.fn().mockResolvedValue(null),
   placeImageIntoSelection: boundary.placeImageIntoSelection,
   setSelectionBounds: vi.fn(),
@@ -90,6 +98,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   boundary.listPresetMetas.mockResolvedValue([]);
   boundary.placeImageIntoSelection.mockResolvedValue({ layerID: 1 });
+  boundary.deleteLayers.mockResolvedValue(undefined);
+  boundary.deleteTaskLayers.mockResolvedValue(undefined);
+  boundary.renameLayer.mockResolvedValue(undefined);
+  boundary.getActiveDocumentId.mockResolvedValue(7);
   boundary.groupLayers.mockResolvedValue(undefined);
   boundary.moveActiveLayerToTop.mockResolvedValue(undefined);
 });
@@ -190,15 +202,9 @@ describe("useGenerationController engine switching", () => {
     act(() => renderer.unmount());
   });
 
-  it("drops late Forge progress, stops polling, and does not place its stale result", async () => {
-    vi.useFakeTimers();
-    let resolveProgress: ((value: { progress: number; eta_relative: number }) => void) | null = null;
+  it("lets a task finish on its captured engine after the provider switches", async () => {
     let resolveGeneration: ((value: { images: string[] }) => void) | null = null;
-    const fetchProgress = vi.fn().mockImplementation(() => new Promise((resolve) => {
-      resolveProgress = resolve;
-    }));
     const forge = makeEngine("forge", {
-      fetchProgress,
       generate: vi.fn().mockImplementation(() => new Promise((resolve) => {
         resolveGeneration = resolve;
       }))
@@ -227,10 +233,8 @@ describe("useGenerationController engine switching", () => {
     act(() => {
       generationPromise = (controller as unknown as GenerationControllerState).runGeneration();
     });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_000);
-    });
-    expect(fetchProgress).toHaveBeenCalledOnce();
+    await flushEffects();
+    expect(forge.generate).toHaveBeenCalledOnce();
 
     boundary.engine = gemini;
     act(() => renderer.update(createElement(Harness, {
@@ -241,17 +245,23 @@ describe("useGenerationController engine switching", () => {
         geminiApiKey: "key"
       }
     })));
+    await flushEffects();
+    expect((controller as unknown as GenerationControllerState).generationTasks[0]).toMatchObject({
+      engine: "forge",
+      status: "running"
+    });
     await act(async () => {
-      resolveProgress?.({ progress: 0.9, eta_relative: 1 });
-      resolveGeneration?.({ images: ["stale-image"] });
+      resolveGeneration?.({ images: ["forge-image"] });
       await generationPromise!;
-      await vi.advanceTimersByTimeAsync(3_000);
     });
 
     const current = controller as unknown as GenerationControllerState;
-    expect(current.progress).toBe(0);
-    expect(fetchProgress).toHaveBeenCalledOnce();
-    expect(boundary.placeImageIntoSelection).not.toHaveBeenCalled();
+    expect(current.generationTasks[0]).toMatchObject({ engine: "forge", status: "success" });
+    expect(boundary.placeImageIntoSelection).toHaveBeenCalledWith(
+      "data:image/png;base64,forge-image",
+      1,
+      expect.objectContaining({ taskId: current.generationTasks[0].id })
+    );
     act(() => renderer.unmount());
   });
 });

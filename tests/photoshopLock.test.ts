@@ -72,7 +72,7 @@ test("a multi-modal image placement remains one exclusive transaction", async ()
 
   releaseFirstPlace?.();
   await Promise.all([first, second]);
-  expect(events).toEqual(["placeEvent", "get", "placeEvent", "get"]);
+  expect(events).toEqual(["placeEvent", "get", "set", "placeEvent", "get", "set"]);
 });
 
 test("taskId cancellation reaches queued Photoshop operations", async () => {

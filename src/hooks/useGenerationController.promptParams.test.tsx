@@ -32,9 +32,13 @@ vi.mock("../services/imageModelClient", async (importOriginal) => {
 
 vi.mock("../services/photoshop", () => ({
   closeDocument: vi.fn(),
+  deleteLayers: vi.fn(),
+  deleteTaskLayers: vi.fn(),
+  getActiveDocumentId: vi.fn().mockResolvedValue(7),
   getSelectionPixels: serviceMocks.getSelectionPixels,
   groupLayers: vi.fn(),
   moveActiveLayerToTop: vi.fn(),
+  renameLayer: vi.fn(),
   onBatchAddLayer: vi.fn(),
   placeImageIntoSelection: serviceMocks.placeImageIntoSelection,
   setSelectionBounds: vi.fn(async () => undefined),

@@ -21,6 +21,12 @@ export interface GenerationWorkflowAdapters {
     options: { taskId?: string }
   ) => Promise<number | null>;
   moveActiveLayerToTop: (options: { layerId: number; taskId?: string }) => Promise<unknown>;
+  rollback?: (state: GenerationRollbackState) => Promise<void>;
+}
+
+export interface GenerationRollbackState {
+  placedLayerIds: number[];
+  groupLayerId: number | null;
 }
 
 export interface GenerationWorkflowTask {
@@ -35,6 +41,11 @@ export interface GenerationWorkflowTask {
   onLayerPlaced?: (layerId: number) => void | Promise<void>;
   isCurrent?: () => boolean;
 }
+
+export type GenerationReturnTask = Pick<
+  GenerationWorkflowTask,
+  "feather" | "taskId" | "groupName" | "prepare" | "isCurrent"
+>;
 
 export interface GenerationWorkflowResult extends EngineResult {
   placedLayerIds: number[];
@@ -59,8 +70,99 @@ const extractLayerId = (info: unknown): number | null => {
 
 const extractPartialLayerId = (error: unknown): number | null => {
   if (!error || typeof error !== "object") return null;
-  const id = Number((error as { placedLayerId?: unknown }).placedLayerId);
-  return Number.isInteger(id) && id > 0 ? id : null;
+  const numeric = Number((error as { placedLayerId?: unknown }).placedLayerId);
+  return Number.isInteger(numeric) && numeric > 0 ? numeric : null;
+};
+
+const createCurrentAssertion = (
+  engine: GenerationEngine,
+  isCurrent?: () => boolean
+) => () => {
+  if (isCurrent && !isCurrent()) {
+    throw new GenerationEngineError(
+      "生成引擎已切换，旧任务结果已忽略",
+      "ENGINE_STALE",
+      "请使用当前引擎重新生成。",
+      engine.provider
+    );
+  }
+};
+
+const placeGeneratedImages = async (
+  images: string[],
+  task: GenerationReturnTask,
+  adapters: GenerationWorkflowAdapters,
+  assertCurrent: () => void,
+  onLayerPlaced?: (layerId: number) => void | Promise<void>
+): Promise<GenerationWorkflowResult> => {
+  const placedLayerIds: number[] = [];
+  let groupLayerId: number | null = null;
+  const reportLayerPlaced = async (layerId: number) => {
+    if (placedLayerIds.includes(layerId)) return;
+    placedLayerIds.push(layerId);
+    await onLayerPlaced?.(layerId);
+  };
+  try {
+    for (let index = 0; index < images.length; index += 1) {
+      assertCurrent();
+      let info: unknown;
+      try {
+        info = await adapters.placeImage(toDataUrl(images[index]), index + 1, {
+          feather: task.feather,
+          taskId: task.taskId,
+          onLayerPlaced: reportLayerPlaced
+        });
+      } catch (error) {
+        const partialLayerId = extractPartialLayerId(error);
+        if (partialLayerId) await reportLayerPlaced(partialLayerId);
+        throw error;
+      }
+      const layerId = extractLayerId(info);
+      if (layerId) await reportLayerPlaced(layerId);
+      assertCurrent();
+    }
+    let topLayerId: number | undefined = placedLayerIds[placedLayerIds.length - 1];
+    if (placedLayerIds.length > 1) {
+      assertCurrent();
+      groupLayerId = await adapters.groupLayers(placedLayerIds, task.groupName, {
+        taskId: task.taskId
+      });
+      topLayerId = groupLayerId ?? topLayerId;
+      assertCurrent();
+    }
+    if (topLayerId) {
+      assertCurrent();
+      await adapters.moveActiveLayerToTop({ layerId: topLayerId, taskId: task.taskId });
+    }
+    assertCurrent();
+    return { images, placedLayerIds };
+  } catch (error) {
+    await adapters
+      .rollback?.({ placedLayerIds: placedLayerIds.slice(), groupLayerId })
+      .catch(() => undefined);
+    throw error;
+  }
+};
+
+export const returnGenerationImages = async (
+  engine: GenerationEngine,
+  images: string[],
+  task: GenerationReturnTask,
+  adapters: GenerationWorkflowAdapters
+): Promise<GenerationWorkflowResult> => {
+  const assertCurrent = createCurrentAssertion(engine, task.isCurrent);
+  assertCurrent();
+  await task.prepare?.();
+  assertCurrent();
+  if (!images.length) {
+    throw new GenerationEngineError(
+      "任务未返回图像",
+      "ENGINE_NO_IMAGES",
+      "请检查当前引擎是否支持图像输出后重试。",
+      engine.provider
+    );
+  }
+  return await placeGeneratedImages(images, task, adapters, assertCurrent);
 };
 
 export const executeGenerationTask = async (
@@ -68,16 +170,7 @@ export const executeGenerationTask = async (
   task: GenerationWorkflowTask,
   adapters: GenerationWorkflowAdapters
 ): Promise<GenerationWorkflowResult> => {
-  const assertCurrent = () => {
-    if (task.isCurrent && !task.isCurrent()) {
-      throw new GenerationEngineError(
-        "生成引擎已切换，旧任务结果已忽略",
-        "ENGINE_STALE",
-        "请使用当前引擎重新生成。",
-        engine.provider
-      );
-    }
-  };
+  const assertCurrent = createCurrentAssertion(engine, task.isCurrent);
   assertCurrent();
   await task.prepare?.();
   assertCurrent();
@@ -99,45 +192,13 @@ export const executeGenerationTask = async (
     );
   }
 
-  const placedLayerIds: number[] = [];
-  const reportLayerPlaced = async (layerId: number) => {
-    if (placedLayerIds.includes(layerId)) return;
-    placedLayerIds.push(layerId);
-    await task.onLayerPlaced?.(layerId);
-  };
-  for (let index = 0; index < result.images.length; index += 1) {
-    assertCurrent();
-    let info: unknown;
-    try {
-      info = await adapters.placeImage(toDataUrl(result.images[index]), index + 1, {
-        feather: task.feather,
-        taskId: task.taskId,
-        onLayerPlaced: reportLayerPlaced
-      });
-    } catch (error) {
-      const partialLayerId = extractPartialLayerId(error);
-      if (partialLayerId) await reportLayerPlaced(partialLayerId);
-      throw error;
-    }
-    const layerId = extractLayerId(info);
-    if (layerId) await reportLayerPlaced(layerId);
-    assertCurrent();
-  }
-  let topLayerId: number | undefined = placedLayerIds[placedLayerIds.length - 1];
-  if (placedLayerIds.length > 1) {
-    assertCurrent();
-    const groupId = await adapters.groupLayers(placedLayerIds, task.groupName, {
-      taskId: task.taskId
-    });
-    topLayerId = groupId ?? topLayerId;
-    assertCurrent();
-  }
-  if (topLayerId) {
-    assertCurrent();
-    await adapters.moveActiveLayerToTop({ layerId: topLayerId, taskId: task.taskId });
-  }
-  assertCurrent();
-  return { ...result, placedLayerIds };
+  return await placeGeneratedImages(
+    result.images,
+    task,
+    adapters,
+    assertCurrent,
+    task.onLayerPlaced
+  );
 };
 
 export const executeGenerationBatch = async (

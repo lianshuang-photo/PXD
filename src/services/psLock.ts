@@ -52,6 +52,32 @@ export const isPSLockControlError = (
   error instanceof PSOperationTimeoutError ||
   error instanceof PSCircuitOpenError;
 
+const BUSY_MESSAGE_PATTERNS = [
+  /\bphotoshop\s+(?:is\s+)?busy\b/i,
+  /\bhost\s+(?:is\s+)?busy\b/i,
+  /\bmodal (?:dialog|state|operation)\b.*\b(?:active|busy|running)\b/i,
+  /\balert\b.*\b(?:is|currently)\s+(?:active|open)\b/i
+];
+
+export const isPSBusyError = (error: unknown): boolean => {
+  const visited = new Set<unknown>();
+  const inspect = (candidate: unknown): boolean => {
+    if (!candidate || visited.has(candidate)) return false;
+    visited.add(candidate);
+    if (candidate instanceof PSLockCancelledError) return false;
+    if (candidate instanceof PSOperationTimeoutError || candidate instanceof PSCircuitOpenError) return true;
+    if (typeof candidate !== "object") return false;
+    const record = candidate as Record<string, unknown>;
+    if (Number(record.number) === 9 || Number(record.code) === 9) return true;
+    const message = typeof record.message === "string" ? record.message : "";
+    if (message && BUSY_MESSAGE_PATTERNS.some((pattern) => pattern.test(message))) {
+      return true;
+    }
+    return inspect(record.originalError) || inspect(record.cause);
+  };
+  return inspect(error);
+};
+
 const waiters: LockWaiter[] = [];
 let isLocked = false;
 let isCircuitOpen = false;

@@ -237,7 +237,7 @@ describe("useGenerationController reference integration", () => {
     expect(rendered.get().referenceImages).toEqual([]);
   });
 
-  it("does not construct a Gemini batch request while stale Photoshop preparation is pending", async () => {
+  it("cancels an in-flight Gemini batch request and clears sensitive references when the provider switches", async () => {
     const rendered = trackedRender();
     await flush();
     boundary.photoshop.getSelectionPixels
@@ -246,21 +246,24 @@ describe("useGenerationController reference integration", () => {
     boundary.photoshop.onBatchAddLayer.mockResolvedValueOnce([11, 12, 13]);
     await act(async () => rendered.get().captureReferenceImage());
     await act(async () => rendered.get().addToBatch());
-    let resolveSwitch!: () => void;
-    boundary.photoshop.switchToDocument.mockImplementationOnce(() => new Promise<void>((resolve) => {
-      resolveSwitch = resolve;
+    let signal: AbortSignal | undefined;
+    let resolveImage!: (image: string) => void;
+    boundary.geminiClient.editImage.mockImplementationOnce((params) => new Promise((resolve) => {
+      signal = params.signal;
+      resolveImage = resolve;
     }));
     let batch!: Promise<void>;
     act(() => { batch = rendered.get().runBatch(); });
+    await flush();
 
     rendered.update(DEFAULT_SETTINGS);
     await act(async () => {
-      resolveSwitch();
+      resolveImage("LATE_RESULT");
       await batch;
     });
 
-    expect(boundary.geminiClient.editImage).not.toHaveBeenCalled();
-    expect(boundary.photoshop.setSelectionBounds).not.toHaveBeenCalled();
+    expect(signal?.aborted).toBe(true);
+    expect(boundary.photoshop.placeImageIntoSelection).not.toHaveBeenCalled();
     expect(rendered.get().batchItems[0].referenceImages).toEqual([]);
   });
 
