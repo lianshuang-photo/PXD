@@ -1,8 +1,8 @@
 # PXD V2 · LS Studio 规划入口
 
-更新：2026-09-20。状态：**待用户审阅；本轮只更新文档，尚未启动实施 subagent。**
+更新：2026-09-20。状态：**用户已确认启动，模块实施中；合并必须经过独立 review 和 computer use 真机验收。** 见[实施状态](IMPLEMENTATION-STATUS.md)与[协作规则](COLLABORATION.md)。
 
-决定：在现有 [lianshuang-photo/PXD](https://github.com/lianshuang-photo/PXD) 仓库管理下一代产品，产品名保留 **LS Studio**，以 **PXD V2** 标识本轮产品演进。使用独立 worktree；确认后将当前 LS Alpha 导入 `apps/ls-studio/`，保持旧 PXD 根目录应用可辨识。
+决定：在现有 [lianshuang-photo/PXD](https://github.com/lianshuang-photo/PXD) 仓库管理下一代产品，产品名保留 **LS Studio**，以 **PXD V2** 标识本轮产品演进。使用独立 worktree；当前 LS Alpha 已导入 `apps/ls-studio/` 并以 `ls-studio-v2-alpha.0` 标签保留，旧 PXD 根目录应用保持独立。
 
 ## 建议阅读顺序
 
@@ -26,10 +26,10 @@
 - 当前可试用 LS Alpha：独立目录中的 0.1.5，UXP HTML／JavaScript 面板＋Node Companion。Codex 会话、恢复、渲染、PS 观察／定位已经接入。
 - LS 正式 Agent 工具仍为 7 个；编辑／生成／回贴工具尚未接通。专业页仍用 mock，并有源文档、蒙版、撤销和历史输入等缺陷。
 - 121 份配方属于提示词数据；旧 PXD 的代码和已合并 PR 属于复用候选，均不计为 LS 的交付。
-- 本规划分支只包含文档。`apps/ls-studio/` 是确认后的导入目标，当前还不存在。`V2` 是产品代际，未把 Alpha 包版本改成 2.0.0。
+- 规划 PR #50 保持文档范围；实施分支已增加 `apps/ls-studio/`。`V2` 是产品代际，未把 Alpha 包版本改成 2.0.0。
 
 ## 本轮交付与启动条件
 
 已完成仓库评估、GitHub 状态核对、文档统一和实施拆分。当前代码状态只做静态复核；未把历史测试结果写成本轮重新测试通过。
 
-用户阅读确认后，主 agent 执行 G00／G01，再按 [实施计划](EXECUTION-PLAN.md) 启动有明确文件所有权的 subagent。此次文档 PR 的创建、可阅读或合并状态，不自动代表用户已经授权启动开发。
+用户已明确确认启动；G00／G01 已实施，首批模块按[实施计划](EXECUTION-PLAN.md)分配给有明确文件所有权的 subagent。PR 可持续提交；模块验证、组装测试、严格独立 review 和 computer use 真机验收完成后才具备合并条件，不自动合并。

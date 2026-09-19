@@ -9,7 +9,7 @@ const { promisify } = require('node:util');
 const service = require('../scripts/companion-service.cjs');
 const exec = promisify(execFile);
 
-test('launchd owns the server after launcher exit, start is idempotent, and a killed process recovers', { skip: process.platform !== 'darwin', timeout: 45000 }, async t => {
+test('launchd owns the server after launcher exit, start is idempotent, and a killed process recovers', { skip: process.platform !== 'darwin' || process.env.PXDLS_SKIP_LAUNCHD_TEST === '1', timeout: 45000 }, async t => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ls-launchd-'));
   const socket = net.createServer();
   await new Promise(resolve => socket.listen(0, '127.0.0.1', resolve));

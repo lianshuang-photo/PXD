@@ -1,6 +1,6 @@
 # 工作区决策：PXD V2 与 LS Studio
 
-日期：2026-09-20。结论：**沿用 PXD 仓库；独立 V2 工作区与应用目录；实现待用户确认。**
+日期：2026-09-20。结论：**沿用 PXD 仓库；独立 V2 工作区与应用目录；用户已确认实施。** Alpha 已按固定标签保留，后续合并与发布门禁见 [COLLABORATION.md](COLLABORATION.md)。以下保留当时的评估依据，实际进度见 [IMPLEMENTATION-STATUS.md](IMPLEMENTATION-STATUS.md)。
 
 ## 事实依据
 

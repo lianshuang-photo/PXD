@@ -1,6 +1,6 @@
 # 共用能力、状态与执行契约
 
-更新：2026-09-20。这是 G01 待实现／校验的契约草案；示例对象和工具名不是当前已注册接口。
+更新：2026-09-20。G01 已落为 [`companion/domain`](../../apps/ls-studio/companion/domain/README.md) 的运行契约，本文说明产品架构。具体已注册工具与未验收边界以实现和 [IMPLEMENTATION-STATUS.md](IMPLEMENTATION-STATUS.md) 为准；后续能力族仍不代表全部已交付。
 
 ## 1. 调用关系
 
