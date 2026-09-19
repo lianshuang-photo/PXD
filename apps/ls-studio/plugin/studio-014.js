@@ -359,7 +359,7 @@
     button(layerOptions, "studioLayerVisible", "可见性：保持", function () { var changes = controller.snapshot().form.params.changes || {}, next = Object.assign({}, changes); if (!Object.prototype.hasOwnProperty.call(next, "visible")) next.visible = true; else if (next.visible) next.visible = false; else delete next.visible; controller.editParams({ changes: next }); });
     button(layerOptions, "studioResetChanges", "清除属性修改", function () { controller.editParams({ changes: {} }); });
     var settingsSection = section(body, "执行与回贴");
-    node("div", "studio-note", "图像结果回贴为新图层；图层属性任务直接修改所选层。", settingsSection);
+    node("div", "studio-note", "图像回贴为新图层，支持 PNG/JPEG、最多 800 万像素；4K 生成需关闭自动回贴。图层属性任务直接修改所选层。", settingsSection);
     var settingsRow = node("div", "studio-row", null, settingsSection);
     button(settingsRow, "studioAutoApply", "自动回贴：关", function () { var context = controller.snapshot().form.context; controller.editContext({ settings: Object.assign({}, context.settings, { autoApply: !(context.settings && context.settings.autoApply) }) }); });
     button(settingsRow, "studioDisableGrouping", "自动编组尚不支持 · 点击关闭", function () { var context = controller.snapshot().form.context; controller.editContext({ settings: Object.assign({}, context.settings, { groupResults: false }) }); });

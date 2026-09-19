@@ -3,6 +3,7 @@ const { randomUUID } = require('node:crypto');
 const { DomainError, invariant, clone, id, capabilityDefinitions, validateSchema, hostOperations, validateContext, publicError } = require('../domain/contracts');
 
 const imageMime = new Set(['image/png', 'image/jpeg', 'image/webp']);
+const placementLimits = { pixels: 8000000, imageBytes: 32 * 1024 * 1024, mimeTypes: ['image/png', 'image/jpeg'], returnTypes: ['new-layer'], groupResults: false };
 function decodeImage(image) {
   invariant(image && imageMime.has(image.mimeType), 'INVALID_IMAGE', 'PNG, JPEG or WebP image required');
   invariant(typeof image.base64 === 'string' && image.base64.length > 0 && image.base64.length <= 48 * 1024 * 1024 && image.base64.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(image.base64), 'INVALID_IMAGE', 'Image data is invalid or too large');
@@ -12,6 +13,20 @@ function decodeImage(image) {
   return data;
 }
 function asImage(value) { return { base64: value.data.toString('base64'), mimeType: value.asset.mimeType, width: value.asset.width, height: value.asset.height }; }
+function validatePlacementSettings(settings = {}) {
+  invariant(!settings.groupResults, 'HOST_UNSUPPORTED', 'Photoshop result grouping is not supported; disable groupResults before generating or placing results');
+  invariant(settings.returnType == null || placementLimits.returnTypes.includes(settings.returnType), 'HOST_UNSUPPORTED', 'Photoshop placement only supports a new layer');
+}
+function validateGenerationPlacement(snapshot) {
+  const settings = snapshot.context.settings || {};
+  validatePlacementSettings(settings);
+  invariant(!settings.autoApply || snapshot.params.imageSize !== '4K', 'UNSUPPORTED_OUTPUT', '4K output is not supported for automatic Photoshop placement within the 8,000,000-pixel limit; choose a smaller output or disable autoApply to retain the generated result without placement');
+}
+function validatePlacementImage(image) {
+  invariant(placementLimits.mimeTypes.includes(image.asset.mimeType), 'UNSUPPORTED_OUTPUT', 'Photoshop placement supports PNG and JPEG only; this generated result remains available as a managed asset');
+  invariant(image.asset.width * image.asset.height <= placementLimits.pixels, 'UNSUPPORTED_OUTPUT', 'Generated output exceeds the Photoshop placement limit of 8,000,000 pixels; the result remains available and was not resized or sent to Photoshop');
+  invariant(image.data.length <= placementLimits.imageBytes, 'UNSUPPORTED_OUTPUT', 'Generated output exceeds the Photoshop placement limit of 32 MiB; the result remains available and was not sent to Photoshop');
+}
 function uncertainHost(error) { return ['HOST_UNCERTAIN', 'HOST_RECOVERY_REQUIRED'].includes(error.code); }
 function sameProvenance(asset, context, purpose) {
   const source = asset.source, ref = context.documentRef;
@@ -44,7 +59,7 @@ function createCapabilityService({ assets, jobs, provider, bridge, recipes }) {
   }
   async function discover() {
     await ready; const backend = provider.describe(), photoshop = hostStatus();
-    return { schemaVersion: 1, capabilities: capabilityDefinitions.map(def => ({ ...clone(def), available: def.backend === 'gemini' ? backend.configured : photoshop.connected })), provider: backend, photoshop, limits: { capturePixels: 8000000, imageBytes: 32 * 1024 * 1024 }, hostAcceptance: 'requires-live-validation' };
+    return { schemaVersion: 1, capabilities: capabilityDefinitions.map(def => ({ ...clone(def), available: def.backend === 'gemini' ? backend.configured : photoshop.connected })), provider: backend, photoshop, limits: { capturePixels: 8000000, imageBytes: 32 * 1024 * 1024, placement: clone(placementLimits) }, hostAcceptance: 'requires-live-validation' };
   }
   async function capture(args) {
     await ready;
@@ -125,6 +140,7 @@ function createCapabilityService({ assets, jobs, provider, bridge, recipes }) {
         if ((await jobs.getJob(job.jobId)).status === 'running') await jobs.transition(job.jobId, 'succeeded');
         return;
       }
+      validateGenerationPlacement(job.snapshot);
       const inputs = await inputsFor(job.snapshot);
       if (controller.signal.aborted || (await jobs.getJob(job.jobId)).status === 'cancelled') return;
       const result = await provider.generate({ jobId: job.jobId, requestId: job.requestId, params: job.snapshot.params, context: job.snapshot.context, inputs }, { signal: controller.signal });
@@ -184,9 +200,11 @@ function createCapabilityService({ assets, jobs, provider, bridge, recipes }) {
       const mutationId = randomUUID();
       const queued = await jobs.setPlacement(job.jobId, { status: 'queued', requestId: input.requestId });
       invariant(queued.placement.status === 'queued' && queued.placement.requestId === input.requestId, 'PLACEMENT_CONFLICT', 'Placement request has already been handled', 409);
-      const applying = await jobs.setPlacement(job.jobId, { status: 'applying' });
-      invariant(applying.placement.status === 'applying', 'PLACEMENT_CONFLICT', 'Placement cannot be dispatched in this state', 409);
       try {
+        validatePlacementSettings(context.settings);
+        validatePlacementImage(image);
+        const applying = await jobs.setPlacement(job.jobId, { status: 'applying' });
+        invariant(applying.placement.status === 'applying', 'PLACEMENT_CONFLICT', 'Placement cannot be dispatched in this state', 409);
         const response = await host('studio_apply_result', { documentRef: context.documentRef, jobId: job.jobId, mutationId, image: asImage(image), ...(mask ? { mask: asImage(mask) } : {}), transform: context.transform, settings: context.settings || {} });
         invariant(response.receipt && response.receipt.mutationId === mutationId && response.receipt.jobId === job.jobId, 'HOST_UNCERTAIN', 'Photoshop placement receipt is missing or mismatched', 502);
         return await persistReceipt(job.jobId, { ...response.receipt, resultId: input.resultId });
