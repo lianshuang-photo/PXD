@@ -1,3 +1,5 @@
+> **PXD V2 / LS Studio（2026-09-20，规划待审阅）**：下一代产品继续在本仓库管理，完整范围、工作区方案和确认后的分工见 [V2 文档入口](docs/v2/README.md)。本 PR 仅更新文档；当前根目录代码及下文启动方式仍属于既有 PXD 应用，LS Alpha 源码将在确认后导入 `apps/ls-studio/`。
+
 # PXD - Stable Diffusion Forge UI 桥接插件
 
 PXD 是一个用于 Photoshop 的 UXP 插件，提供与 Stable Diffusion Forge UI 的桥接功能。通过该插件，您可以直接在 Photoshop 中调用 SD WebUI API 进行 AI 图像生成，无需切换应用即可实现文生图、图生图等功能。
