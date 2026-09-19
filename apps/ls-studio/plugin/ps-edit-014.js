@@ -64,10 +64,45 @@
   }
   function createStudioHost(ps, encode, options) {
     options = options || {};
+    var development = typeof window !== "undefined" && window.PXD_RUNTIME && window.PXD_RUNTIME.channel === "development";
     var makeId = options.makeId || function () { return Date.now().toString(36) + "_" + Math.random().toString(36).slice(2); };
     var runtimeId = "runtime_" + makeId(), docs = new Map(), captures = [], captureBytes = 0, ledger = new Map(), tail = Promise.resolve(), circuitError = null;
     var captureLimit = options.captureByteLimit == null ? 64 * 1024 * 1024 : options.captureByteLimit;
     var now = options.now || function () { return new Date().toISOString(); };
+    // Return a small diagnostic to the isolated development UI, never the native
+    // error object (which can contain descriptors, pixels, paths, or credentials).
+    function diagnose(error, stage, nativeError) {
+      if (!development || error.details && error.details.photoshopDiagnostic) return error;
+      var native = {}, message = nativeError && nativeError.message;
+      if (nativeError && typeof nativeError.name === "string" && /^[A-Za-z][A-Za-z0-9]{0,47}$/.test(nativeError.name)) native.name = nativeError.name;
+      if (nativeError && typeof nativeError.number === "number" && Number.isFinite(nativeError.number)) native.number = nativeError.number;
+      if (nativeError && typeof nativeError.code === "number" && Number.isFinite(nativeError.code)) native.code = nativeError.code;
+      if (nativeError && typeof nativeError.result === "number" && Number.isFinite(nativeError.result)) native.result = nativeError.result;
+      if (typeof message === "string") {
+        native.message = message.replace(/[\[{][\s\S]*$/, "[payload omitted]")
+          .replace(/(?:data:|https?:\/\/|file:\/\/|\/Users\/|[A-Za-z]:\\)[^\s]*/gi, "[redacted]")
+          .replace(/(?:authorization|api[-_ ]?key|token|secret|password)\s*[:=]\s*[^\s,;]+/gi, "[redacted]")
+          .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+          .replace(/"[^"\n]*"|'[^'\n]*'|`[^`\n]*`/g, "[quoted]")
+          .replace(/[A-Za-z0-9+/_=-]{40,}/g, "[redacted]")
+          .replace(/[\r\n\t]+/g, " ").slice(0, 280);
+      }
+      error.details = Object.assign({}, error.details, { photoshopDiagnostic: { stage: stage, native: native } });
+      var nativeNumber = native.number == null ? native.result : native.number;
+      error.message += " [dev: " + stage + (nativeNumber == null ? "" : "; PS " + nativeNumber) + (native.message ? "; " + native.message : "") + "]";
+      return error;
+    }
+    async function modal(operation, settings) {
+      // UXP can reconstruct callback errors as plain native Errors. Keep our
+      // original error locally so domain codes and recovery status survive.
+      var callbackError;
+      try {
+        return await ps.core.executeAsModal(async function (context) {
+          try { return await operation(context); }
+          catch (error) { callbackError = error; throw error; }
+        }, settings);
+      } catch (error) { throw callbackError || error; }
+    }
     function invalidate(event, descriptor) {
       var id = descriptor && (descriptor.documentID || descriptor.documentId);
       if (!id && descriptor && Array.isArray(descriptor._target)) { var t = descriptor._target.find(function (v) { return v._ref === "document" && v._id; }); id = t && t._id; }
@@ -104,7 +139,9 @@
     function deadlineCheck(deadline) { demand(!deadline || Date.now() < deadline, "REQUEST_EXPIRED", "请求已过期，未继续修改 Photoshop"); }
     async function batchPlay(commands) {
       var responses = await ps.action.batchPlay(commands, {});
-      demand(Array.isArray(responses) && responses.length === commands.length && responses.every(function (r) { return r && r._obj !== "error" && !(typeof r.result === "number" && r.result < 0); }), "HOST_EXECUTION_FAILED", "Photoshop 返回命令错误，已取消本次事务"); return responses;
+      var failedIndex = Array.isArray(responses) ? responses.findIndex(function (r) { return !r || r._obj === "error" || typeof r.result === "number" && r.result < 0; }) : -1;
+      if (!Array.isArray(responses) || responses.length !== commands.length || failedIndex >= 0) throw diagnose(hostError("HOST_EXECUTION_FAILED", "Photoshop 返回命令错误，已取消本次事务"), "batch-play", failedIndex >= 0 ? responses[failedIndex] : null);
+      return responses;
     }
     var capture = (options.createCapture || require("./ps-capture-014.js").createProductionCapture)(ps, encode, options);
     var placement = (options.createReturn || require("./ps-return-014.js").createProductionReturn)(ps, encode, Object.assign({}, options, { batchPlay: batchPlay }));
@@ -148,33 +185,44 @@
     }
     async function transaction(ref, expectedHistory, label, deadline, operation, conflictCode) {
       demand(ps.core && ps.core.executeAsModal, "HOST_UNSUPPORTED", "Photoshop 模态事务接口不可用");
-      var result;
-      try { await ps.core.executeAsModal(async function (context) {
+      var result, stage = "modal-entry";
+      try { await modal(async function (context) {
+        stage = "context-guard";
         deadlineCheck(deadline);
         demand(!context || !context.isCancelled, "HOST_CANCELLED", "Photoshop 已取消本次操作");
+        stage = "document-guard";
         var doc = guard(ref, expectedHistory, conflictCode), control = context && context.hostControl;
         demand(control && control.suspendHistory && control.resumeHistory, "HOST_UNSUPPORTED", "Photoshop 历史事务接口不可用，未修改文档");
-        var preHistory = history(doc), suspension = await control.suspendHistory({ documentID: doc.id, name: label }), committed = false;
+        stage = "history-read-before";
+        var preHistory = history(doc), suspension, committed = false;
+        stage = "history-suspend";
+        suspension = await control.suspendHistory({ documentID: doc.id, name: label });
         demand(suspension != null, "HOST_EXECUTION_FAILED", "Photoshop 未建立历史事务");
         try {
+          stage = "operation";
           var details = await operation(doc);
+          stage = "commit-guard";
           deadlineCheck(deadline);
           demand(!context.isCancelled, "HOST_CANCELLED", "Photoshop 已取消本次操作，正在恢复事务");
           active(doc.id, conflictCode);
+          stage = "history-commit";
           await control.resumeHistory(suspension, true); committed = true;
+          stage = "history-read-after";
           var postHistory = history(doc);
           result = Object.assign({ preHistoryStateId: preHistory, postHistoryStateId: postHistory }, details);
+          stage = "modal-exit";
         } catch (error) {
+          var failedStage = stage;
           if (!committed) {
-            try { await control.resumeHistory(suspension, false); }
-            catch (_) { circuitError = hostError("HOST_RECOVERY_REQUIRED", "Photoshop 无法确认本次事务已恢复；已停止后续自动写入，请检查文档", { mutationMayHaveApplied: true }); throw circuitError; }
-          } else { circuitError = hostError("HOST_RECOVERY_REQUIRED", "Photoshop 已提交但无法确认回执；已停止后续自动写入，请检查文档", { mutationMayHaveApplied: true }); throw circuitError; }
-          throw error.code ? error : hostError("HOST_EXECUTION_FAILED", "Photoshop 执行失败，本次历史事务已恢复");
+            try { stage = "history-rollback"; await control.resumeHistory(suspension, false); }
+            catch (recoveryError) { circuitError = diagnose(hostError("HOST_RECOVERY_REQUIRED", "Photoshop 无法确认本次事务已恢复；已停止后续自动写入，请检查文档", { mutationMayHaveApplied: true }), stage, recoveryError); throw circuitError; }
+          } else { circuitError = diagnose(hostError("HOST_RECOVERY_REQUIRED", "Photoshop 已提交但无法确认回执；已停止后续自动写入，请检查文档", { mutationMayHaveApplied: true }), failedStage, error); throw circuitError; }
+          throw diagnose(error.code ? error : hostError("HOST_EXECUTION_FAILED", "Photoshop 执行失败，本次历史事务已恢复"), failedStage, error);
         }
       }, { commandName: label }); }
       catch (error) {
         if (result && !circuitError) circuitError = hostError("HOST_RECOVERY_REQUIRED", "Photoshop 模态退出失败但修改可能已经提交；已停止后续自动写入", { mutationMayHaveApplied: true });
-        throw circuitError || (error.code ? error : hostError("HOST_EXECUTION_FAILED", "Photoshop 无法执行本次模态操作"));
+        throw diagnose(circuitError || (error.code ? error : hostError("HOST_EXECUTION_FAILED", "Photoshop 无法执行本次模态操作")), stage, error);
       }
       return result;
     }
@@ -235,7 +283,7 @@
         deadlineCheck(deadline);
         if (tool === "studio_rollback") return rollback(args, deadline);
         var result;
-        await ps.core.executeAsModal(async function () {
+        await modal(async function () {
           deadlineCheck(deadline); var doc = active(args.documentId), ref = reference(doc), captured = await capture(doc, args.scope);
           guard(ref, ref.historyStateId); deadlineCheck(deadline); remember(ref, captured);
           delete captured.maskPixels; result = Object.assign({ ok: true, documentRef: ref }, captured);

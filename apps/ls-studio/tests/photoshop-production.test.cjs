@@ -35,7 +35,7 @@ function fixture(options = {}) {
     core: { executeAsModal: async fn => {
       if (f.onModal) await f.onModal();
       const context = { isCancelled: false, hostControl: {
-        suspendHistory: async input => { assert.equal(input.documentID, doc.id); snapshot = { layers: structuredClone(doc.layers), active: doc.activeLayers.map(l => l.id), history: doc.activeHistoryState.id }; f.suspensions.push(input); return 'suspension-' + f.suspensions.length; },
+        suspendHistory: async input => { if (f.onSuspend) await f.onSuspend(); assert.equal(input.documentID, doc.id); snapshot = { layers: structuredClone(doc.layers), active: doc.activeLayers.map(l => l.id), history: doc.activeHistoryState.id }; f.suspensions.push(input); return 'suspension-' + f.suspensions.length; },
         resumeHistory: async (id, commit) => {
           f.resumes.push({ id, commit }); if (f.failResume) throw Error('native history API failed');
           if (commit) { doc.activeHistoryState = { id: ++historyCounter }; }
@@ -290,3 +290,84 @@ test('rollback transaction failure restores the created layer and leaves receipt
   f.failCommand = null;
   assert.equal((await f.execute('studio_rollback', { receipt: changed.receipt })).receipt.rollbackStatus, 'rolled-back'); assert.deepEqual(f.doc.layers.map(l => l.id), [2]);
 });
+
+async function withRuntime(channel, work) {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  globalThis.window = { PXD_RUNTIME: { channel } };
+  try { return await work(); }
+  finally { if (previous) Object.defineProperty(globalThis, 'window', previous); else delete globalThis.window; }
+}
+function rewrapModalErrors(f) {
+  const execute = f.ps.core.executeAsModal;
+  f.ps.core.executeAsModal = async (...args) => {
+    try { return await execute(...args); }
+    catch (error) { throw new Error(String(error)); }
+  };
+}
+test('UXP reconstructed modal errors preserve domain codes and recovery circuit details', async () => {
+  const f = fixture(); rewrapModalErrors(f);
+  f.doc.selection.bounds = null;
+  await assert.rejects(f.capture(), code('NO_SELECTION'));
+  const capture = await f.capture('document');
+  f.failCommand = command => command._obj === 'hide';
+  f.failResume = true;
+  await assert.rejects(f.execute('studio_edit_layer', edit(capture)), error => {
+    assert.equal(error.code, 'HOST_RECOVERY_REQUIRED');
+    assert.equal(error.details.mutationMayHaveApplied, true);
+    assert.equal(error.details.photoshopDiagnostic, undefined); return true;
+  });
+  const attempted = f.commands.length;
+  await assert.rejects(f.execute('studio_edit_layer', edit(capture, 'next')), code('HOST_RECOVERY_REQUIRED'));
+  assert.equal(f.commands.length, attempted);
+});
+test('development diagnostics distinguish native modal entry and history suspension failures', async () => withRuntime('development', async () => {
+  for (const phase of ['modal-entry', 'history-suspend']) {
+    const f = fixture(), capture = await f.capture();
+    const native = Object.assign(new Error('Native host is busy'), { number: 9, params: { name: 'private layer name', pixels: 'private pixels', token: 'private token' } });
+    if (phase === 'modal-entry') f.onModal = () => { throw native; };
+    else { f.onSuspend = () => { throw native; }; rewrapModalErrors(f); }
+    await assert.rejects(f.execute('studio_edit_layer', edit(capture)), error => {
+      assert.equal(error.code, 'HOST_EXECUTION_FAILED');
+      assert.deepEqual(error.details.photoshopDiagnostic, { stage: phase, native: { name: 'Error', number: 9, message: 'Native host is busy' } });
+      assert.ok(error.message.includes(phase)); assert.ok(error.message.includes('PS 9'));
+      assert.equal(JSON.stringify(error).includes('private'), false); return true;
+    });
+    assert.equal(f.commands.length, 0); assert.equal(f.layer().name, 'Original layer');
+  }
+}));
+test('development preserves batch error diagnostics through native error wrapping and transaction rollback', async () => withRuntime('development', async () => {
+  const f = fixture(), capture = await f.capture(); rewrapModalErrors(f);
+  f.failCommand = command => command._obj === 'hide';
+  await assert.rejects(f.execute('studio_edit_layer', edit(capture)), error => {
+    assert.equal(error.code, 'HOST_EXECUTION_FAILED');
+    assert.deepEqual(error.details.photoshopDiagnostic, { stage: 'batch-play', native: { result: -25922, message: 'fixture command failure' } }); return true;
+  });
+  assert.equal(f.layer().name, 'Original layer'); assert.equal(f.resumes.at(-1).commit, false);
+}));
+test('development diagnostic messages omit payloads, quoted values, paths and credentials', async () => withRuntime('development', async () => {
+  const f = fixture(), capture = await f.capture();
+  f.onSuspend = () => { throw Object.assign(new Error('Invalid value "private layer" at /Users/private/file token=secret-value Bearer secret-bearer data:image/png;base64,secret-pixel {"pixels":"secret-payload"}'), { number: 10 }); };
+  await assert.rejects(f.execute('studio_edit_layer', edit(capture)), error => {
+    const output = JSON.stringify({ message: error.message, details: error.details });
+    assert.equal(/private|secret/.test(output), false); assert.ok(output.includes('Invalid value')); return true;
+  });
+}));
+test('production and unspecified runtime channels do not expose native diagnostic output', async () => {
+  for (const channel of ['production', undefined, 'test']) await withRuntime(channel, async () => {
+    const f = fixture(), capture = await f.capture();
+    f.onSuspend = () => { throw Object.assign(new Error('native diagnostic message'), { number: 9 }); };
+    await assert.rejects(f.execute('studio_edit_layer', edit(capture)), error => {
+      assert.equal(error.code, 'HOST_EXECUTION_FAILED'); assert.equal(error.details, undefined);
+      assert.equal(error.message, 'Photoshop 无法执行本次模态操作'); return true;
+    });
+  });
+});
+test('native modal exit failure still trips recovery circuit after successful callback', async () => withRuntime('development', async () => {
+  const f = fixture(), capture = await f.capture(), execute = f.ps.core.executeAsModal;
+  f.ps.core.executeAsModal = async (...args) => { await execute(...args); throw Object.assign(new Error('Modal exit failed'), { number: 11 }); };
+  await assert.rejects(f.execute('studio_edit_layer', edit(capture)), error => {
+    assert.equal(error.code, 'HOST_RECOVERY_REQUIRED'); assert.equal(error.details.mutationMayHaveApplied, true);
+    assert.equal(error.details.photoshopDiagnostic.stage, 'modal-exit'); assert.equal(error.details.photoshopDiagnostic.native.number, 11); return true;
+  });
+  assert.equal(f.layer().name, 'Edited');
+}));
