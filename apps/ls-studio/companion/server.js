@@ -752,21 +752,21 @@ async function respondApply(res, body, routeModel) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, "http://" + HOST + ":" + PORT);
-  if (await studioHttp.handle(req, res, url)) return;
-  if (await agentHttp.handle(req, res, url)) return;
-  if (req.method === "OPTIONS") {
-    res.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    });
-    return res.end();
-  }
-
-  const pathName = url.pathname.replace(/\/+$/, "") || "/";
-
   try {
+    const url = new URL(req.url, "http://" + HOST + ":" + PORT);
+    if (await studioHttp.handle(req, res, url)) return;
+    if (await agentHttp.handle(req, res, url)) return;
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+      });
+      return res.end();
+    }
+
+    const pathName = url.pathname.replace(/\/+$/, "") || "/";
+
     if (req.method === "GET" && pathName === "/health") {
       return send(res, 200, {
         ok: true,
@@ -1116,6 +1116,8 @@ const server = http.createServer(async (req, res) => {
 
     return send(res, 404, { ok: false, error: "not found", path: pathName });
   } catch (e) {
+    if (res.destroyed || res.writableEnded) return;
+    if (res.headersSent) return res.destroy();
     return send(res, 400, { ok: false, error: String(e && e.message ? e.message : e) });
   }
 });
