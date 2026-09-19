@@ -1,0 +1,79 @@
+{
+  "id": "com.pxdls.studio",
+  "name": "PXD/LS studio",
+  "version": "0.1.5",
+  "main": "index.html",
+  "manifestVersion": 5,
+  "host": {
+    "app": "PS",
+    "minVersion": "24.0.0"
+  },
+  "entrypoints": [
+    {
+      "type": "panel",
+      "id": "pxdlsStudioPanel",
+      "label": {
+        "default": "PXD/LS studio"
+      },
+      "minimumSize": {
+        "width": 230,
+        "height": 360
+      },
+      "maximumSize": {
+        "width": 860,
+        "height": 4000
+      },
+      "preferredDockedSize": {
+        "width": 360,
+        "height": 640
+      },
+      "preferredFloatingSize": {
+        "width": 360,
+        "height": 640
+      },
+      "icons": [
+        {
+          "width": 23,
+          "height": 23,
+          "path": "icons/icon-dark.png",
+          "scale": [
+            1,
+            2
+          ],
+          "theme": [
+            "darkest",
+            "dark",
+            "medium"
+          ]
+        },
+        {
+          "width": 23,
+          "height": 23,
+          "path": "icons/icon-light.png",
+          "scale": [
+            1,
+            2
+          ],
+          "theme": [
+            "lightest",
+            "light"
+          ]
+        }
+      ]
+    }
+  ],
+  "requiredPermissions": {
+    "network": {
+      "domains": "all"
+    },
+    "localFileSystem": "request",
+    "clipboard": "readAndWrite",
+    "launchProcess": {
+      "schemes": [
+        "http",
+        "https"
+      ],
+      "extensions": []
+    }
+  }
+}

@@ -1,0 +1,5 @@
+.local/
+data/
+coverage/
+*.pid
+provider-config.json
