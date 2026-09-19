@@ -11,6 +11,7 @@
   }
   function createExecutor(ps, encode, options) {
     options = options || {};
+    var studioHost = null;
     function current(id) {
       var doc = ps.app.documents.length ? ps.app.activeDocument : null;
       if (!doc) throw new Error("Photoshop 没有打开的文档");
@@ -58,6 +59,10 @@
       if (tool === "photoshop_select_layers" && (!Array.isArray(args.layerIds) || !args.layerIds.length || args.layerIds.length > 20 || new Set(args.layerIds).size !== args.layerIds.length || args.layerIds.some(function (id) { return !Number.isInteger(id) || id < 1; }))) throw new Error("图层列表无效");
     }
     return async function execute(tool, args, deadline) {
+      if (["studio_capture", "studio_edit_layer", "studio_apply_result", "studio_rollback"].indexOf(tool) >= 0) {
+        if (!studioHost) studioHost = (options.createStudioHost || require("./ps-edit-014.js").createStudioHost)(ps, encode, options.studioOptions || {});
+        return studioHost.execute(tool, args, deadline);
+      }
       check(tool, args, deadline);
       if (tool === "photoshop_get_document") {
         var docs = Array.from(ps.app.documents).map(function (d) { return { id: d.id, name: d.title || d.name }; });
@@ -149,7 +154,7 @@
         if (response.job && !stopped) {
           var job = response.job, result;
           try { result = await execute(job.tool, job.arguments, job.expiresAt); }
-          catch (e) { result = { ok: false, error: String(e.message || e).slice(0, 600) }; }
+          catch (e) { result = { ok: false, error: String(e.message || e).slice(0, 600), code: e.code || "HOST_EXECUTION_FAILED" }; if (e.details) result.details = e.details; }
           await request("/photoshop/result", { clientId: clientId, id: job.id, result: result }, ownerToken);
         }
       } catch (e) {

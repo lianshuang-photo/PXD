@@ -1,6 +1,7 @@
 /* Selection-bounded capture. Port of wheelchair host/ps-io.js getSelectionAndImage
    (selection probe + imaging.getPixels on sourceBounds). No hue-shift, no full-canvas default. */
-var photoshop = require("photoshop");
+// Loaded only by the legacy entry point; production factories receive an explicit host.
+var photoshop = null;
 var encode = (typeof require === "function" ? (function () {
   try { return require("./ps-encode-014.js"); } catch (_) { return null; }
 })() : null) || (typeof window !== "undefined" ? window.psEncode : null);
@@ -198,6 +199,7 @@ function toUint8Pixels(rawBuf, pw, ph, comp) {
  * returns { base64, selection, width, height, docId }
  */
 async function capture(predefinedSelection, opts) {
+  photoshop = photoshop || require("photoshop");
   if (predefinedSelection && predefinedSelection.selection && predefinedSelection.left == null) {
     opts = predefinedSelection;
     predefinedSelection = predefinedSelection.selection;
@@ -286,7 +288,65 @@ async function capture(predefinedSelection, opts) {
   return result;
 }
 
-var _api = { capture: capture, detectSelection: detectSelection };
+/** Exact production capture, called while the caller holds a Photoshop modal scope.
+ * Unlike the Alpha thumbnail path, this does not guess pixel depths, pad/truncate
+ * bad buffers, resize, or replace a selection by its enclosing rectangle.
+ */
+function createProductionCapture(ps, codec, options) {
+  options = options || {};
+  var pixelTools = options.pixelTools || require("./ps-pixels-014.js");
+  function reject(code, message) { var error = new Error(message); error.code = code; throw error; }
+  function value(v) { return typeof v === "number" ? v : Number(v && (v._value != null ? v._value : v.value != null ? v.value : v)); }
+  function checkBounds(bounds, doc) {
+    if (!bounds) reject("NO_SELECTION", "未检测到活动选区；请创建选区或明确使用整图模式");
+    var result = { left: Math.floor(value(bounds.left)), top: Math.floor(value(bounds.top)), right: Math.ceil(value(bounds.right)), bottom: Math.ceil(value(bounds.bottom)) };
+    if (!Object.keys(result).every(function (key) { return Number.isFinite(result[key]); }) || result.left < 0 || result.top < 0 || result.right > value(doc.width) || result.bottom > value(doc.height) || result.right <= result.left || result.bottom <= result.top) reject("UNSUPPORTED_BOUNDS", "选区范围无效或超出画布，未自动裁切");
+    pixelTools.dimensions(result.right - result.left, result.bottom - result.top); return result;
+  }
+  function matches(a, b) { return !a || ["left", "top", "right", "bottom"].every(function (k) { return value(a[k]) === b[k]; }); }
+  async function readPixels(result, source, components) {
+    var data = result && result.imageData;
+    if (!data) reject("HOST_PIXEL_FORMAT", "Photoshop 未返回图像数据");
+    try {
+      if (!matches(result.sourceBounds, source) || data.width !== source.right - source.left || data.height !== source.bottom - source.top || components.indexOf(data.components) < 0 || data.componentSize !== 8) reject("HOST_PIXEL_FORMAT", "Photoshop 返回的像素范围、通道或位深与原始范围不匹配，未自动缩放");
+      var pixels = await data.getData({ chunky: true });
+      if (!(pixels instanceof Uint8Array) || pixels.length !== data.width * data.height * data.components) reject("HOST_PIXEL_FORMAT", "Photoshop 返回的像素缓冲区不完整");
+      var owned = new Uint8Array(pixels);
+      return { width: data.width, height: data.height, components: data.components, pixels: owned };
+    } finally { if (data.dispose) data.dispose(); }
+  }
+  function encoded(data) {
+    var png = pixelTools.encodePNG(data.width, data.height, data.pixels, data.components);
+    return { base64: codec.arrayBufferToBase64(png.buffer), mimeType: "image/png", width: data.width, height: data.height };
+  }
+  return async function captureInModal(doc, scope) {
+    if (scope !== "selection" && scope !== "document") reject("INVALID_INPUT", "必须明确选择选区或整图模式");
+    if (!ps.imaging || !ps.imaging.getPixels) reject("HOST_UNSUPPORTED", "此 Photoshop 版本不支持生产像素读取");
+    var rawDepth = doc.bitsPerChannel, depth = null, bitTypes = ps.constants && ps.constants.BitsPerChannelType;
+    if (rawDepth === 8 || rawDepth === "8" || rawDepth === "bitDepth8" || bitTypes && rawDepth === bitTypes.EIGHT) depth = 8;
+    else if (rawDepth === 16 || rawDepth === "16" || rawDepth === "bitDepth16" || bitTypes && rawDepth === bitTypes.SIXTEEN) depth = 16;
+    if (depth == null) reject("UNSUPPORTED_DOCUMENT", "生产捕获暂支持 8/16 位文档；32 位 HDR 或未知位深需要单独转换确认");
+    var source;
+    if (scope === "selection") {
+      if (!ps.imaging.getSelection) reject("HOST_UNSUPPORTED", "此 Photoshop 版本无法读取真实选区蒙版，未使用矩形替代");
+      var selectionBounds;
+      try { selectionBounds = doc.selection && doc.selection.bounds; }
+      catch (_) { reject("NO_SELECTION", "未检测到活动选区；请创建选区或明确使用整图模式"); }
+      source = checkBounds(selectionBounds, doc);
+    } else source = checkBounds({ left: 0, top: 0, right: value(doc.width), bottom: value(doc.height) }, doc);
+    var maskData = null;
+    if (scope === "selection") {
+      maskData = await readPixels(await ps.imaging.getSelection({ documentID: doc.id, sourceBounds: source }), source, [1]);
+      if (!maskData.pixels.some(function (v) { return v > 0; })) reject("NO_SELECTION", "当前选区蒙版为空");
+    }
+    var imageData = await readPixels(await ps.imaging.getPixels({ documentID: doc.id, sourceBounds: source, componentSize: 8, colorSpace: "RGB", colorProfile: "sRGB IEC61966-2.1", applyAlpha: false }), source, [3, 4]);
+    var result = { scope: scope, transform: { sourceBounds: source, inputWidth: imageData.width, inputHeight: imageData.height }, image: encoded(imageData), adaptation: { colorSpace: "sRGB", colorProfile: "sRGB IEC61966-2.1", bitDepth: 8, sourceBitDepth: Number(depth), sourceMode: String(doc.mode), resized: false, transparency: imageData.components === 4 ? "preserved" : "opaque" } };
+    if (maskData) { result.mask = encoded(maskData); result.maskPixels = maskData.pixels; }
+    return result;
+  };
+}
+
+var _api = { capture: capture, detectSelection: detectSelection, createProductionCapture: createProductionCapture };
 if (typeof module !== "undefined" && module.exports) module.exports = _api;
 var _g = (typeof window !== "undefined") ? window : (typeof globalThis !== "undefined" ? globalThis : this);
 _g.ps = _g.ps || {};
