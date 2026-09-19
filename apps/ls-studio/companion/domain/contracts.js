@@ -59,7 +59,7 @@ function validateSchema(value, rule, label = 'input') {
     object(value, label);
     for (const key of rule.required || []) invariant(Object.hasOwn(value, key), 'INVALID_INPUT', label + '.' + key + ' is required');
     for (const [key, child] of Object.entries(value)) {
-      const sub = rule.properties && rule.properties[key];
+      const sub = (rule.properties && rule.properties[key]) || (rule.additionalProperties && typeof rule.additionalProperties === 'object' ? rule.additionalProperties : undefined);
       invariant(sub || rule.additionalProperties !== false, 'INVALID_INPUT', label + '.' + key + ' is not supported');
       if (sub) validateSchema(child, sub, label + '.' + key);
     }
@@ -129,4 +129,5 @@ const hostOperations = {
   studio_apply_result: schema({ documentRef: documentRefSchema, jobId: identifier, mutationId: identifier, image: schema({ base64: text(96 * 1024 * 1024), mimeType: { enum: ['image/png', 'image/jpeg', 'image/webp'] }, width: integer, height: integer }, ['base64', 'mimeType', 'width', 'height']), mask: { type: 'object' }, transform: contextSchema.properties.transform, settings: contextSchema.properties.settings }, ['documentRef', 'jobId', 'mutationId', 'image', 'transform']),
   studio_rollback: schema({ receipt: { type: 'object' } }, ['receipt']),
 };
+capabilityDefinitions[0].inputSchema.properties.recipe = schema({ recipeId: identifier, sourceHash: { type: 'string', pattern: '^[a-f0-9]{64}$' }, values: { type: 'object', additionalProperties: { type: 'number', minimum: 0, maximum: 1 } } }, ['recipeId', 'sourceHash', 'values']);
 module.exports = { DomainError, invariant, object, clone, id, schema, identifier, integer, contextSchema, documentRefSchema, capabilityDefinitions, capability, validateSchema, validateContext, validateDraft, validateRunSnapshot, assertTransition, jobTransitions, placementTransitions, publicError, hostOperations };

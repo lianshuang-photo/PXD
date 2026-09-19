@@ -8,13 +8,13 @@ function allowedOrigin(origin) {
   if (!origin || origin === "null" || origin === "file://" || origin.startsWith("uxp://")) return true;
   try { const u = new URL(origin); return ["http:", "https:"].includes(u.protocol) && localHost(u.hostname); } catch (_) { return false; }
 }
-function bodyJson(req) {
+function bodyJson(req, maxBytes = 24 * 1024 * 1024) {
   if (!/^application\/json(?:;|$)/i.test(req.headers["content-type"] || "")) return Promise.reject(fail("需要 JSON 请求", 415));
   return new Promise((resolve, reject) => {
     let size = 0, chunks = [], rejected = false;
     req.on("data", c => {
       size += c.length;
-      if (size > 24 * 1024 * 1024) { if (!rejected) reject(fail("消息附件总量超过 24 MiB", 413)); rejected = true; chunks = []; }
+      if (size > maxBytes) { if (!rejected) reject(fail("请求附件超过大小限制", 413)); rejected = true; chunks = []; }
       if (!rejected) chunks.push(c);
     });
     req.on("end", () => { if (rejected) return; try { const b = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"); if (!b || Array.isArray(b) || typeof b !== "object") throw Error(); resolve(b); } catch (_) { reject(fail("JSON 格式无效")); } });
@@ -56,7 +56,9 @@ function createAgentHttp(options = {}) {
         if (name === "/photoshop/status" && req.method === "GET") { json(200, { ok: true, ...bridge.status() }); return true; }
         if (name === "/photoshop/call" && req.method === "POST") {
           if (req.headers["x-pxdls-tool"] !== bridge.toolToken) throw fail("工具连接凭据无效", 403);
-          const body = await bodyJson(req); json(200, await bridge.request(body.tool, body.arguments)); return true;
+          const body = await bodyJson(req);
+          if (typeof body.tool !== "string" || body.tool.startsWith("studio_")) throw fail("生产操作必须通过共享能力服务", 403);
+          json(200, await bridge.request(body.tool, body.arguments)); return true;
         }
         // Web previews are clients, never Photoshop executors. UXP has an opaque origin.
         if (origin && origin !== "null" && origin !== "file://" && !origin.startsWith("uxp://")) throw fail("仅 Photoshop 插件可连接执行器", 403);
@@ -65,7 +67,7 @@ function createAgentHttp(options = {}) {
           const body = await bodyJson(req); bridge.authorize(body.clientId, req.headers["x-pxdls-host"]); json(200, { ok: true });
         }
         else if (name === "/photoshop/result" && req.method === "POST") {
-          bridge.result(await bodyJson(req), req.headers["x-pxdls-host"]); json(200, { ok: true });
+          bridge.result(await bodyJson(req, 96 * 1024 * 1024), req.headers["x-pxdls-host"]); json(200, { ok: true });
         } else if (name === "/photoshop/jobs" && req.method === "GET") {
           const client = url.searchParams.get("clientId"), token = req.headers["x-pxdls-host"];
           const job = bridge.take(client, token);
