@@ -48,7 +48,7 @@ const contextSchema = schema({
 }, ['documentRef', 'scope']);
 const capabilityDefinitions = [
   { id: 'image.edit', version: 1, title: '图像编辑', backend: 'gemini', inputSchema: schema({ prompt: text(64000), model: text(200), temperature: { type: 'number', minimum: 0, maximum: 2 }, aspectRatio: { enum: ['auto', '1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9', '4:5', '5:4'] }, imageSize: { enum: ['1K', '2K', '4K'] } }), outputSchema: { type: 'object', required: ['results'] }, errors: ['PROVIDER_NOT_CONFIGURED', 'PROVIDER_AUTH', 'PROVIDER_RATE_LIMIT', 'PROVIDER_REJECTED', 'PROVIDER_UNCERTAIN', 'CANCELLED'] },
-  { id: 'ps.layer.update', version: 1, title: '修改图层属性', backend: 'photoshop', inputSchema: schema({ layerId: integer, changes: schema({ name: text(1000), opacity: { type: 'number', minimum: 0, maximum: 100 }, visible: { type: 'boolean' } }) }), outputSchema: { type: 'object', required: ['receipt'] }, errors: ['HOST_UNAVAILABLE', 'DOCUMENT_CONFLICT', 'HOST_EXECUTION_FAILED', 'ROLLBACK_CONFLICT'] },
+  { id: 'ps.layer.update', version: 1, title: '修改图层属性', backend: 'photoshop', inputSchema: schema({ layerId: { type: ['integer', 'null'], minimum: 1 }, changes: schema({ name: text(1000), opacity: { type: 'number', minimum: 0, maximum: 100 }, visible: { type: 'boolean' } }) }), outputSchema: { type: 'object', required: ['receipt'] }, errors: ['HOST_UNAVAILABLE', 'DOCUMENT_CONFLICT', 'HOST_EXECUTION_FAILED', 'ROLLBACK_CONFLICT'] },
 ];
 
 function validateSchema(value, rule, label = 'input') {
