@@ -235,7 +235,8 @@ async function returnImage(opts, selection) {
 function createProductionReturn(ps, codec, options) {
   options = options || {};
   var pixelTools = options.pixelTools || require("./ps-pixels-014.js");
-  function reject(code, message) { var error = new Error(message); error.code = code; throw error; }
+  var hostError = require("./ps-pixels-014.js").createHostError;
+  function reject(code, message) { throw hostError(code, message); }
   function value(v) { return typeof v === "number" ? v : Number(v && (v._value != null ? v._value : v.value != null ? v.value : v)); }
   function target(docId, layerId) { return [{ _ref: "layer", _id: layerId }, { _ref: "document", _id: docId }]; }
   function layerIds(doc) { var found = []; function walk(layers) { Array.from(layers).forEach(function (layer) { found.push(layer.id); if (layer.layers && layer.layers.length) walk(layer.layers); }); } walk(doc.layers); return found; }

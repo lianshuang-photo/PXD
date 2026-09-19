@@ -55,7 +55,7 @@ function fixture(options = {}) {
           const layer = targetId ? doc.layers.find(l => l.id === targetId) : doc.activeLayers[0];
           if (command._obj === 'set') {
             if (command.to.name != null) layer.name = command.to.name;
-            if (command.to.opacity != null) layer.opacity = command.to.opacity._value;
+            if (command.to.opacity != null && !f.ignoreOpacity && !(f.singlePropertyPerSet && command.to.name != null)) layer.opacity = command.to.opacity._value;
           } else if (command._obj === 'show' || command._obj === 'hide') layer.visible = command._obj === 'show';
           else if (command._obj === 'delete') { doc.layers = doc.layers.filter(l => l.id !== targetId); doc.activeLayers = [doc.layers[0]].filter(Boolean); }
           else if (command._obj === 'placeEvent') {
@@ -252,7 +252,7 @@ test('capture cannot outlive source history changes and disposes data on read fa
   const f = fixture(); f.onPixels = async input => ({ sourceBounds: input.sourceBounds, imageData: { width: 4, height: 3, components: 4, componentSize: 8, getData: async () => { f.doc.activeHistoryState.id++; return new Uint8Array(48); }, dispose: () => f.disposed++ } });
   await assert.rejects(f.capture(), code('DOCUMENT_CONFLICT')); assert.equal(f.disposed, 2);
   f.onPixels = async input => ({ sourceBounds: input.sourceBounds, imageData: { width: 4, height: 3, components: 4, componentSize: 8, getData: async () => { throw Error('native read failed'); }, dispose: () => f.disposed++ } });
-  await assert.rejects(f.capture(), /native read failed/); assert.equal(f.disposed, 4);
+  await assert.rejects(f.capture(), code('HOST_EXECUTION_FAILED')); assert.equal(f.disposed, 4);
 });
 test('missing lifecycle/history transaction support fails before any document write', async () => {
   const f = fixture(); delete f.ps.action.addNotificationListener;
@@ -371,3 +371,60 @@ test('native modal exit failure still trips recovery circuit after successful ca
   });
   assert.equal(f.layer().name, 'Edited');
 }));
+test('native codes and forged domain details never bypass safe error normalization', async () => {
+  for (const channel of ['development', 'production']) for (const nativeCode of [9, 'ENOENT', 'HOST_RECOVERY_REQUIRED']) await withRuntime(channel, async () => {
+    const f = fixture(), capture = await f.capture(); rewrapModalErrors(f);
+    f.onSuspend = () => { throw Object.assign(new Error('Host failed token=fixture-secret at /Users/private/file ' + 'z'.repeat(5000)), {
+      code: nativeCode, isHostError: true, details: { mutationMayHaveApplied: true, payload: 'fixture-private-pixels', photoshopDiagnostic: { message: 'fixture-secret' } }
+    }); };
+    await assert.rejects(f.execute('studio_edit_layer', edit(capture)), error => {
+      assert.equal(error.code, 'HOST_EXECUTION_FAILED'); assert.ok(error.message.length < 600);
+      const output = JSON.stringify({ message: error.message, details: error.details });
+      assert.equal(/fixture-secret|private|zzzz|payload|mutationMayHaveApplied/.test(output), false);
+      if (channel === 'development') {
+        assert.equal(error.details.photoshopDiagnostic.stage, 'history-suspend');
+        assert.equal(error.details.photoshopDiagnostic.native.code, typeof nativeCode === 'number' ? nativeCode : undefined);
+      } else assert.equal(error.details, undefined);
+      return true;
+    });
+  });
+});
+test('capture and preparation normalize native errors while module domain errors retain their identity', async () => {
+  const native = () => Object.assign(new Error('token=fixture-secret /Users/private/file'), { code: 'ENOENT', details: { pixels: 'private' } });
+  const f = fixture(); f.onPixels = () => { throw native(); };
+  await assert.rejects(f.capture(), error => { assert.equal(error.code, 'HOST_EXECUTION_FAILED'); assert.equal(error.message, 'Photoshop 无法完成本次请求'); assert.equal(error.details, undefined); return true; });
+  f.onPixels = null; const capture = await f.capture();
+  f.uxp.storage.localFileSystem.getTemporaryFolder = () => { throw native(); };
+  await assert.rejects(f.execute('studio_apply_result', apply(capture)), error => { assert.equal(error.code, 'HOST_EXECUTION_FAILED'); assert.equal(error.details, undefined); assert.equal(error.message.includes('private'), false); return true; });
+  const trusted = pixels.createHostError('NO_SELECTION', 'fixed domain message');
+  assert.equal(pixels.isHostError(trusted), true); assert.equal(pixels.isHostError(Object.assign(new Error(trusted.message), trusted)), false);
+  assert.equal(pixels.isHostError(undefined), false);
+  f.doc.selection.bounds = null; await assert.rejects(f.capture(), code('NO_SELECTION'));
+});
+test('native lifecycle exceptions do not become trusted messages', async () => {
+  const f = fixture(); f.ps.action.addNotificationListener = () => { throw Object.assign(new Error('token=fixture-secret /Users/private/file'), { code: 9 }); };
+  await assert.rejects(f.capture(), error => { assert.equal(error.code, 'HOST_UNSUPPORTED'); assert.equal(error.message, '无法监听 Photoshop 文档生命周期'); assert.equal(error.details, undefined); return true; });
+});
+test('name and opacity changes work on Photoshop hosts that only apply one property per set', async () => {
+  const f = fixture(), capture = await f.capture(); f.singlePropertyPerSet = true;
+  const changed = await f.execute('studio_edit_layer', edit(capture, 'multi-property', { name: 'Updated', opacity: 60 }));
+  assert.equal(f.layer().name, 'Updated'); assert.equal(f.layer().opacity, 60);
+  assert.equal(f.suspensions.length, 1); assert.equal(f.resumes.length, 1); assert.equal(f.resumes[0].commit, true);
+  assert.equal(f.commands.filter(c => c._obj === 'set').length, 2);
+  await f.execute('studio_rollback', { receipt: changed.receipt });
+  assert.equal(f.layer().name, 'Original layer'); assert.equal(f.layer().opacity, 80); assert.equal(f.suspensions.length, 2);
+});
+test('property mismatch diagnostics include only field names and opacity numbers and still roll back', async () => {
+  for (const channel of ['development', 'production']) await withRuntime(channel, async () => {
+    const f = fixture(), capture = await f.capture(); f.ignoreOpacity = true; rewrapModalErrors(f);
+    await assert.rejects(f.execute('studio_edit_layer', edit(capture, 'mismatch', { name: 'private new name', opacity: 60 })), error => {
+      assert.equal(error.code, 'HOST_EXECUTION_FAILED'); assert.equal(error.message.includes('private'), false);
+      if (channel === 'development') {
+        assert.deepEqual(error.details.photoshopDiagnostic, { stage: 'property-verification', fields: ['opacity'], opacity: { expected: 60, actual: 80 } });
+        assert.ok(error.message.includes('opacity expected=60 actual=80'));
+      } else assert.equal(error.details, undefined);
+      return true;
+    });
+    assert.equal(f.layer().name, 'Original layer'); assert.equal(f.layer().opacity, 80); assert.equal(f.resumes.at(-1).commit, false);
+  });
+});

@@ -295,7 +295,8 @@ async function capture(predefinedSelection, opts) {
 function createProductionCapture(ps, codec, options) {
   options = options || {};
   var pixelTools = options.pixelTools || require("./ps-pixels-014.js");
-  function reject(code, message) { var error = new Error(message); error.code = code; throw error; }
+  var hostError = require("./ps-pixels-014.js").createHostError;
+  function reject(code, message) { throw hostError(code, message); }
   function value(v) { return typeof v === "number" ? v : Number(v && (v._value != null ? v._value : v.value != null ? v.value : v)); }
   function checkBounds(bounds, doc) {
     if (!bounds) reject("NO_SELECTION", "未检测到活动选区；请创建选区或明确使用整图模式");

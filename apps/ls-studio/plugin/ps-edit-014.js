@@ -4,7 +4,7 @@
 (function () {
   "use strict";
   var pixels = require("./ps-pixels-014.js");
-  function hostError(code, message, details) { var e = new Error(message); e.code = code; if (details) e.details = details; return e; }
+  var hostError = pixels.createHostError;
   function demand(condition, code, message) { if (!condition) throw hostError(code, message); }
   function copy(value) { return JSON.parse(JSON.stringify(value)); }
   function canonical(value) {
@@ -112,7 +112,7 @@
       if (options.observeLifecycle) return options.observeLifecycle(invalidate);
       demand(ps.action && typeof ps.action.addNotificationListener === "function", "HOST_UNSUPPORTED", "此 Photoshop 宿主缺少文档打开/关闭通知，无法安全绑定源文档");
       return ps.action.addNotificationListener(["open", "close"], invalidate);
-    }).then(function () { return null; }, function (error) { return hostError("HOST_UNSUPPORTED", error.message || "无法监听 Photoshop 文档生命周期"); });
+    }).then(function () { return null; }, function (error) { return pixels.isHostError(error) ? error : diagnose(hostError("HOST_UNSUPPORTED", "无法监听 Photoshop 文档生命周期"), "lifecycle", error); });
     function syncDocuments() {
       var open = Array.from(ps.app.documents || []);
       docs.forEach(function (_, id) { if (!open.some(function (d) { return d.id === id; })) docs.delete(id); });
@@ -156,11 +156,32 @@
       demand(Number.isFinite(props.opacity) && typeof props.visible === "boolean", "HOST_UNSUPPORTED", "无法可靠读取图层属性"); return props;
     }
     function sameProperties(a, b, tolerance) { return a.name === b.name && Math.abs(a.opacity - b.opacity) <= (tolerance || 0.000001) && a.visible === b.visible; }
+    function verifyProperties(actual, expected, tolerance, message) {
+      if (sameProperties(actual, expected, tolerance)) return;
+      var error = hostError("HOST_EXECUTION_FAILED", message);
+      if (development) {
+        var fields = [];
+        if (actual.name !== expected.name) fields.push("name");
+        if (Math.abs(actual.opacity - expected.opacity) > (tolerance || 0.000001)) fields.push("opacity");
+        if (actual.visible !== expected.visible) fields.push("visible");
+        // Layer names and other request text never enter this diagnostic.
+        var diagnostic = { stage: "property-verification", fields: fields };
+        var summary = "mismatch=" + fields.join(",");
+        if (fields.indexOf("opacity") >= 0) {
+          diagnostic.opacity = { expected: expected.opacity, actual: actual.opacity };
+          summary += "; opacity expected=" + expected.opacity + " actual=" + actual.opacity;
+        }
+        error.details = { photoshopDiagnostic: diagnostic };
+        error.message += " [dev: property-verification; " + summary + "]";
+      }
+      throw error;
+    }
     async function setProperties(doc, layerId, changes) {
-      var target = [{ _ref: "layer", _id: layerId }, { _ref: "document", _id: doc.id }], patch = { _obj: "layer" }, commands = [];
-      if (changes.name != null) patch.name = changes.name;
-      if (changes.opacity != null) patch.opacity = { _unit: "percentUnit", _value: changes.opacity };
-      if (Object.keys(patch).length > 1) commands.push({ _obj: "set", _target: target, to: patch, _options: { dialogOptions: "dontDisplay" } });
+      var target = [{ _ref: "layer", _id: layerId }, { _ref: "document", _id: doc.id }], commands = [];
+      // Photoshop's layer setter can accept a combined descriptor but only apply
+      // one property. Match the DOM's separate setters inside our one transaction.
+      if (changes.name != null) commands.push({ _obj: "set", _target: target, to: { _obj: "layer", name: changes.name }, _options: { dialogOptions: "dontDisplay" } });
+      if (changes.opacity != null) commands.push({ _obj: "set", _target: target, to: { _obj: "layer", opacity: { _unit: "percentUnit", _value: changes.opacity } }, _options: { dialogOptions: "dontDisplay" } });
       if (changes.visible != null) commands.push({ _obj: changes.visible ? "show" : "hide", null: target, _options: { dialogOptions: "dontDisplay" } });
       if (commands.length) await batchPlay(commands);
     }
@@ -217,12 +238,12 @@
             try { stage = "history-rollback"; await control.resumeHistory(suspension, false); }
             catch (recoveryError) { circuitError = diagnose(hostError("HOST_RECOVERY_REQUIRED", "Photoshop 无法确认本次事务已恢复；已停止后续自动写入，请检查文档", { mutationMayHaveApplied: true }), stage, recoveryError); throw circuitError; }
           } else { circuitError = diagnose(hostError("HOST_RECOVERY_REQUIRED", "Photoshop 已提交但无法确认回执；已停止后续自动写入，请检查文档", { mutationMayHaveApplied: true }), failedStage, error); throw circuitError; }
-          throw diagnose(error.code ? error : hostError("HOST_EXECUTION_FAILED", "Photoshop 执行失败，本次历史事务已恢复"), failedStage, error);
+          throw diagnose(pixels.isHostError(error) ? error : hostError("HOST_EXECUTION_FAILED", "Photoshop 执行失败，本次历史事务已恢复"), failedStage, error);
         }
       }, { commandName: label }); }
       catch (error) {
         if (result && !circuitError) circuitError = hostError("HOST_RECOVERY_REQUIRED", "Photoshop 模态退出失败但修改可能已经提交；已停止后续自动写入", { mutationMayHaveApplied: true });
-        throw diagnose(circuitError || (error.code ? error : hostError("HOST_EXECUTION_FAILED", "Photoshop 无法执行本次模态操作")), stage, error);
+        throw diagnose(circuitError || (pixels.isHostError(error) ? error : hostError("HOST_EXECUTION_FAILED", "Photoshop 无法执行本次模态操作")), stage, error);
       }
       return result;
     }
@@ -244,7 +265,7 @@
             var after = properties(find(doc, args.layerId));
             // Photoshop can quantize opacity to an 8-bit channel. Record the actual
             // returned value; rollback guards compare that value without tolerance.
-            demand(sameProperties(after, expected, 50 / 255 + 0.000001), "HOST_EXECUTION_FAILED", "Photoshop 图层属性未达到请求状态");
+            verifyProperties(after, expected, 50 / 255 + 0.000001, "Photoshop 图层属性未达到请求状态");
             return { createdLayerIds: [], modifiedLayers: [{ layerId: args.layerId, before: before, after: after }] };
           });
         } finally { if (prepared) { try { await placement.cleanup(prepared); } catch (_) { /* Temporary-file cleanup cannot turn a committed document write into a retry. */ } } }
@@ -267,14 +288,14 @@
         if (receipt.createdLayerIds.length) await batchPlay(receipt.createdLayerIds.map(function (id) { return { _obj: "delete", _target: [{ _ref: "layer", _id: id }, { _ref: "document", _id: doc.id }], _options: { dialogOptions: "dontDisplay" } }; }));
         for (var i = 0; i < receipt.modifiedLayers.length; i++) {
           var change = receipt.modifiedLayers[i]; await setProperties(doc, change.layerId, change.before);
-          demand(sameProperties(properties(find(doc, change.layerId)), change.before), "HOST_EXECUTION_FAILED", "原有图层属性未能恢复");
+          verifyProperties(properties(find(doc, change.layerId)), change.before, 0.000001, "原有图层属性未能恢复");
         }
         demand(receipt.createdLayerIds.every(function (id) { return !layers(doc).some(function (layer) { return layer.id === id; }); }), "HOST_EXECUTION_FAILED", "本次创建的图层未能撤销"); return {};
       }, "ROLLBACK_CONFLICT");
       entry.receipt = Object.assign({}, receipt, { rollbackStatus: "rolled-back", rolledBackAt: now(), rollbackHistoryStateId: details.postHistoryStateId });
       return { ok: true, receipt: copy(entry.receipt) };
     }
-    async function execute(tool, args, deadline) {
+    async function executeRequest(tool, args, deadline) {
       validate(tool, args); args = copy(args);
       var unsupported = await lifecycle; if (unsupported) throw unsupported;
       deadlineCheck(deadline);
@@ -289,6 +310,10 @@
           delete captured.maskPixels; result = Object.assign({ ok: true, documentRef: ref }, captured);
         }, { commandName: "LS Studio · 捕获生产上下文" }); return result;
       });
+    }
+    async function execute(tool, args, deadline) {
+      try { return await executeRequest(tool, args, deadline); }
+      catch (error) { throw diagnose(pixels.isHostError(error) ? error : hostError("HOST_EXECUTION_FAILED", "Photoshop 无法完成本次请求"), "request", error); }
     }
     return { execute: execute, runtimeId: runtimeId };
   }

@@ -2,7 +2,12 @@
 (function () {
   "use strict";
   var MAX_PIXELS = 8000000, MAX_BYTES = 32 * 1024 * 1024;
-  function fail(code, message) { var e = new Error(message); e.code = code; throw e; }
+  // Identity lives outside the Error object: native exceptions cannot become
+  // trusted domain errors by supplying a matching code/name/details property.
+  var hostErrors = new WeakSet();
+  function createHostError(code, message, details) { var e = new Error(message); e.code = code; if (details) e.details = details; hostErrors.add(e); return e; }
+  function isHostError(error) { return hostErrors.has(error); }
+  function fail(code, message) { throw createHostError(code, message); }
   function dimensions(width, height) {
     if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) fail("INVALID_INPUT", "图像尺寸无效");
     if (width * height > MAX_PIXELS) fail("IMAGE_TOO_LARGE", "当前生产路径最多支持 8,000,000 像素；请明确缩小处理选区，不会自动缩小原图");
@@ -96,5 +101,5 @@
     }
     return hash.map(function (v) { return (v >>> 0).toString(16).padStart(8, "0"); }).join("");
   }
-  module.exports = { encodePNG: encodePNG, inspectImage: inspectImage, dimensions: dimensions, sha256: sha256, MAX_PIXELS: MAX_PIXELS, MAX_BYTES: MAX_BYTES };
+  module.exports = { encodePNG: encodePNG, inspectImage: inspectImage, dimensions: dimensions, sha256: sha256, MAX_PIXELS: MAX_PIXELS, MAX_BYTES: MAX_BYTES, createHostError: createHostError, isHostError: isHostError };
 })();
