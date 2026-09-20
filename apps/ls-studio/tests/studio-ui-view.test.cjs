@@ -42,6 +42,13 @@ function fixture() {
   return { doc, win, calls, mounted, storage: values, ready: () => mounted.controller.refresh(), configure: () => { configured = true; }, setProvider: value => { providerOverride = value; }, draft };
 }
 const turn = () => new Promise(resolve => setImmediate(resolve));
+function selectOption(select, value) {
+  const option = select.children.find(item => item.value === value);
+  assert.ok(option, 'The user must have an option for ' + value);
+  assert.equal(select.disabled, false, 'The select must be enabled');
+  assert.equal(option.disabled, false, 'The chosen option must be enabled');
+  select.value = value; select.dispatchEvent(new Event('change'));
+}
 test('mounted workspace displays shared draft, protects missing-provider action and populates Agent with record identity', async () => {
   const f = fixture(); try {
     await f.ready(); await turn();
@@ -77,15 +84,21 @@ test('model-specific output choices, input budget and resetting saved overrides 
     nodes.studioModel.value = 'gemini-3-pro-image-preview'; nodes.studioModel.dispatchEvent(new Event('input'));
     assert.match(nodes.studioInputBudget.textContent, /2 \/ 14/);
     assert.deepEqual(nodes.studioImageSize.children.map(option => option.value), ['', '1K', '2K', '4K']);
-    nodes.studioImageSize.value = '2K'; nodes.studioImageSize.dispatchEvent(new Event('change'));
+    selectOption(nodes.studioRatio, '1:1'); selectOption(nodes.studioImageSize, '2K');
+    await f.mounted.controller.save();
+    selectOption(nodes.studioRatio, ''); selectOption(nodes.studioImageSize, '');
+    await f.mounted.controller.save();
+    assert.equal(f.draft.params.aspectRatio, undefined); assert.equal(f.draft.params.imageSize, undefined);
+    assert.deepEqual(f.calls.filter(call => call.operation === 'updateDraft').at(-1).args.unsetParams.sort(), ['aspectRatio', 'imageSize']);
+    selectOption(nodes.studioRatio, '1:1'); selectOption(nodes.studioImageSize, '2K');
     await f.mounted.controller.save();
     nodes.studioModel.value = ''; nodes.studioModel.dispatchEvent(new Event('input'));
     assert.equal(f.win.PXD_UI.isDisabled(nodes.studioRun), true); assert.match(nodes.studioInputIssue.textContent, /不支持.*尺寸/);
-    nodes.studioImageSize.value = ''; nodes.studioImageSize.dispatchEvent(new Event('change'));
+    selectOption(nodes.studioImageSize, ''); selectOption(nodes.studioRatio, '');
     assert.equal(f.win.PXD_UI.isDisabled(nodes.studioRun), false);
     await f.mounted.controller.save(); await f.ready();
-    assert.equal(f.draft.params.model, undefined); assert.equal(f.draft.params.imageSize, undefined);
-    assert.deepEqual(f.calls.filter(call => call.operation === 'updateDraft')[1].args.unsetParams.sort(), ['imageSize', 'model']);
+    assert.equal(f.draft.params.model, undefined); assert.equal(f.draft.params.imageSize, undefined); assert.equal(f.draft.params.aspectRatio, undefined);
+    assert.deepEqual(f.calls.filter(call => call.operation === 'updateDraft').at(-1).args.unsetParams.sort(), ['aspectRatio', 'imageSize', 'model']);
     nodes.studioTemperature.value = '3'; nodes.studioTemperature.dispatchEvent(new Event('input')); assert.equal(f.win.PXD_UI.isDisabled(nodes.studioRun), true);
     nodes.studioTemperature.value = ''; nodes.studioTemperature.dispatchEvent(new Event('input')); assert.equal(f.win.PXD_UI.isDisabled(nodes.studioRun), false);
     assert.equal(f.calls.some(call => call.operation === 'run'), false);

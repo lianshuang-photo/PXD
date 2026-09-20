@@ -454,7 +454,7 @@
     function list(name, signature, build) { var text = JSON.stringify(signature); if (renderedLists[name] === text) return; renderedLists[name] = text; clear(nodes[name]); build(nodes[name]); }
     function choices(select, values, selected) {
       var available = values || [], signature = JSON.stringify([available, selected]); if (select._signature === signature) return; select._signature = signature; clear(select);
-      var empty = node("option", "", "模型默认", select); empty.value = ""; empty.disabled = !!selected;
+      var empty = node("option", "", "模型默认", select); empty.value = "";
       available.forEach(function (value) { var option = node("option", "", value === "auto" ? "跟随源图" : value, select); option.value = value; });
       if (selected && available.indexOf(selected) < 0) { var old = node("option", "", selected + "（待服务校验）", select); old.value = selected; }
       setValue(select, selected || "");
