@@ -39,7 +39,7 @@ async function setup(t, options = {}) {
     if (name === 'studio_rollback') return { ok: true, receipt: { ...args.receipt, rollbackStatus: 'rolled-back' } };
     return { ok: true, receipt: { mutationId: args.mutationId, jobId: args.jobId, documentRef: args.documentRef, createdLayerIds: [2], modifiedLayers: [], preHistoryStateId: 4, postHistoryStateId: 5, rollbackStatus: 'available' } };
   } };
-  const provider = { describe: () => ({ id: 'fixture', configured: true }), generate: async (input, execution) => {
+  const provider = { describe: options.describe || (() => ({ id: 'fixture', configured: true })), generate: async (input, execution) => {
     calls.push({ name: 'generate', input });
     if (options.generate) return options.generate(input, execution);
     return { images: [{ data: png, mimeType: 'image/png' }], provider: { id: 'fixture', model: 'fixture-image' } };
@@ -112,6 +112,38 @@ test('cancelled provider with late output retains its result without auto placem
   const result = await f.service.getJob(job.jobId);
   assert.equal(result.status, 'cancelled'); assert.equal(result.results.length, 1);
   assert.equal(f.calls.filter(call => call.name === 'studio_apply_result').length, 0);
+});
+test('cancelled service output preserves its actual model in both revision modes without another execution', async t => {
+  for (const actualModel of ['gemini-2.5-flash-image', undefined]) {
+    let resolveResult, enteredResolve, executionSignal;
+    const entered = new Promise(resolve => { enteredResolve = resolve; }), described = [];
+    const f = await setup(t, {
+      describe: ({ model } = {}) => { described.push(model); return { id: 'fixture', configured: true, model: model || 'gemini-3-pro-image-preview', limits: { inputImages: model === 'gemini-2.5-flash-image' ? 3 : 14, inputBytes: 14 * 1024 * 1024 } }; },
+      generate: (_input, { signal }) => { executionSignal = signal; enteredResolve(); return new Promise(resolve => { resolveResult = resolve; }); },
+    });
+    const capture = clone(f.capture); capture.settings.autoApply = true;
+    const { job } = await f.makeJob({ context: capture }); await entered;
+    await f.service.cancel(job.jobId); assert.equal(executionSignal.aborted, true);
+    resolveResult({ images: [{ data: png, mimeType: 'image/png' }], provider: { id: 'fixture', ...(actualModel ? { model: actualModel } : {}) } });
+    await f.service.waitForIdle();
+    const saved = await f.service.getJob(job.jobId), result = saved.results[0];
+    assert.equal(saved.status, 'cancelled'); assert.equal(saved.provider, undefined); assert.equal(saved.snapshot.params.model, undefined);
+    assert.equal(result.provider.model, actualModel); assert.equal((await f.assets.read(result.assetId)).asset.source.provider.model, actualModel);
+    const original = await f.service.deriveDraft({ jobId: job.jobId, mode: 'original' });
+    assert.equal(original.params.model, actualModel); assert.deepEqual(original.context, saved.snapshot.context);
+    if (actualModel) {
+      const revision = await f.service.deriveDraft({ jobId: job.jobId, mode: 'candidate-reference', resultId: result.resultId });
+      assert.equal(revision.params.model, actualModel);
+      assert.deepEqual(revision.context, { ...saved.snapshot.context, refs: [{ assetId: result.assetId, role: 'reference' }] });
+      assert.deepEqual(described, [actualModel]);
+    } else {
+      const count = f.jobs.listDrafts().length;
+      await assert.rejects(f.service.deriveDraft({ jobId: job.jobId, mode: 'candidate-reference', resultId: result.resultId }), { code: 'REFERENCE_LIMIT_UNKNOWN' });
+      assert.equal(f.jobs.listDrafts().length, count); assert.deepEqual(described, []);
+    }
+    assert.deepEqual(await f.service.getJob(job.jobId), saved); assert.equal(f.jobs.listJobs().length, 1);
+    assert.equal(f.calls.filter(call => call.name === 'generate').length, 1); assert.equal(f.calls.filter(call => call.name === 'studio_apply_result').length, 0);
+  }
 });
 test('discovery publishes actual Photoshop placement limits without mutable shared arrays', async t => {
   const f = await setup(t), discovery = await f.service.discover();

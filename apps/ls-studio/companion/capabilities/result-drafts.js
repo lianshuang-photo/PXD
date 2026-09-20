@@ -3,11 +3,20 @@
 const { invariant, clone, id, capability, validateRunSnapshot } = require('../domain/contracts');
 
 function modelName(value) { return typeof value === 'string' ? value.trim().replace(/^models\//, '') : ''; }
-function inheritModel(snapshot, job) {
-  const recorded = job.provider && job.provider.model;
-  if (recorded === undefined) return;
-  const model = modelName(recorded);
+function providerModel(provider) {
+  if (!provider || provider.model === undefined) return undefined;
+  const model = modelName(provider.model);
   invariant(/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(model), 'MODEL_CONTEXT_CONFLICT', 'The historical provider model record is invalid; inspect this job before creating a revision', 409);
+  return model;
+}
+function agreedModel(models) {
+  const recorded = models.filter(model => model !== undefined);
+  invariant(recorded.every(model => model === recorded[0]), 'MODEL_CONTEXT_CONFLICT', 'The historical provider model records conflict; inspect this job or select a candidate with a verifiable model', 409);
+  return recorded[0];
+}
+function inheritModel(snapshot, job, resultModel) {
+  const model = agreedModel([providerModel(job.provider), resultModel]);
+  if (model === undefined) return;
   invariant(snapshot.params.model === undefined || modelName(snapshot.params.model) === model, 'MODEL_CONTEXT_CONFLICT', 'The historical requested model conflicts with its recorded provider model; inspect this job before creating a revision', 409);
   if (snapshot.params.model === undefined) snapshot.params.model = model;
 }
@@ -15,6 +24,22 @@ function inheritModel(snapshot, job) {
 // A result is a visual reference, never a replacement for a PS capture. Keeping
 // the original context preserves its document/mask provenance for later runs.
 function createResultDrafts({ assets, jobs, provider, inputsFor }) {
+  async function readResult(job, result) {
+    invariant(result && result.jobId === job.jobId, 'RESULT_NOT_FOUND', 'The selected candidate does not belong to this job', 404);
+    const candidate = await assets.read(result.assetId);
+    invariant(candidate.asset.purpose === 'result' && candidate.asset.source && candidate.asset.source.jobId === job.jobId, 'ASSET_CONTEXT_CONFLICT', 'The candidate asset does not belong to this job', 409);
+    const model = agreedModel([providerModel(result.provider), providerModel(candidate.asset.source.provider)]);
+    return { candidate, model };
+  }
+  async function originalModel(job) {
+    const models = [];
+    // Infer only from complete, agreeing result provenance, never array order or
+    // the current service default. Reading one asset at a time bounds memory.
+    for (const result of job.results) models.push((await readResult(job, result)).model);
+    const model = agreedModel(models);
+    invariant(model === undefined || models.every(value => value !== undefined), 'MODEL_CONTEXT_CONFLICT', 'Some historical results have no recorded model; select a candidate with a verifiable model before creating a revision', 409);
+    return model;
+  }
   return async function deriveDraft(input) {
     id(input.jobId, 'jobId');
     invariant(['original', 'candidate-reference'].includes(input.mode), 'INVALID_INPUT', 'Choose original inputs or a candidate reference');
@@ -30,9 +55,8 @@ function createResultDrafts({ assets, jobs, provider, inputsFor }) {
     if (input.mode === 'candidate-reference') {
       id(input.resultId, 'resultId');
       const result = job.results.find(item => item.resultId === input.resultId);
-      invariant(result && result.jobId === job.jobId, 'RESULT_NOT_FOUND', 'The selected candidate does not belong to this job', 404);
-      const candidate = await assets.read(result.assetId);
-      invariant(candidate.asset.purpose === 'result' && candidate.asset.source && candidate.asset.source.jobId === job.jobId, 'ASSET_CONTEXT_CONFLICT', 'The candidate asset does not belong to this job', 409);
+      const { candidate, model: resultModel } = await readResult(job, result);
+      inheritModel(snapshot, job, resultModel);
       const refs = snapshot.context.refs || [];
       if (!refs.some(ref => ref.assetId === result.assetId && ref.role === 'reference')) {
         const model = modelName(snapshot.params.model);
@@ -44,7 +68,7 @@ function createResultDrafts({ assets, jobs, provider, inputsFor }) {
         invariant(bytes <= limits.inputBytes, 'REFERENCE_LIMIT', 'The candidate would exceed the model image byte budget. Create a draft from original inputs and review its references');
         snapshot.context.refs = refs.concat([{ assetId: result.assetId, role: 'reference' }]);
       }
-    }
+    } else if (snapshot.params.model === undefined) inheritModel(snapshot, job, await originalModel(job));
     // Preserve the compiled prompt and recipe sourceHash/values; do not recompile
     // against a possibly changed recipe catalog or start any execution here.
     return jobs.createDraft({ capabilityId: snapshot.capabilityId, params: snapshot.params, context: snapshot.context, source: input.source || 'ui' });
