@@ -1,0 +1,743 @@
+/* Shared Chromium / Photoshop UXP stylesheet.
+ * Use named installed fonts, explicit font longhands, and margins for spacing.
+ * The Anton wordmark is outlined SVG, so no host font loading is required.
+ */
+:root {
+  --bg: #0F0E15;
+  --surf: #16151E;
+  --text: #E8E6EF;
+  --muted: #8a8796;
+  --red: #F43D3F;
+  --line: rgba(232,230,239,.12);
+  --ok: #9ec27c;
+  --paper: #E8E6EF;
+  --r: 0;
+  --sans: Arial, "PingFang SC", "Microsoft YaHei";
+  --mono: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei";
+  --disabled-bg: #5F1E24;
+  --disabled-text: #636267;
+  --scroll-thumb: #494651;
+}
+
+/* Codex conversation. Keep explicit UXP-compatible sizing and spacing. */
+.agent-toolbar { display: flex; align-items: center; justify-content: space-between; flex: none; min-height: var(--s32, 32px); padding: var(--s4, 4px) var(--s12, 12px); border-bottom: var(--s1, 1px) solid var(--line); }
+.agent-connection { display: flex; align-items: center; flex: 1; min-width: 0; }
+.agent-status-dot { display: block; flex: none; width: var(--s5, 5px); height: var(--s5, 5px); background: var(--muted); margin-right: var(--s6, 6px); }
+.agent-status-dot.on { background: var(--ok); }
+#agentStatus { font-family: Menlo, Consolas, "PingFang SC"; font-size: var(--s9, 9px); line-height: var(--s12, 12px); color: var(--muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.agent-toolbar-actions { display: flex; flex: none; margin-left: var(--s6, 6px); }
+.agent-toolbar-actions .ui-button { height: var(--s22, 22px); padding: 0 var(--s6, 6px); font-size: var(--s10, 10px); }
+.agent-toolbar-actions > * + * { margin-left: var(--s4, 4px); }
+.agent-welcome { margin: var(--s24, 24px) 0 var(--s14, 14px); }
+.agent-eyebrow { color: var(--red); font-family: Menlo, Consolas, "PingFang SC"; font-size: var(--s9, 9px); line-height: var(--s14, 14px); letter-spacing: .12em; }
+.agent-welcome-title { margin-top: var(--s9, 9px); font-family: Arial, "PingFang SC"; font-size: var(--s23, 23px); font-weight: 600; line-height: var(--s32, 32px); color: var(--text); }
+.agent-welcome-note { margin-top: var(--s6, 6px); font-size: var(--s11, 11px); line-height: var(--s18, 18px); color: var(--muted); }
+#emptyChips .human-chip { height: auto; min-height: var(--s27, 27px); padding: var(--s6, 6px) var(--s8, 8px); justify-content: flex-start; text-align: left; font-size: var(--s10, 10px); line-height: var(--s14, 14px); border: var(--s1, 1px) solid var(--line); }
+#agentMessages { flex: none; min-width: 0; width: 100%; }
+.agent-item { flex: none; min-width: 0; margin: 0 0 var(--s17, 17px); color: var(--text); }
+.agent-item-head { display: flex; align-items: center; justify-content: space-between; min-height: var(--s18, 18px); margin-bottom: var(--s5, 5px); }
+.agent-item-label { font-family: Menlo, Consolas, "PingFang SC"; font-size: var(--s9, 9px); line-height: var(--s13, 13px); color: var(--muted); letter-spacing: .05em; }
+.agent-item-body { font-family: Arial, "PingFang SC", "Microsoft YaHei"; font-size: var(--s12, 12px); line-height: var(--s19, 19px); min-width: 0; overflow-wrap: anywhere; word-break: break-word; user-select: text; }
+.agent-user { padding: var(--s8, 8px) var(--s10, 10px); background: var(--surf); border-left: var(--s2, 2px) solid var(--red); margin-top: var(--s5, 5px); }
+.agent-user .agent-item-body { white-space: pre-wrap; }
+.agent-user .agent-item-label { color: var(--red); }
+.agent-assistant .agent-item-body { min-height: 0; }
+.agent-activity { margin-bottom: var(--s8, 8px); }
+.agent-activity .agent-item-head { margin-bottom: 0; }
+.agent-tool, .agent-plan { border: var(--s1, 1px) solid var(--line); padding: var(--s6, 6px) var(--s8, 8px); margin-bottom: var(--s9, 9px); }
+.agent-tool .agent-item-body { font-family: Menlo, Consolas, "PingFang SC"; font-size: var(--s10, 10px); line-height: var(--s15, 15px); white-space: pre-wrap; max-height: var(--s220, 220px); overflow: auto; }
+.agent-tool[data-status="failed"] { border-color: var(--red); }
+.agent-item-head .agent-copy, .agent-item-head .agent-tool-toggle, .md-code-label .agent-copy { background: transparent; color: var(--muted); font-size: var(--s9, 9px); height: var(--s18, 18px); padding: 0 var(--s3, 3px); border: 0; }
+.agent-progress { color: var(--muted); font-family: Menlo, Consolas, "PingFang SC"; font-size: var(--s10, 10px); line-height: var(--s16, 16px); padding: var(--s3, 3px) 0 var(--s8, 8px); }
+.agent-error { color: var(--red); border-left: var(--s2, 2px) solid var(--red); padding: var(--s6, 6px) var(--s8, 8px); background: var(--surf); font-size: var(--s11, 11px); line-height: var(--s17, 17px); white-space: pre-wrap; word-break: break-word; }
+.agent-composer-actions { display: flex; align-items: center; margin-top: var(--s7, 7px); flex-wrap: wrap; }
+.agent-composer-actions .ui-button { height: var(--s23, 23px); padding: 0 var(--s6, 6px); font-size: var(--s9, 9px); border: var(--s1, 1px) solid var(--line); margin-right: var(--s5, 5px); }
+.agent-key-hint { margin-left: auto; color: var(--muted); font-size: var(--s9, 9px); line-height: var(--s14, 14px); }
+#app.compact .agent-key-hint { display: none; }
+#pane-agent .ctx { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-bottom: var(--s6, 6px); letter-spacing: 0; }
+.agent-attachments, .agent-message-images { display: flex; flex-wrap: wrap; margin-bottom: var(--s7, 7px); }
+.agent-message-images { margin-top: var(--s8, 8px); margin-bottom: 0; }
+.agent-attachment { position: relative; width: var(--s48, 48px); height: var(--s48, 48px); margin-right: var(--s6, 6px); }
+.agent-attachment-image { display: block; width: var(--s48, 48px); height: var(--s48, 48px); object-fit: contain; background: var(--surf); border: var(--s1, 1px) solid var(--line); }
+.agent-message-image { display: block; width: var(--s96, 96px); height: var(--s96, 96px); object-fit: contain; margin-right: var(--s6, 6px); margin-bottom: var(--s4, 4px); }
+.agent-attachment .agent-attachment-remove { position: absolute; right: 0; top: 0; width: var(--s16, 16px); height: var(--s16, 16px); padding: 0; background: var(--surf); color: var(--red); font-size: var(--s11, 11px); }
+.agent-history-list, .agent-model-list { flex: none; max-height: var(--s180, 180px); overflow: auto; background: var(--surf); border-bottom: var(--s1, 1px) solid var(--line); padding: var(--s4, 4px) var(--s8, 8px); }
+.agent-history-list .agent-history-option, .agent-model-list .agent-model-option { height: auto; min-height: var(--s28, 28px); width: 100%; padding: var(--s6, 6px) var(--s4, 4px); justify-content: flex-start; text-align: left; font-size: var(--s10, 10px); line-height: var(--s16, 16px); color: var(--text); border-bottom: var(--s1, 1px) solid var(--line); }
+.agent-model-option.is-on { color: var(--red); }
+.agent-effort-row { display: flex; align-items: flex-start; margin-top: var(--s8, 8px); font-size: var(--s11, 11px); line-height: var(--s22, 22px); }
+.agent-effort-row > span { flex: none; margin-right: var(--s8, 8px); }
+.agent-efforts { display: flex; flex-wrap: wrap; }
+.agent-efforts .agent-effort { color: var(--muted); font-size: var(--s10, 10px); height: var(--s23, 23px); padding: 0 var(--s6, 6px); border: var(--s1, 1px) solid var(--line); margin-right: var(--s4, 4px); margin-bottom: var(--s4, 4px); }
+.agent-efforts .is-on { border-color: var(--red); color: var(--text); }
+.agent-setting-note { color: var(--muted); margin-top: var(--s7, 7px); font-size: var(--s10, 10px); line-height: var(--s16, 16px); }
+.agent-request { border: var(--s1, 1px) solid var(--red); padding: var(--s9, 9px); margin-bottom: var(--s10, 10px); background: var(--surf); }
+.agent-request-title { color: var(--red); font-size: var(--s11, 11px); line-height: var(--s16, 16px); margin-bottom: var(--s7, 7px); }
+.agent-request-reason, .agent-request-question { font-size: var(--s12, 12px); line-height: var(--s18, 18px); margin: var(--s7, 7px) 0; color: var(--text); }
+.agent-request-detail { font-family: Menlo, Consolas, "PingFang SC"; font-size: var(--s10, 10px); line-height: var(--s15, 15px); white-space: pre-wrap; max-height: var(--s120, 120px); overflow: auto; margin: var(--s7, 7px) 0; color: var(--muted); }
+.agent-request-actions { display: flex; }
+.agent-request-actions > * + * { margin-left: var(--s6, 6px); }
+.agent-answer { display: block; width: 100%; height: var(--s55, 55px); padding: var(--s6, 6px); background: var(--bg); color: var(--text); border: var(--s1, 1px) solid var(--line); font-family: Arial, "PingFang SC"; font-size: var(--s12, 12px); line-height: var(--s17, 17px); margin: var(--s7, 7px) 0; }
+.agent-request .agent-answer-option { font-size: var(--s10, 10px); height: auto; min-height: var(--s25, 25px); justify-content: flex-start; text-align: left; color: var(--text); border: var(--s1, 1px) solid var(--line); margin: var(--s4, 4px) 0; }
+.md-block { min-width: 0; margin: 0 0 var(--s8, 8px); }
+.md-paragraph, .md-quote { white-space: pre-wrap; }
+.md-block:last-child { margin-bottom: 0; }
+.md-heading { font-weight: 600; line-height: var(--s22, 22px); margin: var(--s12, 12px) 0 var(--s6, 6px); }
+.md-h1 { font-size: var(--s18, 18px); line-height: var(--s26, 26px); }
+.md-h2 { font-size: var(--s15, 15px); line-height: var(--s23, 23px); }
+.md-h3 { font-size: var(--s13, 13px); line-height: var(--s21, 21px); }
+.md-strong { font-weight: 600; }
+.md-em { font-style: italic; }
+.md-strike { text-decoration: line-through; }
+.md-link { color: var(--red); text-decoration: underline; cursor: pointer; }
+.md-code { font-family: Menlo, Consolas, "PingFang SC"; font-size: var(--s11, 11px); background: var(--surf); color: var(--text); }
+.md-codeblock { background: var(--surf); border: var(--s1, 1px) solid var(--line); }
+.md-code-label { display: flex; align-items: center; justify-content: space-between; min-height: var(--s24, 24px); padding: var(--s3, 3px) var(--s8, 8px); font-family: Menlo, Consolas, "PingFang SC"; font-size: var(--s9, 9px); line-height: var(--s13, 13px); color: var(--muted); border-bottom: var(--s1, 1px) solid var(--line); }
+.md-code-content { display: block; padding: var(--s8, 8px); margin: 0; font-family: Menlo, Consolas, "PingFang SC"; font-size: var(--s10, 10px); line-height: var(--s16, 16px); white-space: pre; max-height: var(--s300, 300px); overflow: auto; user-select: text; }
+.md-list { display: flex; align-items: flex-start; margin-bottom: var(--s5, 5px); }
+.md-list-marker { flex: none; min-width: var(--s16, 16px); margin-right: var(--s4, 4px); color: var(--muted); }
+.md-list-body { flex: 1; min-width: 0; white-space: pre-wrap; }
+.md-quote { border-left: var(--s2, 2px) solid var(--line); padding-left: var(--s9, 9px); color: var(--muted); }
+.md-rule { height: var(--s1, 1px); background: var(--line); margin: var(--s12, 12px) 0; }
+.md-table { overflow: auto; border: var(--s1, 1px) solid var(--line); }
+.md-table-body { display: flex; flex-direction: column; }
+.md-table-row { display: flex; flex: none; border-bottom: var(--s1, 1px) solid var(--line); }
+.md-table-row:last-child { border-bottom: 0; }
+.md-cell { flex: 1; min-width: var(--s80, 80px); padding: var(--s6, 6px) var(--s7, 7px); font-size: var(--s11, 11px); line-height: var(--s17, 17px); border-right: var(--s1, 1px) solid var(--line); word-break: break-word; }
+.md-cell:last-child { border-right: 0; }
+.md-table-head { background: var(--surf); font-weight: 600; }
+#pane-agent .th > .log { flex: none; min-height: 0; max-height: var(--s160, 160px); }
+html[data-theme="light"],
+.theme-light {
+  --bg: #FAF6EE;
+  --surf: #f3ede2;
+  --text: #14131B;
+  --muted: #5d5b66;
+  --red: #F43D3F;
+  --line: rgba(22,20,28,.12);
+  --ok: #4a7a32;
+  --paper: #14131B;
+  --disabled-bg: #F8B5B1;
+  --disabled-text: #FCF9F4;
+  --scroll-thumb: #BFB8AC;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; border-radius: 0; }
+html, body { height: 100%; font-family: Arial, "PingFang SC", "Microsoft YaHei"; font-size: var(--s10, 10px); font-weight: 400; line-height: var(--s12, 12px); }
+/* Keep the document surface opaque; Photoshop's floating-panel grip is host-owned. */
+html { background: var(--bg); overflow: hidden; }
+body {
+  min-width: 230px;
+  max-width: none;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Arial, "PingFang SC", "Microsoft YaHei";
+  overflow: hidden;
+}
+#app {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.chrome {
+  flex: none;
+  padding: var(--s8, 8px) var(--s12, 12px) 0;
+  border-bottom: var(--s1, 1px) solid var(--line);
+}
+.brand-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.brand { width: var(--s133, 133px); height: var(--s22, 22px); flex: none; }
+.brand img { display: block; width: var(--s133, 133px); height: var(--s22, 22px); }
+.brand .brand-light { display: none; }
+.theme-light .brand-dark { display: none; }
+.theme-light .brand-light { display: block; }
+.sub {
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s9, 9px); font-weight: 400; line-height: var(--s12, 12px);
+  letter-spacing: .08em;
+  color: var(--muted);
+  margin-top: var(--s2, 2px);
+}
+.comp {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  color: var(--muted);
+  letter-spacing: .08em;
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s10, 10px); font-weight: 400; line-height: var(--s12, 12px);
+}
+.dot {
+  width: var(--s8, 8px);
+  height: var(--s8, 8px);
+  background: var(--muted);
+  flex: none;
+  display: inline-block;
+  border-radius: 0;
+  cursor: pointer;
+}
+.dot.on { background: var(--ok); }
+.dot.off { background: var(--muted); }
+
+.modes {
+  display: flex;
+  margin-top: var(--s8, 8px);
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s10, 10px); font-weight: 400; line-height: var(--s12, 12px);
+  letter-spacing: .16em;
+}
+.tab {
+  padding-bottom: var(--s6, 6px);
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 400;
+  background: none;
+  border: 0;
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei";
+  letter-spacing: .16em;
+  font-size: var(--s10, 10px);
+}
+.tab.is-on { color: var(--text); }
+.tab { position: relative; height: var(--s20, 20px); line-height: var(--s12, 12px); flex: none; }
+.tab-line { display: none; position: absolute; left: 0; bottom: 0; width: 100%; height: var(--s2, 2px); background: var(--red); }
+.tab.is-on .tab-line { display: block; }
+.tab:focus { color: var(--red); }
+
+.pane, .view {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+.pane.is-on { display: flex; }
+
+.th {
+  flex: 1;
+  overflow: auto;
+  padding: var(--s10, 10px) var(--s12, 12px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.meta {
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s9, 9px); font-weight: 400; line-height: var(--s12, 12px);
+  letter-spacing: .1em;
+  color: var(--muted);
+  margin: var(--s10, 10px) 0 var(--s4, 4px);
+}
+.box {
+  border: var(--s1, 1px) solid var(--line);
+  background: var(--surf);
+  padding: var(--s8, 8px);
+  font-size: var(--s12, 12px);
+  line-height: 1.45;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+}
+.chip, .human-chip {
+  border: var(--s1, 1px) solid var(--line);
+  padding: var(--s4, 4px) var(--s6, 6px);
+  font-size: var(--s10, 10px);
+  cursor: pointer;
+  background: var(--surf);
+  color: var(--text);
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei";
+}
+.chip.is-on, .sel3 span.on {
+  border-color: var(--red);
+}
+.ctx {
+  padding: var(--s6, 6px) var(--s12, 12px) 0;
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s9, 9px); font-weight: 400; line-height: var(--s12, 12px);
+  letter-spacing: .12em;
+  color: var(--muted);
+  flex: none;
+}
+.composer {
+  border-top: var(--s1, 1px) solid var(--line);
+  padding: var(--s8, 8px) var(--s12, 12px) var(--s12, 12px);
+  flex: none;
+}
+#proComposer {
+  flex: none;
+  border-top: var(--s1, 1px) solid var(--line);
+  padding: var(--s8, 8px) var(--s12, 12px) var(--s10, 10px);
+  background: var(--bg);
+}
+.sel3 {
+  display: flex;
+  margin-top: var(--s6, 6px);
+  flex-wrap: wrap;
+}
+.sel3 span {
+  border: var(--s1, 1px) solid var(--line);
+  padding: var(--s2, 2px) var(--s6, 6px);
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s9, 9px); font-weight: 400; line-height: var(--s12, 12px);
+  cursor: pointer;
+}
+.sel3 span.on, .sel3 .chip.is-on { border-color: var(--red); }
+.row2 { display: flex; min-width: 0; }
+textarea.msg, input.msg, #prompt {
+  flex: 1;
+  min-width: 0;
+  height: var(--s56, 56px);
+  resize: none;
+  background: transparent;
+  border: var(--s1, 1px) solid var(--line);
+  color: var(--text);
+  padding: var(--s6, 6px);
+  font-family: Arial, "PingFang SC", "Microsoft YaHei"; font-size: var(--s12, 12px); font-weight: 400; line-height: var(--s14, 14px);
+}
+#prompt { height: var(--s56, 56px); }
+.red, .primary {
+  background: var(--red);
+  color: #fff;
+  border: 0;
+  height: var(--s26, 26px);
+  padding: 0 var(--s10, 10px);
+  cursor: pointer;
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s10, 10px); font-weight: 400; line-height: var(--s12, 12px);
+}
+#go { width: var(--s28, 28px); height: var(--s56, 56px); }
+#applyBtn { height: var(--s56, 56px); min-width: var(--s88, 88px); }
+/* Paint disabled colors explicitly: UXP native controls can ignore opacity. */
+.primary[disabled] { background: var(--disabled-bg); color: var(--disabled-text); cursor: not-allowed; }
+.ghost {
+  background: none;
+  border: var(--s1, 1px) solid var(--line);
+  color: var(--muted);
+  cursor: pointer;
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s9, 9px); font-weight: 400; line-height: var(--s12, 12px);
+  padding: var(--s5, 5px) var(--s8, 8px);
+}
+.offline {
+  font-size: var(--s12, 12px);
+  color: var(--muted);
+  margin-top: var(--s6, 6px);
+}
+.log {
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s10, 10px); font-weight: 400; line-height: var(--s12, 12px);
+  color: var(--muted);
+  flex: 1;
+  min-height: var(--s80, 80px);
+  overflow: auto;
+}
+.log .line { margin-bottom: var(--s6, 6px); }
+.log .line.ok { color: var(--ok); }
+.log .line.err { color: var(--red); }
+.log em { color: var(--ok); font-style: normal; }
+.card, .result-card {
+  border: var(--s1, 1px) solid var(--line);
+  background: var(--surf);
+  padding: var(--s8, 8px);
+  font-size: var(--s12, 12px);
+}
+.result-card .warn { color: var(--red); }
+.result-card .ui-button {
+  margin-top: var(--s6, 6px);
+  background: none;
+  color: var(--muted);
+  border: 0;
+  cursor: pointer;
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s9, 9px); font-weight: 400; line-height: var(--s12, 12px);
+}
+
+#pane-pro { overflow: hidden; }
+#proRow {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#proBody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+#proL, #proR { display: flex; flex-direction: column; min-width: 0; }
+#app:not(.wide) #proHist { position: static; }
+#app.wide #proBody { flex-direction: row; overflow: hidden; }
+#app.wide #proL { order: -1; flex: 1 1 50%; min-height: 0; overflow: hidden; border-right: var(--s1, 1px) solid var(--line); }
+#app.wide #proR { flex: 1 1 50%; min-height: 0; overflow: auto; }
+#app.wide #zLib { flex: 1; min-height: 0; overflow: auto; border-bottom: 0; }
+#app.wide #proHist { flex: none; border-top: var(--s1, 1px) solid var(--line); }
+
+.sec { border-bottom: var(--s1, 1px) solid var(--line); padding: var(--s8, 8px) var(--s10, 10px); }
+.sec h3, #recordsDrawerPro h3 {
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s9, 9px); font-weight: 400; line-height: var(--s12, 12px);
+  letter-spacing: .14em;
+  color: var(--muted);
+  margin-bottom: var(--s6, 6px);
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.sec h3 .tiny, #recordsDrawerPro h3 .tiny {
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s9, 9px); font-weight: 400; line-height: var(--s12, 12px);
+  letter-spacing: .06em;
+  color: var(--muted);
+  cursor: pointer;
+}
+input[type=search], #compile, input[type=text], select, textarea#proTa {
+  width: 100%;
+  background: transparent;
+  border: var(--s1, 1px) solid var(--line);
+  color: var(--text);
+  padding: var(--s5, 5px) var(--s6, 6px);
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s11, 11px); font-weight: 400; line-height: var(--s14, 14px);
+  border-radius: 0;
+}
+#compile {
+  height: var(--s72, 72px);
+  resize: vertical;
+  background: var(--surf);
+  display: block;
+}
+#app.show-json #compile { height: var(--s120, 120px); }
+.param span { flex: none; min-width: 4.5em; color: var(--muted); }
+.ctx-line, #ctxLine { font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s10, 10px); font-weight: 400; line-height: var(--s12, 12px); color: var(--muted); margin-top: var(--s6, 6px); }
+#params:empty { display: none; }
+.list { margin-top: var(--s4, 4px); }
+.list div, .recipe-row {
+  padding: var(--s5, 5px) var(--s2, 2px);
+  border: 0;
+  border-bottom: var(--s1, 1px) solid var(--line);
+  font-size: var(--s11, 11px);
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--text);
+  font-family: Arial, "PingFang SC", "Microsoft YaHei";
+}
+.list div:hover, .recipe-row:hover { background: var(--surf); }
+.list em, .recipe-row em {
+  font-style: normal;
+  color: var(--muted);
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s9, 9px); font-weight: 400; line-height: var(--s12, 12px);
+}
+.recipe-row.is-on { color: var(--red); }
+.param { display: flex; align-items: center; margin: var(--s5, 5px) 0; font-size: var(--s11, 11px); }
+.param input[type=range] { flex: 1; accent-color: var(--red); }
+.param b { font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s10, 10px); font-weight: 400; line-height: var(--s12, 12px); min-width: var(--s28, 28px); text-align: right; }
+.refs { display: flex; }
+.refs i {
+  width: var(--s46, 46px); height: var(--s46, 46px);
+  border: var(--s1, 1px) dashed var(--line);
+  display: flex; align-items: center; justify-content: center;
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s9, 9px); font-weight: 400; line-height: var(--s12, 12px);
+  color: var(--muted);
+  cursor: pointer;
+  background: var(--surf);
+  font-style: normal;
+}
+.refs i.on { border-style: solid; border-color: var(--red); color: var(--text); }
+.ret { display: flex; flex-direction: column; margin-top: var(--s8, 8px); }
+.ret .radio-option {
+  font-size: var(--s11, 11px);
+  border: var(--s1, 1px) solid var(--line);
+  padding: var(--s5, 5px) var(--s6, 6px);
+  cursor: pointer;
+  background: var(--surf);
+  display: flex;
+  align-items: center;
+}
+#proHist {
+  flex: none;
+  border-top: var(--s1, 1px) solid var(--line);
+  padding: var(--s6, 6px) var(--s10, 10px) var(--s8, 8px);
+  background: var(--bg);
+}
+#proHist .hi { font-family: Arial, "PingFang SC", "Microsoft YaHei"; font-size: var(--s11, 11px); font-weight: 400; line-height: 1.35; color: var(--text); padding: var(--s1, 1px) 0; }
+#proHist .hi span { font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s9, 9px); font-weight: 400; line-height: var(--s12, 12px); color: var(--muted); }
+
+#pane-settings { overflow: auto; }
+.setrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--s6, 6px) 0;
+  border-bottom: var(--s1, 1px) solid var(--line);
+  font-size: var(--s12, 12px);
+}
+.setrow:last-child { border-bottom: 0; }
+.setrow small {
+  display: block;
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s10, 10px); font-weight: 400; line-height: var(--s12, 12px);
+  color: var(--muted);
+  margin-top: var(--s2, 2px);
+}
+.sw {
+  width: var(--s34, 34px); height: var(--s18, 18px);
+  border: var(--s1, 1px) solid var(--line);
+  background: var(--surf);
+  cursor: pointer;
+  position: relative;
+  flex: none;
+}
+.sw.on { border-color: var(--red); }
+.sw i {
+  position: absolute;
+  top: var(--s2, 2px); left: var(--s2, 2px);
+  width: var(--s12, 12px); height: var(--s12, 12px);
+  background: var(--muted);
+}
+.sw.on i { left: var(--s18, 18px); background: var(--red); }
+.radio { display: flex; flex-wrap: wrap; }
+.radio label, .radio .radio-option {
+  font-size: var(--s11, 11px);
+  border: var(--s1, 1px) solid var(--line);
+  padding: var(--s4, 4px) var(--s7, 7px);
+  cursor: pointer;
+  background: var(--surf);
+}
+.radio label.on, .radio .radio-option.on { border-color: var(--red); }
+.mono { font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s11, 11px); font-weight: 400; line-height: var(--s14, 14px); color: var(--muted); }
+.about { font-size: var(--s12, 12px); line-height: 1.55; }
+.field {
+  display: flex;
+  flex-direction: column;
+  color: var(--muted);
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s11, 11px); font-weight: 400; line-height: var(--s14, 14px);
+  margin-top: var(--s8, 8px);
+}
+.field input[type="text"] {
+  background: transparent;
+  color: var(--text);
+  border: var(--s1, 1px) solid var(--line);
+  padding: var(--s6, 6px) var(--s8, 8px);
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s11, 11px); font-weight: 400; line-height: var(--s14, 14px);
+}
+.dump {
+  margin-top: var(--s6, 6px);
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s10, 10px); font-weight: 400; line-height: var(--s12, 12px);
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+.dump:empty { display: none; }
+
+.cap-thumb {
+  width: var(--s96, 96px); height: var(--s96, 96px);
+  object-fit: contain;
+  border: var(--s1, 1px) solid var(--line);
+  background: var(--surf);
+  flex-shrink: 0;
+}
+.cap-thumb[hidden], [hidden] { display: none !important; }
+.ref-fold {
+  border: var(--s1, 1px) solid var(--line);
+  background: var(--surf);
+  padding: var(--s6, 6px) var(--s8, 8px);
+  display: flex;
+  flex-direction: column;
+}
+.ref-thumbs { display: flex; flex-wrap: wrap; }
+.ref-thumb-wrap { position: relative; width: var(--s36, 36px); height: var(--s36, 36px); flex-shrink: 0; }
+.ref-thumb {
+  width: var(--s36, 36px); height: var(--s36, 36px); object-fit: cover;
+  border: var(--s1, 1px) solid var(--line); display: block;
+}
+.ref-del {
+  position: absolute; top: 0; right: 0;
+  width: var(--s12, 12px); height: var(--s12, 12px); padding: 0;
+  background: var(--surf); color: var(--red);
+  border: var(--s1, 1px) solid var(--line); cursor: pointer;
+  font-size: var(--s9, 9px);
+}
+.ref-note { font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s12, 12px); font-weight: 400; line-height: var(--s14, 14px); color: var(--muted); margin: 0; }
+.records-drawer { background: var(--bg); }
+.records-head {
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s9, 9px); font-weight: 400; line-height: var(--s12, 12px);
+  letter-spacing: .14em;
+  color: var(--muted);
+  margin-bottom: var(--s4, 4px);
+}
+.record-list { display: flex; flex-direction: column; max-height: var(--s160, 160px); overflow: auto; }
+.record-row { display: flex; flex-direction: column; border-bottom: var(--s1, 1px) solid var(--line); padding-bottom: var(--s4, 4px); }
+.record-main { font-size: var(--s12, 12px); line-height: var(--s14, 14px); }
+.record-meta { font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s9, 9px); font-weight: 400; line-height: var(--s12, 12px); color: var(--muted); }
+.record-rerun {
+  align-self: flex-start;
+  margin-top: var(--s2, 2px);
+  background: none;
+  color: var(--muted);
+  border: 0;
+  cursor: pointer;
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei"; font-size: var(--s9, 9px); font-weight: 400; line-height: var(--s12, 12px);
+}
+
+/* Explicit host defaults: UXP's header and text fields are native elements. */
+header.chrome { display: block; width: 100%; height: auto; }
+.brand-row { width: 100%; height: var(--s22, 22px); }
+.sub { display: block; height: var(--s12, 12px); line-height: var(--s12, 12px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.comp { height: var(--s10, 10px); line-height: var(--s10, 10px); flex: none; }
+.modes { height: var(--s20, 20px); align-items: flex-start; }
+.sec { flex: none; }
+.sec h3, #recordsDrawerPro h3 { margin: 0 0 var(--s6, 6px); font-style: normal; line-height: var(--s12, 12px); }
+.sec h3 .tiny, #recordsDrawerPro h3 .tiny { flex: none; margin-left: var(--s8, 8px); }
+.chip { line-height: var(--s12, 12px); flex-shrink: 0; }
+.sel3 span { line-height: var(--s12, 12px); }
+.ctx { line-height: var(--s12, 12px); }
+.record-meta { line-height: var(--s12, 12px); }
+.th > * { flex-shrink: 0; }
+.th > .log { flex: 1; }
+.record-row { flex: none; }
+
+/* Horizontal and vertical gaps; wrapping rows compensate the last margin. */
+.brand-row > * + * { margin-left: var(--s8, 8px); }
+.comp > * + * { margin-left: var(--s6, 6px); }
+.modes > .tab + .tab { margin-left: var(--s14, 14px); }
+.th > :not([hidden]) ~ :not([hidden]) { margin-top: var(--s8, 8px); }
+.chips, .sel3, .radio { margin-right: var(--sn6, -6px); margin-bottom: var(--sn6, -6px); }
+.chips > *, .sel3 > *, .radio > * { margin-right: var(--s6, 6px); margin-bottom: var(--s6, 6px); }
+.row2 > .ui-button { margin-left: var(--s6, 6px); }
+.recipe-row > * + *, .param > * + * { margin-left: var(--s8, 8px); }
+.refs > * + * { margin-left: var(--s6, 6px); }
+.ret > .radio-option + .radio-option { margin-top: var(--s4, 4px); }
+.setrow > * + * { margin-left: var(--s12, 12px); }
+.setrow > div:first-child { flex: 1; min-width: 0; }
+.setrow > .radio { flex: none; max-width: var(--s170, 170px); }
+.radio label, .radio .radio-option { display: flex; align-items: center; line-height: var(--s14, 14px); }
+.radio label, .radio-option { position: relative; flex-shrink: 0; min-height: var(--s26, 26px); }
+.field { align-items: stretch; text-align: left; }
+.field > span { display: block; width: 100%; text-align: left; }
+.field > * + * { margin-top: var(--s4, 4px); }
+.ref-fold > :not([hidden]) ~ :not([hidden]) { margin-top: var(--s6, 6px); }
+.ref-thumbs { margin-right: var(--sn4, -4px); margin-bottom: var(--sn4, -4px); }
+.ref-thumbs > * { margin-right: var(--s4, 4px); margin-bottom: var(--s4, 4px); }
+.record-row + .record-row { margin-top: var(--s6, 6px); }
+.record-row > * + * { margin-top: var(--s2, 2px); }
+
+/* HTML button surfaces avoid the native button's fixed label / intrinsic size.
+ * ui-014.js provides keyboard activation and disabled-state semantics. */
+.ui-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-width: 0;
+  min-height: 0;
+  height: var(--s24, 24px);
+  border: var(--s1, 1px) solid transparent;
+  border-radius: 0;
+  padding: 0 var(--s8, 8px);
+  font-family: Menlo, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei";
+  font-size: var(--s10, 10px);
+  font-weight: 400;
+  line-height: var(--s12, 12px);
+  cursor: pointer;
+}
+.ui-button:focus { border-color: var(--red); }
+.primary:focus { border-color: var(--text); }
+.ui-button:hover { border-color: var(--muted); }
+.ui-button:active, .ui-button.is-pressed { background: var(--line); border-color: var(--red); }
+.primary:hover { border-color: var(--text); }
+.primary:active, .primary.is-pressed { background: #D42B32; }
+.primary[disabled], .primary[disabled]:hover, .primary[disabled]:active { background: var(--disabled-bg); color: var(--disabled-text); border-color: transparent; }
+#go { width: var(--s28, 28px); height: var(--s56, 56px); padding: 0; font-size: var(--s14, 14px); }
+#applyBtn { height: var(--s56, 56px); min-width: var(--s88, 88px); padding: 0 var(--s10, 10px); }
+.ghost { min-width: var(--s44, 44px); height: var(--s26, 26px); border-color: var(--line); font-size: var(--s11, 11px); }
+.record-rerun { width: var(--s44, 44px); height: var(--s24, 24px); padding: 0; border-color: var(--line); font-size: var(--s10, 10px); }
+.result-card .result-undo { align-self: flex-start; min-width: var(--s56, 56px); height: var(--s24, 24px); border: var(--s1, 1px) solid var(--line); font-size: var(--s10, 10px); }
+.ref-del { position: absolute; width: var(--s14, 14px); height: var(--s14, 14px); padding: 0; font-size: var(--s11, 11px); border-color: var(--line); }
+
+/* UXP edit fields use the host's system font. Use the same system-font choice
+ * for the web preview; do not recreate fields to try to force a custom face. */
+#app input[type=text], #app input[type=search], #app textarea, #app select {
+  font-family: -apple-system, "Segoe UI", Arial, "PingFang SC", "Microsoft YaHei";
+  font-size: var(--s12, 12px);
+  font-weight: 400;
+  line-height: var(--s16, 16px);
+  margin: 0;
+  border-radius: 0;
+  padding: var(--s6, 6px);
+  -webkit-appearance: none;
+  appearance: none;
+}
+input[type=text], input[type=search], select { height: var(--s28, 28px); }
+textarea.msg, #prompt, #proTa { display: block; flex: 1; min-width: 0; width: 0; height: var(--s56, 56px); min-height: var(--s56, 56px); max-height: var(--s56, 56px); resize: none; }
+#compile { flex: none; width: 100%; height: var(--s72, 72px); }
+/* Transparent edit fields expose the host's dark native surface in UXP. */
+textarea, #prompt, #proTa, input[type=text], input[type=search], select {
+  background-color: var(--bg);
+  color: var(--text);
+}
+#compile { background-color: var(--surf); }
+/* These are vertical scrollers; UXP can otherwise reserve a horizontal bar. */
+.th, .log, .record-list, #pane-settings, #proBody, #proR, #zLib {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+/* Narrow layout has one scroll owner. Columns acquire their own scrollers
+ * only in the wide layout, so nested flex children cannot collapse sections. */
+#app:not(.wide) #proL, #app:not(.wide) #proR { flex: none; overflow: visible; }
+#app:not(.wide) #zLib { overflow: visible; }
+#app.wide #proR, #app.wide #zLib { overflow-x: hidden; overflow-y: auto; }
+.compact .setrow { flex-direction: column; align-items: stretch; }
+.compact .setrow > div:first-child { flex: none; }
+.compact .setrow > * + * { margin-left: 0; margin-top: var(--s6, 6px); }
+.compact .setrow > .radio { max-width: 100%; align-self: flex-start; }
+.compact .setrow > .sw, .compact .setrow > .ui-button { align-self: flex-start; }
+/* HTML marks avoid native UXP radio painting. Hidden inputs keep the existing
+ * pipeline state; ui-014.js provides radio-group keyboard and ARIA behavior. */
+.radio-option:focus { border-color: var(--red); }
+.radio-mark {
+  display: block;
+  position: relative;
+  width: var(--s14, 14px);
+  height: var(--s14, 14px);
+  flex: none;
+  margin: 0 var(--s6, 6px) 0 0;
+  border: var(--s1, 1px) solid var(--muted);
+  border-radius: 50%;
+  background-color: var(--bg);
+}
+.radio-mark i { position: absolute; left: var(--s3, 3px); top: var(--s3, 3px); width: var(--s6, 6px); height: var(--s6, 6px); border-radius: 50%; background: transparent; }
+.radio-option.on .radio-mark { border-color: var(--red); }
+.radio-option.on .radio-mark i { background: var(--red); }
+.radio-option:focus .radio-mark { border-width: var(--s2, 2px); }
+.radio-option:focus .radio-mark i { left: var(--s2, 2px); top: var(--s2, 2px); }
+
+/* Chromium can style its native scrollbar directly. */
+::-webkit-scrollbar { width: var(--s7, 7px); height: var(--s7, 7px); }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border: var(--s2, 2px) solid var(--bg); border-radius: 0; }
+
+/* UXP ignores scrollbar CSS and paints native bars above HTML. Move only the
+ * outer/rightmost native bars beyond the panel edge; preserve the original
+ * content width with matching padding. scrollbars-014.js paints an operable
+ * thin rail inside the panel while wheel/trackpad scrolling stays native. */
+.host-uxp #pane-settings { margin-right: var(--sn20, -20px); padding-right: var(--s20, 20px); }
+.host-uxp #th { margin-right: var(--sn20, -20px); padding-right: var(--s32, 32px); }
+.host-uxp #app:not(.wide) #proBody { margin-right: var(--sn20, -20px); padding-right: var(--s20, 20px); }
+.host-uxp #app.wide #proL { flex: 0 0 50%; }
+.host-uxp #app.wide #proR { flex: 1 1 0; margin-right: var(--sn20, -20px); padding-right: var(--s20, 20px); }
+.panel-scrollbar { position: absolute; right: 0; width: var(--s12, 12px); cursor: default; }
+.panel-scrollbar-thumb { position: absolute; left: var(--s5, 5px); width: var(--s3, 3px); background: var(--scroll-thumb); }
+.panel-scrollbar:hover .panel-scrollbar-thumb,
+.panel-scrollbar:focus .panel-scrollbar-thumb,
+.panel-scrollbar.is-dragging .panel-scrollbar-thumb { background: var(--muted); }
+
+/* Explicit field frame stays visible around UXP's native text editor. */
+.composer-field { display: flex; flex: 1; min-width: 0; width: 0; border: var(--s1, 1px) solid var(--line); padding: var(--s2, 2px); background: var(--surf); }
+.composer-field.is-focused { border-color: var(--red); }
+#app .composer-field #prompt { width: 100%; border: 0; height: var(--s50, 50px); min-height: var(--s50, 50px); max-height: var(--s50, 50px); }
+.scale-options { display: flex; flex-wrap: wrap; margin: var(--s6, 6px) 0 var(--s12, 12px); }
+.scale-options .ui-button { margin-right: var(--s5, 5px); margin-bottom: var(--s5, 5px); }
+.scale-options .is-on { border-color: var(--red); color: var(--red); }
+.agent-tool-previews { margin-top: var(--s8, 8px); }
+.agent-tool-preview { display: block; width: 100%; max-height: var(--s240, 240px); object-fit: contain; background: #fff; }
+#agentSkillsStatus { white-space: pre-wrap; overflow-wrap: anywhere; }
+.brand { min-width: 0; }
+.brand img { max-width: 100%; object-fit: contain; }

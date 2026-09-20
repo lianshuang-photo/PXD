@@ -1,0 +1,16 @@
+{
+  "name": "ls-studio",
+  "version": "0.1.6",
+  "private": true,
+  "type": "commonjs",
+  "description": "LS Studio, the Photoshop application developed as PXD V2",
+  "scripts": {
+    "start": "node companion/server.js",
+    "test": "node scripts/test.cjs",
+    "check": "node scripts/check.cjs",
+    "build": "node scripts/package.cjs",
+    "prepare:dev": "node scripts/prepare-dev.cjs",
+    "dev": "node scripts/dev.cjs"
+  },
+  "engines": { "node": ">=18" }
+}

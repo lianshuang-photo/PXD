@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <title>PXD/LS studio</title>
+  <link rel="stylesheet" href="styles-014.css" />
+</head>
+<body>
+  <div id="app" class="theme-dark">
+    <header class="chrome">
+      <div class="brand-row">
+        <div class="brand">
+          <img class="brand-dark" src="icons/wordmark-dark.svg" width="133" height="22" alt="PXD/LS studio" />
+          <img class="brand-light" src="icons/wordmark-light.svg" width="133" height="22" alt="PXD/LS studio" />
+        </div>
+        <div class="comp" id="compBtn" title="设置">
+          <i class="dot off" id="healthDot" role="button" tabindex="0"></i>
+        </div>
+      </div>
+      <div class="sub">// AGENT 对话修图 · 专业 IDE</div>
+      <nav class="modes" role="tablist">
+        <div class="tab is-on" data-tab="agent" role="tab" tabindex="0" aria-selected="true">AGENT<span class="tab-line" aria-hidden="true"></span></div>
+        <div class="tab" data-tab="pro" role="tab" tabindex="-1" aria-selected="false">专业<span class="tab-line" aria-hidden="true"></span></div>
+        <div class="tab" data-tab="settings" role="tab" tabindex="-1" aria-selected="false">设置<span class="tab-line" aria-hidden="true"></span></div>
+      </nav>
+    </header>
+
+    <section id="pane-agent" class="pane view is-on" role="tabpanel">
+      <div class="agent-toolbar">
+        <div class="agent-connection"><span class="agent-status-dot" id="agentDot"></span><span id="agentStatus">连接 Codex…</span></div>
+        <div class="agent-toolbar-actions">
+          <div class="ui-button ghost" id="agentHistory" role="button" tabindex="0">历史</div>
+          <div class="ui-button ghost" id="agentNew" role="button" tabindex="0" title="开始新对话">＋</div>
+        </div>
+      </div>
+      <div id="agentHistoryList" class="agent-history-list" hidden></div>
+      <div class="th" id="th">
+        <div id="agentWelcome" class="agent-welcome"><div class="agent-eyebrow">LS STUDIO / CODEX</div><div class="agent-welcome-title">从一句话开始。</div><div class="agent-welcome-note">看看当前画面，理清图层，聊聊修图思路。</div></div>
+        <div id="emptyChips" class="chips">
+          <div class="chip human-chip ui-button first" data-send="你现在能帮我做什么？" role="button" tabindex="0">你能帮我做什么</div>
+          <div class="chip human-chip ui-button" data-send="给我一套保留肤质的自然人像修图流程。" role="button" tabindex="0">自然人像修图流程</div>
+          <div class="chip human-chip ui-button" data-send="用表格解释 Photoshop 曲线和色阶的区别。" role="button" tabindex="0">曲线与色阶</div>
+        </div>
+        <div id="agentMessages" class="agent-messages" role="log" aria-label="对话记录"></div>
+        <div id="agentRequests" class="agent-requests"></div>
+        <div id="agentProgress" class="agent-progress" role="status" aria-live="polite" hidden></div>
+        <div id="agentError" class="agent-error" role="alert" hidden></div>
+
+      </div>
+      <div class="ctx">// CONTEXT <span id="ctx">读取文档信息…</span></div>
+      <div class="composer">
+        <div id="agentAttachments" class="agent-attachments" hidden></div>
+        <div class="row2">
+          <div id="promptFrame" class="composer-field"><textarea id="prompt" class="msg" rows="2" placeholder="发消息给 Codex…" aria-label="发消息给 Codex"></textarea></div>
+          <div id="go" class="ui-button red primary" role="button" disabled aria-disabled="true" tabindex="-1" title="未连接" aria-label="发送指令">→</div>
+        </div>
+        <div class="agent-composer-actions">
+          <div class="ui-button ghost" id="agentAttachFile" role="button" tabindex="0">＋ 图片</div>
+          <div class="ui-button ghost" id="agentAttachSelection" role="button" tabindex="0">附选区图</div>
+          <div class="ui-button ghost" id="agentNewline" role="button" tabindex="0" title="在光标处插入换行">↵ 换行</div>
+          <span class="agent-key-hint">Enter 发送 · Shift 换行</span>
+        </div>
+        <div class="sel3" id="selChips" hidden>
+          <span class="chip is-on" data-sel="scope">[SEL] 作用域</span>
+          <span class="chip" data-sel="ref">参考</span>
+          <span class="chip" data-sel="ignore">忽略</span>
+        </div>
+        <input id="refFile" type="file" accept="image/*" multiple hidden />
+        <input id="agentFile" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden />
+      </div>
+    </section>
+
+    <section id="pane-pro" class="pane view" role="tabpanel" hidden>
+      <div id="proRow">
+        <div id="proBody">
+          <div id="proR">
+            <div class="sec" id="zCmd">
+              <h3>指令 <span class="tiny" id="readDoc" title="">读文档</span></h3>
+              <textarea id="compile" placeholder="编译词。点资料里的配方写入。"></textarea>
+              <div id="params"></div>
+              <pre id="docDump" class="dump"></pre>
+        <div id="log" class="log" aria-live="polite" hidden></div>
+        <img id="capThumb" class="cap-thumb" width="96" height="96" alt="" hidden />
+        <div id="resultCard" class="card result-card" hidden></div>
+        <div id="refFold" class="ref-fold" hidden>
+          <div id="refThumbs" class="ref-thumbs"></div>
+          <p id="refNote" class="ref-note" hidden></p>
+        </div>
+        <div id="recordsDrawer" class="records-drawer" hidden>
+          <div class="records-head">记录</div>
+          <div id="recordList" class="record-list"></div>
+        </div>
+            </div>
+            <div class="sec" id="zCtx">
+              <h3>上下文</h3>
+              <div class="refs" id="proRefs">
+                <i data-r="A">+A</i><i data-r="B">+B</i><i data-r="C">+C</i><i data-r="D">+D</i>
+              </div>
+              <p id="ctxLine" class="ctx-line"></p>
+              <div class="ret" role="radiogroup" aria-label="本次回贴方式">
+                <div class="radio-option on"><input type="radio" name="ret" value="layer" checked hidden><span class="radio-mark" aria-hidden="true"><i></i></span><span>新图层</span></div>
+                <div class="radio-option"><input type="radio" name="ret" value="so" hidden><span class="radio-mark" aria-hidden="true"><i></i></span><span>智能对象</span></div>
+                <div class="radio-option"><input type="radio" name="ret" value="cover" hidden><span class="radio-mark" aria-hidden="true"><i></i></span><span>覆盖</span></div>
+              </div>
+            </div>
+          </div>
+          <div id="proL">
+            <div class="sec" id="zLib">
+              <h3>资料 <span class="tiny" id="libToggle">搜配方</span></h3>
+              <input id="recipeQ" type="search" placeholder="搜配方：磨皮 清杂 场照 原设…" />
+              <div class="list recipe-hits" id="recipeHits"></div>
+            </div>
+            <div id="proHist" class="records-drawer">
+              <div id="recordsDrawerPro">
+                <h3>记录 <span class="tiny" id="toAgent">送回 Agent</span></h3>
+                <div id="recordListPro" class="record-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="proComposer" class="composer">
+        <div class="row2">
+          <textarea class="msg" id="proTa" placeholder="这条指令要改什么。空选会先确认。"></textarea>
+          <div class="ui-button red primary" id="applyBtn" role="button" disabled aria-disabled="true" tabindex="-1" title="未连接">改选区</div>
+        </div>
+        <div class="sel3" id="proSelChips">
+          <span class="chip is-on" data-sel="scope">[SEL] 作用域</span>
+          <span class="chip" data-sel="ref">参考</span>
+          <span class="chip" data-sel="ignore">忽略</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="pane-settings" class="pane view" role="tabpanel" hidden>
+      <div class="sec">
+        <h3>// 外观</h3>
+        <div class="setrow"><div>界面缩放<small>按显示器调整，自动记住</small></div><span id="uiScaleLabel">100%</span></div>
+        <div id="uiScaleOptions" class="scale-options" role="group" aria-label="界面缩放"></div>
+        <div class="setrow"><div>Enter 发送<small>关闭后 Enter 换行，点击 ↑ 发送</small></div><div id="enterSend" class="ui-button ghost" role="button" tabindex="0" aria-pressed="true">开启</div></div>
+        <div class="setrow">
+          <div>DARK / LIGHT<small>选择面板主题</small></div>
+          <div class="radio" id="themePick">
+            <label id="labDark" class="on">DARK</label>
+            <label id="labLight">LIGHT</label>
+          </div>
+        </div>
+        <input id="themeLight" type="checkbox" hidden />
+      </div>
+      <div class="sec">
+        <h3>// Companion</h3>
+        <div class="setrow">
+          <div>本机服务<small id="compHint">未连接</small></div>
+          <div class="ui-button ghost" id="compRetry" role="button" tabindex="0">重试</div>
+        </div>
+        <label class="field">
+          <span>Companion URL</span>
+          <input id="baseUrl" type="text" value="http://127.0.0.1:17880" />
+        </label>
+      </div>
+      <div class="sec">
+        <h3>// Codex Agent</h3>
+        <div class="setrow">
+          <div>会话连接<small id="agentConnectionHint">连接中</small></div>
+          <div class="ui-button ghost" id="agentReconnect" role="button" tabindex="0">重新连接</div>
+        </div>
+        <div class="setrow">
+          <div>模型<small id="agentModelLabel">跟随本机 Codex 设置</small></div>
+          <div class="ui-button ghost" id="agentModelToggle" role="button" tabindex="0">更换</div>
+        </div>
+        <div id="agentModelList" class="agent-model-list" hidden></div>
+        <div class="agent-effort-row"><span>思考强度</span><div id="agentEfforts" class="agent-efforts"></div></div>
+        <div class="setrow"><div>Photoshop<small id="photoshopStatus">等待插件连接</small></div></div>
+        <div class="setrow"><div>Skills<small id="agentSkillsStatus">正在检查</small></div></div>
+        <p class="agent-setting-note">可读取文档、图层、选区与画面，也能定位图层。像素编辑与保存操作会在后续接入。对话保存在本机。</p>
+      </div>
+      <div class="sec">
+        <h3>// 回贴</h3>
+        <div class="setrow">
+          <div>默认回贴方式<small>新图层 或 智能对象</small></div>
+          <div class="radio" role="radiogroup" aria-label="默认回贴方式">
+            <div class="radio-option on"><input type="radio" name="defRet" value="layer" checked hidden><span class="radio-mark" aria-hidden="true"><i></i></span><span>新图层</span></div>
+            <div class="radio-option"><input type="radio" name="defRet" value="so" hidden><span class="radio-mark" aria-hidden="true"><i></i></span><span>智能对象</span></div>
+          </div>
+        </div>
+        <div class="setrow">
+          <div>覆盖需二次确认<small>覆盖当前层前弹确认 · overwrite</small></div>
+          <div class="sw on" id="swConfirm"><i></i></div>
+        </div>
+        <div class="setrow">
+          <div>自动编组<small>回贴结果收入 PXD 组</small></div>
+          <div class="sw on" id="swGroup"><i></i></div>
+        </div>
+        <div class="setrow">
+          <div>自动回贴<small>完成后立刻贴回文档</small></div>
+          <div class="sw on" id="swAuto"><i></i></div>
+        </div>
+      </div>
+      <div class="sec">
+        <h3>// 闸</h3>
+        <div class="setrow"><div>允许批处理<small>默认关 · 开了才跑 batch</small></div><div class="sw" id="swBatch"><i></i></div></div>
+        <div class="setrow"><div>允许读画笔<small>没有标记则不读</small></div><div class="sw on" id="swBrush"><i></i></div></div>
+        <div class="setrow"><div>显示编译 JSON<small>调试向</small></div><div class="sw" id="swJson"><i></i></div></div>
+      </div>
+      <div class="sec">
+        <h3>// 关于</h3>
+        <div class="about">
+          <strong>PXD/LS studio</strong><br>
+          Agent 对话修图 / 专业 IDE<br>
+          无 Forge / Comfy / tile 墙 / 账单<br>
+          主题键 <span class="mono">pxd-theme</span>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script src="ps-encode-014.js"></script>
+  <script src="ps-capture-014.js"></script>
+  <script src="ps-return-014.js"></script>
+  <script src="ui-014.js"></script>
+  <script src="scale-014.js"></script>
+  <script src="main-014.js"></script>
+  <script src="ps-agent-014.js"></script>
+  <script src="agent-markdown-014.js"></script>
+  <script src="composer-014.js"></script>
+  <script src="agent-014.js"></script>
+  <script src="scrollbars-014.js"></script>
+  <script src="ui-diagnostics-014.js"></script>
+</body>
+</html>

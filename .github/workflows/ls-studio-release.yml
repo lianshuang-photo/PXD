@@ -1,0 +1,89 @@
+name: LS Studio release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version already present in all three app manifests
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ls-studio-release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+      pull-requests: read
+      statuses: read
+    outputs:
+      evidence: ${{ steps.gate.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            return await require('./.github/scripts/release-gate.cjs')({github,context});
+      - name: Require a matching application version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: node -e "if(process.env.RELEASE_VERSION !== require('./apps/ls-studio/package.json').version) throw Error('Version must already be committed and reviewed')"
+  draft-release:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: ls-studio-release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      checks: read
+      pull-requests: read
+      statuses: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Revalidate after environment approval
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await require('./.github/scripts/release-gate.cjs')({github,context});
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm --prefix apps/ls-studio run build
+        env:
+          PXDLS_RELEASE_BUILD: '1'
+      - name: Smoke test exact release bytes
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: node apps/ls-studio/scripts/package-smoke.cjs "apps/ls-studio/dist/ls-studio-${RELEASE_VERSION}.zip"
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: apps/ls-studio/dist/*
+      - name: Create version tag and draft release with verified assets
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const version = require('./apps/ls-studio/package.json').version;
+            const tag = 'ls-studio-v' + version;
+            const {owner, repo} = context.repo;
+            // Approval may have waited or the build may have taken time. Never
+            // authorize publication from a cached verdict about mutable state.
+            const evidence = await require('./.github/scripts/release-gate.cjs')({github,context});
+            const body = `LS Studio ${version}\n\nCommit: ${context.sha}\nReviewed PR: #${evidence.pullRequest}\nComputer-use evidence: ${evidence.evidence}\n\nDownload the combined ZIP for Companion and plugin source. The UXP source ZIP must be extracted and loaded through UXP Developer Tool; it is not a signed CCX installer. Verify SHA256SUMS and BUILD-MANIFEST.json. This draft requires a final human check before publishing.`;
+            // Never overwrite an existing version tag or release on rerun.
+            await github.rest.git.createRef({owner,repo,ref:'refs/tags/'+tag,sha:context.sha});
+            const release = await github.rest.repos.createRelease({owner,repo,tag_name:tag,name:'LS Studio '+version,draft:true,body});
+            for (const name of fs.readdirSync('apps/ls-studio/dist').sort()) {
+              const data = fs.readFileSync('apps/ls-studio/dist/'+name);
+              await github.rest.repos.uploadReleaseAsset({owner,repo,release_id:release.data.id,name,data,headers:{'content-type':'application/octet-stream','content-length':data.length}});
+            }
+            core.notice('Draft release created: '+release.data.html_url);

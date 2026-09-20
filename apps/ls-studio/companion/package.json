@@ -1,0 +1,14 @@
+{
+  "name": "pxd-ls-companion",
+  "version": "0.1.6",
+  "private": true,
+  "description": "LS Studio local Companion with Codex App Server conversation bridge",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node ../scripts/test.cjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
