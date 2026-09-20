@@ -191,4 +191,6 @@ MIT License
 
 ## 贡献
 
+开发、review 与联调前请阅读仓库级 [工程规范](ENGINEERING-STANDARDS.md) 和 [AGENTS.md](AGENTS.md)。PR 中按 [验收记录模板](docs/v2/templates/PR-ACCEPTANCE.md) 区分自动化、浏览器、PS 后端和真实插件面板结果。
+
 欢迎提交 Issue 和 Pull Request。
