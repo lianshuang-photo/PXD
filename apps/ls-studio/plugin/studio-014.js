@@ -45,7 +45,7 @@
   function createController(options) {
     var transport = options.transport, storage = options.storage, storageKey = "pxdls.studio.pending:" + (transport.base || "test"), listeners = [], disposed = false, epoch = 0, localVersion = 0, refreshPromise = null;
     var idFactory = options.makeId || function () { return "ui_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2); };
-    var state = { discovery: null, drafts: [], draft: null, form: { params: {}, context: null }, dirty: false, conflict: null, jobs: [], selectedJobId: null, observed: { document: null, layers: [], nextOffset: null }, busy: false, error: null, notice: "", pendingRun: null, pendingPlacements: {}, recipes: { items: [], total: 0, nextOffset: null, query: "", selected: null, values: {}, userText: "", loading: false, error: null } }, recipeSequence = 0;
+    var state = { discovery: null, drafts: [], draft: null, form: { params: {}, context: null }, dirty: false, conflict: null, jobs: [], selectedJobId: null, observed: { document: null, layers: [], nextOffset: null }, busy: false, error: null, notice: "", pendingRun: null, pendingPlacements: {}, recipes: { items: [], total: 0, nextOffset: null, query: "", selected: null, values: {}, refs: [], userText: "", loading: false, error: null } }, recipeSequence = 0;
     try {
       var pending = storage && JSON.parse(storage.getItem(storageKey) || "null");
       if (pending && pending.run && validId(pending.run.draftId) && validId(pending.run.requestId) && Number.isInteger(pending.run.expectedRevision)) state.pendingRun = pending.run;
@@ -244,7 +244,7 @@
         var current = state.form.params.recipe, values = {};
         (recipe.parameters || []).forEach(function (p) { values[p.id] = p.defaultValue; });
         if (current && current.recipeId === recipe.recipeId && current.sourceHash === recipe.sourceHash) values = Object.assign(values, current.values);
-        state.recipes.selected = clone(recipe); state.recipes.values = values; return clone(recipe);
+        state.recipes.selected = clone(recipe); state.recipes.values = values; state.recipes.refs = []; return clone(recipe);
       } catch (e) { if (sequence === recipeSequence) state.recipes.error = "无法读取所选配方，未修改草稿。"; throw e; }
       finally { if (sequence === recipeSequence) { state.recipes.loading = false; emit(); } }
     }
@@ -257,9 +257,17 @@
       return write(async function () {
         var draft = active(), recipe = state.recipes.selected; noConflict();
         requireValue(draft.capabilityId === "image.edit" && recipe, "CAPABILITY_CONFLICT", "请在图像草稿中选择配方");
-        requireValue(!recipe.requiresReferenceMapping, "REFERENCE_MAPPING_REQUIRED", "此配方需要显式参考图映射，当前界面暂不能载入");
+        var mapped;
+        if (recipe.requiresReferenceMapping) {
+          var available = state.form.context && state.form.context.refs || [];
+          mapped = recipe.refImages.map(function (slot, index) {
+            var assetId = state.recipes.refs[index];
+            requireValue(assetId && available.some(function (ref) { return ref.assetId === assetId; }), "REFERENCE_MAPPING_REQUIRED", "请为每个参考槽显式选择已导入的参考图");
+            return { assetId: assetId, role: slot && slot.role || "reference" };
+          });
+        }
         await saveInternal(); requireValue(!state.dirty, "DRAFT_CHANGED", "保存期间又有本地修改，请核对后再载入配方");
-        var version = localVersion, updated = await serviceCall("loadRecipe", { recipeId: recipe.recipeId, draftId: state.draft.draftId, expectedRevision: state.draft.revision, values: clone(state.recipes.values), userText: state.recipes.userText, source: "ui" });
+        var version = localVersion, updated = await serviceCall("loadRecipe", { recipeId: recipe.recipeId, expectedSourceHash: recipe.sourceHash, ...(mapped ? { refs: mapped } : {}), draftId: state.draft.draftId, expectedRevision: state.draft.revision, values: clone(state.recipes.values), userText: state.recipes.userText, source: "ui" });
         setDraft(updated, localVersion !== version); state.notice = "已将配方载入共享草稿，尚未运行"; return clone(updated);
       });
     }
@@ -273,7 +281,8 @@
       run: run, retryRun: function () { return write(function () { requireValue(state.pendingRun, "NO_PENDING_REQUEST", "没有待核对的提交"); return submitRun(clone(state.pendingRun)); }); }, cancel: cancel, apply: apply, rollback: rollback,
       selectJob: function (jobId) { state.selectedJobId = jobId; emit(); }, reportError: failure,
       loadRecipe: async function (recipe) { if (!state.draft) await createDraft("image.edit", false); requireValue(active().capabilityId === "image.edit", "CAPABILITY_CONFLICT", "请新建图像草稿后载入配方"); editParams(Object.assign({}, recipe.params || {}, { prompt: String(recipe.prompt || "") })); },
-      searchRecipes: searchRecipes, selectRecipe: selectRecipe, setRecipeValue: recipeValue, setRecipeUserText: function (value) { state.recipes.userText = String(value); emit(); }, loadSelectedRecipe: loadSelectedRecipe,
+      searchRecipes: searchRecipes, selectRecipe: selectRecipe,
+      setRecipeReference: function (index, assetId) { ensureActive(); requireValue(state.recipes.selected && Number.isInteger(index) && index >= 0 && index < state.recipes.selected.refImages.length && (!assetId || validId(assetId)), "INVALID_INPUT", "参考槽映射无效"); state.recipes.refs[index] = assetId; emit(); }, setRecipeValue: recipeValue, setRecipeUserText: function (value) { state.recipes.userText = String(value); emit(); }, loadSelectedRecipe: loadSelectedRecipe,
       agentReference: function () { var draft = active(); noDirty(); noConflict(); return "请接着处理共享草稿 " + draft.draftId + "（revision " + draft.revision + "）。先用 studio_get_draft 读取当前版本，再基于同一份草稿继续；结果与任务记录在专业工作区中共享。"; },
       dispose: function () { disposed = true; listeners = []; }
     };
@@ -281,7 +290,7 @@
 
   function mount(options) {
     options = options || {};
-    var win = options.window || root, doc = options.document || win.document, ui = options.ui || win.PXD_UI, pane = doc.getElementById("pane-pro"), nodes = {}, timers = [], unsubscribe = null, controller, transport, disposed = false, renderedLists = {}, assets = new Map(), proComposer = null;
+    var win = options.window || root, doc = options.document || win.document, ui = options.ui || win.PXD_UI, pane = doc.getElementById("pane-pro"), nodes = {}, timers = [], unsubscribe = null, controller, transport, disposed = false, renderedLists = {}, assets = new Map(), proComposer = null, presets = null;
     requireValue(pane && ui, "UI_UNAVAILABLE", "专业工作区容器尚未加载");
     function node(tag, className, text, parent, id) { var el = doc.createElement(tag); if (className) el.className = className; if (text != null) el.textContent = text; if (id) { el.id = id; nodes[id] = el; } if (parent) parent.appendChild(el); return el; }
     function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
@@ -344,6 +353,9 @@
     node("div", "studio-list", null, recipeSection, "studioRecipeList");
     node("div", "studio-note", "查找并载入到图像草稿；不会自动执行。", recipeSection, "studioRecipeNote");
     node("div", "studio-recipe-params", null, recipeSection, "studioRecipeParams");
+    node("div", "studio-recipe-refs", null, recipeSection, "studioRecipeRefs");
+    button(recipeSection, "studioManageRecipes", "管理我的预设", function () { if (presets) { presetContainer.hidden = !presetContainer.hidden; if (!presetContainer.hidden) return presets.refresh(); } });
+    var presetContainer = node("div", "", null, recipeSection, "studioPresetManager"); presetContainer.hidden = true;
     var recipeText = field(recipeSection, "studioRecipeUserText", "本次配方的补充要求", "textarea"); recipeText.rows = 2;
     recipeText.addEventListener("input", function () { controller.setRecipeUserText(recipeText.value); });
     button(recipeSection, "studioLoadRecipe", "载入配方到共享草稿", function () { return controller.loadSelectedRecipe(); });
@@ -442,7 +454,7 @@
       var providerSettings = provider && provider.settings || {}; choices(ratio, providerSettings.aspectRatio || ["auto"], state.form.params.aspectRatio); choices(size, providerSettings.imageSize || [], state.form.params.imageSize);
       var recipes = state.recipes;
       nodes.studioMoreRecipes.hidden = recipes.nextOffset == null;
-      nodes.studioRecipeNote.textContent = recipes.error || (recipes.loading ? "读取配方…" : recipes.selected ? recipes.selected.title + " · 参数调整后点击载入，替换编辑指令并保留处理范围与参考图。" : "查找并载入到图像草稿；不会自动执行。");
+      nodes.studioRecipeNote.textContent = recipes.error || (recipes.loading ? "读取配方…" : recipes.selected ? recipes.selected.title + " · 调整参数后载入并替换编辑指令。处理范围保留；有参考槽时使用显式映射。" : "查找并载入到图像草稿；不会自动执行。");
       list("studioRecipeList", [recipes.items, recipes.selected && recipes.selected.recipeId, busy], function (container) { recipes.items.forEach(function (recipe) { var choice = button(container, "recipe_" + recipe.recipeId, recipe.title + " · " + recipe.category, function () { return controller.selectRecipe(recipe.recipeId); }, "studio-list-item" + (recipes.selected && recipes.selected.recipeId === recipe.recipeId ? " is-on" : "")); ui.setDisabled(choice, busy); }); });
       list("studioRecipeParams", [recipes.selected && recipes.selected.recipeId, recipes.selected && recipes.selected.sourceHash], function (container) {
         (recipes.selected && recipes.selected.parameters || []).forEach(function (parameter) {
@@ -452,8 +464,17 @@
         });
       });
       (recipes.selected && recipes.selected.parameters || []).forEach(function (parameter) { var input = nodes["recipe_parameter_" + parameter.id]; setValue(input, recipes.values[parameter.id]); input.disabled = busy || recipes.loading; });
+      list("studioRecipeRefs", [recipes.selected && recipes.selected.recipeId, recipes.selected && recipes.selected.sourceHash, context && context.refs, busy], function (container) {
+        (recipes.selected && recipes.selected.refImages || []).forEach(function (slot, index) {
+          var select = field(container, "recipe_ref_" + index, (slot && slot.label || "参考槽 " + (index + 1)) + " · " + (slot && slot.role || "reference"), "select");
+          var blank = node("option", "", "请选择已导入的参考图", select); blank.value = "";
+          (context && context.refs || []).forEach(function (ref) { var option = node("option", "", ref.assetId + " · " + ref.role, select); option.value = ref.assetId; });
+          select.disabled = busy; select.addEventListener("change", handle(function () { controller.setRecipeReference(index, select.value); }));
+        });
+      });
+      (recipes.selected && recipes.selected.refImages || []).forEach(function (_, index) { setValue(nodes["recipe_ref_" + index], recipes.refs[index] || ""); });
       setValue(recipeText, recipes.userText); recipeText.disabled = busy;
-      disable("studioLoadRecipe", busy || !draft || !imageMode || !recipes.selected || recipes.loading || !!recipes.selected.requiresReferenceMapping || !!state.conflict);
+      disable("studioLoadRecipe", busy || !draft || !imageMode || !recipes.selected || recipes.loading || !!recipes.selected.archived || !!state.conflict);
       disable("studioFindRecipes", busy || recipes.loading); disable("studioMoreRecipes", busy || recipes.loading);
       var ref = context && context.documentRef, transform = context && context.transform;
       nodes.studioContext.textContent = context ? String(ref.name || "文档 " + ref.documentId) + " · " + (context.scope === "selection" ? "选区 " : "整图 ") + (transform ? transform.inputWidth + "×" + transform.inputHeight : ref.width + "×" + ref.height) + " · 已捕获" : "尚未捕获。不会自动扩大为整图。";
@@ -502,18 +523,21 @@
       disable("studioRun", busy || !draft || !context || !!state.conflict || !!state.pendingRun || !host || imageMode && !(provider && provider.configured) || !imageMode && (!selected || !Object.keys(changes).length));
     }
     function connect() {
-      if (controller) controller.dispose(); if (unsubscribe) unsubscribe(); renderedLists = {}; assets.clear();
+      if (controller) controller.dispose(); if (unsubscribe) unsubscribe(); if (presets) presets.dispose(); presets = null; renderedLists = {}; assets.clear();
       var configured = win.PXD_NAV ? win.PXD_NAV.baseUrl() : doc.getElementById("baseUrl") && doc.getElementById("baseUrl").value;
       transport = options.transport || createTransport({ base: configured, location: win.location });
       controller = createController({ transport: transport, storage: options.storage || win.localStorage });
       unsubscribe = controller.subscribe(render); mounted.controller = controller; mounted.transport = transport;
+      var presetApi = options.presets || win.PXD_PRESETS;
+      if (presetApi) presets = presetApi.mount({ window: win, document: doc, ui: ui, container: presetContainer, transport: transport, native: !!(win.PXD_CONTEXT && win.PXD_CONTEXT.isPhotoshop), fileIO: options.presetFileIO, onUse: function (recipeId) { return controller.selectRecipe(recipeId); } });
+      mounted.presets = presets; ui.setDisabled(nodes.studioManageRecipes, !presets);
       controller.refresh().catch(function () {});
     }
-    var mounted = { controller: null, transport: null, nodes: nodes, toAgent: toAgent, dispose: function () { disposed = true; if (controller) controller.dispose(); if (unsubscribe) unsubscribe(); if (proComposer) proComposer.close(); timers.forEach(clearInterval); var baseInput = doc.getElementById("baseUrl"); if (baseInput) baseInput.removeEventListener("change", connect); if (workspace.parentElement) workspace.parentElement.removeChild(workspace); } };
+    var mounted = { controller: null, transport: null, nodes: nodes, toAgent: toAgent, dispose: function () { disposed = true; if (controller) controller.dispose(); if (unsubscribe) unsubscribe(); if (proComposer) proComposer.close(); if (presets) presets.dispose(); timers.forEach(clearInterval); var baseInput = doc.getElementById("baseUrl"); if (baseInput) baseInput.removeEventListener("change", connect); if (workspace.parentElement) workspace.parentElement.removeChild(workspace); } };
     connect();
     if (win.PXD_COMPOSER) proComposer = win.PXD_COMPOSER.attach({ field: prompt, frame: prompt.parentElement, document: doc, native: !!(win.PXD_CONTEXT && win.PXD_CONTEXT.isPhotoshop), enterSends: function () { try { return win.localStorage.getItem("pxdls.enter-send") !== "false"; } catch (_) { return true; } }, send: handle(function () { if (!ui.isDisabled(nodes.studioRun)) return controller.run(); }), saveDraft: function () { if (controller.snapshot().draft && controller.snapshot().form.params.prompt !== prompt.value) controller.editParams({ prompt: prompt.value }); } });
     var baseInput = doc.getElementById("baseUrl"); if (baseInput) baseInput.addEventListener("change", connect);
-    if (options.poll !== false) timers.push(setInterval(function () { if (!disposed && doc.visibilityState !== "hidden") controller.refresh().catch(function () {}); }, 2500));
+    if (options.poll !== false) timers.push(setInterval(function () { if (!disposed && doc.visibilityState !== "hidden") { controller.refresh().catch(function () {}); if (presets && !presetContainer.hidden && !presets.controller.snapshot().busy) presets.refresh(); } }, 2500));
     return mounted;
   }
   var api = { createTransport: createTransport, createController: createController, baseFor: baseFor, mount: mount };

@@ -69,9 +69,9 @@ function checkedAsset(value) {
 }
 async function invoke(service, operation, args, source) {
   args = validateOperation(operation, args);
-  if (['createDraft', 'updateDraft', 'run', 'loadRecipe'].includes(operation)) args = { ...args, source };
+  if (['createDraft', 'updateDraft', 'run', 'loadRecipe', 'createRecipe', 'copyRecipe', 'updateRecipe', 'importRecipe', 'archiveRecipe', 'restoreRecipe'].includes(operation)) args = { ...args, source };
   if (operation === 'getDraft') return service.getDraft(args.draftId);
-  if (operation === 'getRecipe') return service.getRecipe(args.recipeId);
+  if (operation === 'getRecipe') return service.getRecipe(args.revision === undefined ? args.recipeId : args);
   if (operation === 'getJob' || operation === 'cancel') return service[operation](args.jobId);
   if (operation === 'readAsset') {
     const { asset, data } = checkedAsset(await service.readAsset(args.assetId));

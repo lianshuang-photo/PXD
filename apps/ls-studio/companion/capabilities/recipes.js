@@ -28,12 +28,12 @@ function inspectJson(value, visit, parts = [], depth = 0) {
   }
 }
 
-function normalize(bytes) {
+function normalize(bytes, { factory = true } = {}) {
   let preset, body;
   try {
     preset = JSON.parse(bytes.toString('utf8'));
     catalogCheck(preset && typeof preset === 'object' && !Array.isArray(preset), 'Recipe must be an object');
-    catalogCheck(preset._isFactory === true, 'Recipe is not a factory preset');
+    catalogCheck(preset._isFactory === factory, 'Recipe source kind is invalid');
     id(preset.id, 'recipeId');
     catalogCheck(typeof preset.title === 'string' && preset.title.length > 0 && preset.title.length <= 1000, 'Recipe title is invalid');
     catalogCheck(typeof preset.category === 'string' && preset.category.length > 0 && preset.category.length <= 100, 'Recipe category is invalid');
@@ -122,34 +122,35 @@ function createRecipeCatalog({ rootDir = path.join(__dirname, '..', 'factory_pre
 
   function get(recipeId) { return copy(lookup(recipeId).recipe); }
 
-  function compile({ recipeId, values = {}, userText = '', refs } = {}) {
-    const { recipe, bindings } = lookup(recipeId);
-    object(values, 'values');
-    invariant(typeof userText === 'string' && userText.length <= MAX_PROMPT_LENGTH, 'INVALID_INPUT', 'Recipe instruction must be text of at most 64000 characters');
-    const resolved = Object.fromEntries(recipe.parameters.map(parameter => [parameter.id, parameter.defaultValue]));
-    const seen = new Set();
-    for (const [key, value] of Object.entries(values)) {
-      const parameterId = key.startsWith(PREFIX) ? key.slice(PREFIX.length) : key;
-      invariant(Object.hasOwn(resolved, parameterId), 'INVALID_INPUT', 'Unknown recipe parameter: ' + key);
-      invariant(!seen.has(parameterId), 'INVALID_INPUT', 'Duplicate recipe parameter alias: ' + parameterId);
-      invariant(typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1, 'INVALID_INPUT', 'Recipe parameter must be a number between 0 and 1: ' + parameterId);
-      seen.add(parameterId); resolved[parameterId] = value;
-    }
-    if (refs !== undefined) validateSchema(refs, contextSchema.properties.refs, 'refs');
-    invariant(!recipe.requiresReferenceMapping || (Array.isArray(refs) && refs.length === recipe.refImages.length), 'REFERENCE_REQUIRED', 'Map every recipe reference slot to an explicit managed asset in the same order');
-
-    const body = JSON.parse(recipe.content);
-    for (const binding of bindings) {
-      let parent = body;
-      for (const key of binding.path.slice(0, -1)) parent = parent[key];
-      parent[binding.path[binding.path.length - 1]] = resolved[binding.id];
-    }
-    const prompt = JSON.stringify(body) + (userText.length ? '\n\n' + userText : '');
-    invariant(prompt.length <= MAX_PROMPT_LENGTH, 'INVALID_INPUT', 'Compiled recipe and instruction exceed 64000 characters');
-    return { prompt, recipe: { recipeId: recipe.recipeId, sourceHash: recipe.sourceHash, values: resolved }, ...(refs === undefined ? {} : { refs: clone(refs) }) };
-  }
+  function compile(input = {}) { return compileRecipe(lookup(input.recipeId), input); }
 
   return { list, get, compile };
 }
 
-module.exports = { createRecipeCatalog };
+function compileRecipe({ recipe, bindings }, { values = {}, userText = '', refs } = {}) {
+  object(values, 'values');
+  invariant(typeof userText === 'string' && userText.length <= MAX_PROMPT_LENGTH, 'INVALID_INPUT', 'Recipe instruction must be text of at most 64000 characters');
+  const resolved = Object.fromEntries(recipe.parameters.map(parameter => [parameter.id, parameter.defaultValue]));
+  const seen = new Set();
+  for (const [key, value] of Object.entries(values)) {
+    const parameterId = key.startsWith(PREFIX) ? key.slice(PREFIX.length) : key;
+    invariant(Object.hasOwn(resolved, parameterId), 'INVALID_INPUT', 'Unknown recipe parameter: ' + key);
+    invariant(!seen.has(parameterId), 'INVALID_INPUT', 'Duplicate recipe parameter alias: ' + parameterId);
+    invariant(typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1, 'INVALID_INPUT', 'Recipe parameter must be a number between 0 and 1: ' + parameterId);
+    seen.add(parameterId); resolved[parameterId] = value;
+  }
+  if (refs !== undefined) validateSchema(refs, contextSchema.properties.refs, 'refs');
+  invariant(!recipe.requiresReferenceMapping || (Array.isArray(refs) && refs.length === recipe.refImages.length), 'REFERENCE_REQUIRED', 'Map every recipe reference slot to an explicit managed asset in the same order');
+
+  const body = JSON.parse(recipe.content);
+  for (const binding of bindings) {
+    let parent = body;
+    for (const key of binding.path.slice(0, -1)) parent = parent[key];
+    parent[binding.path[binding.path.length - 1]] = resolved[binding.id];
+  }
+  const prompt = JSON.stringify(body) + (userText.length ? '\n\n' + userText : '');
+  invariant(prompt.length <= MAX_PROMPT_LENGTH, 'INVALID_INPUT', 'Compiled recipe and instruction exceed 64000 characters');
+  return { prompt, recipe: { recipeId: recipe.recipeId, sourceHash: recipe.sourceHash, values: resolved }, ...(refs === undefined ? {} : { refs: clone(refs) }) };
+}
+
+module.exports = { createRecipeCatalog, normalizeRecipe: normalize, compileRecipe };

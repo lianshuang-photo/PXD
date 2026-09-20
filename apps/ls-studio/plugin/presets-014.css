@@ -1,0 +1,7 @@
+.studio-presets { margin-top: 12px; padding: 12px 0; border-top: 1px solid #3b3e45; }
+.studio-presets h3 { margin: 0 0 10px; font-size: inherit; }
+.studio-presets .preset-editor { margin-top: 12px; }
+.studio-presets textarea { min-height: 140px; }
+.studio-presets .studio-list { max-height: 200px; overflow-y: auto; }
+.studio-presets .studio-field { margin-bottom: 8px; }
+.studio-presets .studio-note { white-space: normal; }

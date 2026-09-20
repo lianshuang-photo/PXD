@@ -89,13 +89,13 @@ function createCapabilityService({ assets, jobs, provider, bridge, recipes }) {
     return bridge.request(tool, args);
   }
   async function listRecipes(input = {}) { await ready; invariant(recipes, 'RECIPE_UNAVAILABLE', 'Recipe catalog is not available', 503); return recipes.list(input); }
-  async function getRecipe(recipeId) { await ready; invariant(recipes, 'RECIPE_UNAVAILABLE', 'Recipe catalog is not available', 503); return recipes.get(recipeId); }
+  async function getRecipe(input) { const recipeId = typeof input === 'string' ? input : input.recipeId, revision = typeof input === 'string' ? undefined : input.revision; await ready; invariant(recipes, 'RECIPE_UNAVAILABLE', 'Recipe catalog is not available', 503); return recipes.get(recipeId, revision); }
   async function loadRecipe(input) {
     await ready; invariant(recipes, 'RECIPE_UNAVAILABLE', 'Recipe catalog is not available', 503);
     const draft = await jobs.getDraft(input.draftId);
     invariant(draft.capabilityId === 'image.edit', 'INVALID_INPUT', 'Recipes require an image editing draft');
     invariant(!recipes.get(input.recipeId).requiresReferenceMapping || Array.isArray(input.refs), 'REFERENCE_REQUIRED', 'Map each recipe reference explicitly to a managed asset');
-    const compiled = recipes.compile({ recipeId: input.recipeId, values: input.values, userText: input.userText, refs: input.refs === undefined ? draft.context && draft.context.refs || [] : input.refs });
+    const compiled = recipes.compile({ recipeId: input.recipeId, expectedSourceHash: input.expectedSourceHash, values: input.values, userText: input.userText, refs: input.refs === undefined ? draft.context && draft.context.refs || [] : input.refs });
     const patch = { draftId: input.draftId, expectedRevision: input.expectedRevision, source: input.source || 'ui', params: { prompt: compiled.prompt, recipe: compiled.recipe } };
     if (compiled.refs && compiled.refs.length) {
       invariant(draft.context, 'CONTEXT_REQUIRED', 'Capture the source before assigning recipe references');
@@ -103,6 +103,10 @@ function createCapabilityService({ assets, jobs, provider, bridge, recipes }) {
       patch.context = { ...draft.context, refs: compiled.refs };
     } else if (input.refs && draft.context) patch.context = { ...draft.context, refs: [] };
     return jobs.updateDraft(patch);
+  }
+  async function manageRecipe(method, input) {
+    await ready; invariant(recipes && typeof recipes[method] === 'function', 'RECIPE_MANAGEMENT_UNAVAILABLE', 'User preset management is unavailable', 503);
+    return recipes[method](input);
   }
   async function finishFailure(jobId, error) {
     const job = await jobs.getJob(jobId);
@@ -232,7 +236,10 @@ function createCapabilityService({ assets, jobs, provider, bridge, recipes }) {
   }
   async function delegated(method, ...args) { await ready; return jobs[method](...args); }
   async function close() { closing = true; for (const controller of controllers.values()) controller.abort(); await Promise.allSettled([...executions.values()]); }
-  return { discover, capture, importAsset, observe, listRecipes, getRecipe, loadRecipe, run, cancel, apply, rollback, ready, close, readAsset: async assetId => { await ready; return assets.read(assetId); },
+  return { discover, capture, importAsset, observe, listRecipes, getRecipe, loadRecipe,
+    createRecipe: input => manageRecipe('create', input), copyRecipe: input => manageRecipe('copy', input), updateRecipe: input => manageRecipe('update', input),
+    importRecipe: input => manageRecipe('import', input), exportRecipe: input => manageRecipe('export', input), listRecipeVersions: input => manageRecipe('versions', input),
+    archiveRecipe: input => manageRecipe('archive', input), restoreRecipe: input => manageRecipe('restore', input), run, cancel, apply, rollback, ready, close, readAsset: async assetId => { await ready; return assets.read(assetId); },
     createDraft: input => delegated('createDraft', input), getDraft: draftId => delegated('getDraft', draftId), listDrafts: () => delegated('listDrafts'), updateDraft: input => delegated('updateDraft', input), getJob: jobId => delegated('getJob', jobId), listJobs: () => delegated('listJobs'),
     waitForIdle: async () => { await ready; await Promise.allSettled([...executions.values()]); },
   };
