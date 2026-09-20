@@ -3,30 +3,11 @@
 const { timingSafeEqual } = require('node:crypto');
 const { DomainError, invariant, object, publicError } = require('../domain/contracts');
 const { validateOperation } = require('../photoshop-tools');
+const { checkClient, checkPreflight } = require('./local-client');
 
 const MAX_BODY_BYTES = 48 * 1024 * 1024;
 const MAX_ARGUMENT_BYTES = 512 * 1024;
 const MAX_ASSET_BYTES = 64 * 1024 * 1024;
-function localHost(host) { return ['localhost', '127.0.0.1', '[::1]'].includes(host); }
-function localAddress(address) { return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'; }
-function checkClient(req) {
-  let host;
-  try { host = new URL('http://' + req.headers.host); } catch (_) {}
-  invariant(host && !host.username && !host.password && host.pathname === '/' && localHost(host.hostname), 'LOCAL_CLIENT_REQUIRED', 'Studio accepts only a loopback Host', 403);
-  invariant(req.socket && localAddress(req.socket.remoteAddress), 'LOCAL_CLIENT_REQUIRED', 'Studio accepts only local clients', 403);
-  const origin = req.headers.origin;
-  if (origin === undefined) return;
-  invariant(typeof origin === 'string', 'ORIGIN_REJECTED', 'Origin is invalid', 403);
-  if (origin === 'null' || origin === 'file://') {
-    // Native UXP has no browser fetch metadata. An opaque sandboxed web frame
-    // must not use the native exception to gain access to local document state.
-    invariant(!req.headers['sec-fetch-site'] || ['same-origin', 'none'].includes(req.headers['sec-fetch-site']), 'ORIGIN_REJECTED', 'Opaque browser frames cannot access Studio', 403);
-    return;
-  }
-  let url;
-  try { url = new URL(origin); } catch (_) {}
-  invariant(url && !url.username && !url.password && !url.search && !url.hash && (url.protocol === 'uxp:' || (['http:', 'https:'].includes(url.protocol) && localHost(url.hostname) && url.pathname === '/')), 'ORIGIN_REJECTED', 'Only local Studio pages or native UXP may access this service', 403);
-}
 function tokenMatches(actual, expected) {
   if (typeof actual !== 'string' || typeof expected !== 'string' || expected.length === 0) return false;
   const a = Buffer.from(actual), b = Buffer.from(expected);
@@ -86,8 +67,6 @@ function createStudioHttp({ service, toolToken } = {}) {
     if (url.pathname !== '/studio' && !url.pathname.startsWith('/studio/')) return false;
     const headers = {
       'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Vary': 'Origin',
-      'Access-Control-Allow-Headers': 'Content-Type, X-PXDLS-Agent, X-PXDLS-Tool',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     };
     const json = (status, value) => {
       if (res.destroyed || res.writableEnded) return;
@@ -98,12 +77,13 @@ function createStudioHttp({ service, toolToken } = {}) {
     };
     try {
       checkClient(req);
-      if (req.headers.origin) headers['Access-Control-Allow-Origin'] = req.headers.origin;
       const assetMatch = /^\/studio\/assets\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})$/.exec(url.pathname);
       const isCall = url.pathname === '/studio/call', isMcp = url.pathname === '/studio/mcp';
       invariant(assetMatch || isCall || isMcp, 'NOT_FOUND', 'Studio endpoint was not found', 404);
+      if (req.method === 'OPTIONS') checkPreflight(req, ['content-type', 'x-pxdls-agent', 'x-pxdls-tool']);
+      Object.assign(headers, { 'Access-Control-Allow-Headers': 'Content-Type, X-PXDLS-Agent, X-PXDLS-Tool', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' });
+      if (req.headers.origin) headers['Access-Control-Allow-Origin'] = req.headers.origin;
       if (req.method === 'OPTIONS') {
-        invariant(['GET', 'POST'].includes(req.headers['access-control-request-method']) && (req.headers['access-control-request-headers'] || '').split(',').every(value => !value.trim() || ['content-type', 'x-pxdls-agent', 'x-pxdls-tool'].includes(value.trim().toLowerCase())), 'PREFLIGHT_REJECTED', 'Unsupported preflight request', 403);
         res.writeHead(204, headers); res.end(); return true;
       }
       invariant(req.headers['x-pxdls-agent'] === '1', 'CLIENT_MARKER_REQUIRED', 'Studio client marker is required', 403);
