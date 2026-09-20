@@ -1,6 +1,6 @@
 # 文档权威与同步
 
-更新：2026-09-20。
+更新：2026-09-21。
 
 ## 主来源
 
@@ -8,6 +8,7 @@ PXD 仓库的 `docs/v2/` 是本轮规划主来源。目前在 `codex/pxd-v2-plan
 
 | 内容 | 主文档 | 修改要求 |
 |---|---|---|
+| 前后端开发、联调与 PR 质量规范 | [ENGINEERING-STANDARDS.md](../../ENGINEERING-STANDARDS.md) | AGENTS.md 强制读取；变更同步 PR 模板与验收记录模板，避免个人 Skill 形成副本 |
 | 仓库／目录与迁移 | WORKSPACE-DECISION.md | 记录实际已做与计划动作，避免假装已迁移 |
 | 产品范围和用户行为 | PRD-LS-Studio.md | 能力台账同步；不以技术阶段删范围 |
 | B01–B36 的状态 | CAPABILITY-MATRIX.md | 状态改变附 PR／commit 和验收证据 |
