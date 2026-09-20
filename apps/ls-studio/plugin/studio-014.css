@@ -40,3 +40,11 @@
 .studio-footer .studio-run { margin-left: auto; min-width: var(--s80, 80px); background: var(--red); color: #fff; border-color: var(--red); }
 .studio-error { color: var(--red); max-height: var(--s80, 80px); overflow: auto; }
 .studio-message { color: var(--ok); }
+.studio-comparison { margin-top: var(--s8, 8px); padding-top: var(--s8, 8px); border-top: var(--s1, 1px) solid var(--line); }
+.studio-comparison > .studio-row { margin-top: var(--s6, 6px); }
+.studio-comparison .studio-button[aria-pressed="true"] { color: var(--text); border-color: var(--red); }
+.studio-compare-images { display: flex; align-items: flex-start; width: 100%; }
+.studio-compare-side { flex: 1; min-width: 0; padding: var(--s3, 3px); }
+.studio-compare-viewport { width: 100%; height: var(--s240, 240px); overflow: auto; background: var(--surf); border: var(--s1, 1px) solid var(--line); }
+.studio-compare-image { display: block; height: auto; object-fit: contain; }
+.studio-workspace .studio-compare-select { width: auto; flex: 1; min-width: var(--s88, 88px); }

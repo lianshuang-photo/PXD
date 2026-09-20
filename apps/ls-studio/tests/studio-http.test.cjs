@@ -38,7 +38,7 @@ async function realService(t) {
     if (name === 'studio_rollback') return { ok: true, receipt: { ...args.receipt, rollbackStatus: 'rolled-back' } };
     return { ok: true, receipt: { jobId: args.jobId, mutationId: args.mutationId, documentRef: args.documentRef, createdLayerIds: [2], modifiedLayers: [], rollbackStatus: 'available' } };
   } };
-  const provider = { describe: () => ({ id: 'fixture', configured: true, mask: 'advisory', limits: { inputImages: 3 } }), generate: async input => { calls.push({ name: 'generate', args: input }); return { images: [{ data: PNG, mimeType: 'image/png' }], provider: { id: 'fixture' } }; } };
+  const provider = { describe: () => ({ id: 'fixture', model: 'fixture-model', configured: true, mask: 'advisory', limits: { inputImages: 3, inputBytes: 14 * 1024 * 1024 } }), generate: async input => { calls.push({ name: 'generate', args: input }); return { images: [{ data: PNG, mimeType: 'image/png' }], provider: { id: 'fixture', model: 'fixture-model' } }; } };
   const service = createCapabilityService({ assets, jobs, provider, bridge });
   t.after(async () => { await service.close(); fs.rmSync(rootDir, { recursive: true, force: true }); });
   return { service, assets, jobs, calls };
@@ -68,6 +68,14 @@ test('professional HTTP and MCP share revisions, immutable jobs, result pixels a
   assert.ok(!inspected.content[0].text.includes(PNG.toString('base64')));
   const raw = await fetch(http.base + '/studio/assets/' + job.results[0].assetId, { headers: { 'x-pxdls-agent': '1' } });
   assert.equal(raw.status, 200); assert.equal(raw.headers.get('content-type'), 'image/png'); assert.deepEqual(Buffer.from(await raw.arrayBuffer()), PNG);
+  await http.ui('updateDraft', { draftId: draft.draftId, expectedRevision: 2, params: { prompt: 'Later current draft' } });
+  const revision = (await http.ui('deriveDraft', { jobId: job.jobId, mode: 'original', source: 'system' })).body.value;
+  assert.equal(revision.source, 'ui'); assert.notEqual(revision.draftId, draft.draftId); assert.equal(revision.params.prompt, 'agent edit');
+  const candidateDraft = (await tool('studio_derive_draft', { jobId: job.jobId, mode: 'candidate-reference', resultId: job.results[0].resultId, source: 'ui' })).structuredContent;
+  assert.equal(candidateDraft.source, 'agent'); assert.deepEqual(candidateDraft.context.refs, [{ assetId: job.results[0].assetId, role: 'reference' }]);
+  assert.equal(candidateDraft.params.model, 'fixture-model'); assert.equal(revision.params.model, 'fixture-model');
+  assert.equal(candidateDraft.context.baseAssetId, captured.baseAssetId); assert.equal(calls.filter(call => call.name === 'generate').length, 1);
+  assert.deepEqual((await http.ui('getJob', { jobId: job.jobId })).body.value, job);
   const placement = { jobId: job.jobId, resultId: job.results[0].resultId, requestId: 'place-once' };
   assert.equal((await tool('studio_apply_result', placement)).structuredContent.placement.status, 'applied');
   assert.equal((await http.ui('apply', placement)).body.value.placement.status, 'applied');

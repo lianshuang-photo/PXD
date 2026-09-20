@@ -61,7 +61,7 @@ test('stdio MCP exposes tools and returns actual image content, including useful
   const waiting=new Map();let text='',id=0;child.stdout.on('data',c=>{text+=c;let end;while((end=text.indexOf('\n'))>=0){const m=JSON.parse(text.slice(0,end));text=text.slice(end+1);waiting.get(m.id)(m.result);}});
   function rpc(method,params={}){return new Promise(resolve=>{waiting.set(++id,resolve);child.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');});}
   assert.equal((await rpc('initialize',{protocolVersion:'2024-11-05'})).serverInfo.name,'ls-photoshop');
-  assert.equal((await rpc('tools/list')).tools.length,24);
+  assert.equal((await rpc('tools/list')).tools.length,25);
   const image=await rpc('tools/call',{name:'photoshop_render_preview',arguments:{documentId:1}});
   assert.deepEqual(image.content[1],{type:'image',mimeType:'image/png',data:'aW1hZ2U='});
   assert.equal((await rpc('tools/call',{name:'photoshop_get_document',arguments:{}})).isError,true);

@@ -116,6 +116,19 @@
         setDraft(draft, preserve && localVersion !== version); state.notice = "已建立共享草稿"; return clone(draft);
       });
     }
+    async function deriveDraft(jobId, mode, resultId) {
+      return write(async function () {
+        noDirty();
+        var job = state.jobs.find(function (item) { return item.jobId === jobId; });
+        requireValue(job && job.snapshot.capabilityId === "image.edit", "JOB_REQUIRED", "请选择历史图像任务");
+        var version = localVersion, input = { jobId: jobId, mode: mode, source: "ui" };
+        if (resultId) input.resultId = resultId;
+        var draft = await serviceCall("deriveDraft", input); ensureActive();
+        if (version !== localVersion) { state.drafts.unshift(clone(draft)); state.notice = "新草稿已建立；当前未保存的修改仍保留，可从草稿列表打开新版本。"; }
+        else { setDraft(draft, false); state.notice = mode === "candidate-reference" ? "已另建草稿，候选作为参考图；原图和选区保持原任务。请修改指令后再生成。" : "已从任务原输入另建草稿，参数与回贴设置已保留；尚未生成。"; }
+        return clone(draft);
+      });
+    }
     function editParams(patch) { active(); state.form.params = Object.assign({}, state.form.params, clone(patch)); state.dirty = true; localVersion++; state.error = null; emit(); }
     function editContext(patch) { active(); requireValue(state.form.context, "CONTEXT_REQUIRED", "请先捕获明确的选区或整图范围"); state.form.context = Object.assign({}, state.form.context, clone(patch)); state.dirty = true; localVersion++; state.error = null; emit(); }
     async function saveInternal() {
@@ -265,7 +278,7 @@
     }
     return {
       snapshot: snapshot, subscribe: function (listener) { listeners.push(listener); listener(snapshot()); return function () { listeners = listeners.filter(function (v) { return v !== listener; }); }; },
-      refresh: refresh, createDraft: function (capabilityId) { return createDraft(capabilityId, false); }, saveAsNew: function () { return createDraft(active().capabilityId, true); },
+      refresh: refresh, deriveDraft: deriveDraft, createDraft: function (capabilityId) { return createDraft(capabilityId, false); }, saveAsNew: function () { return createDraft(active().capabilityId, true); },
       loadDraft: function (draftId) { return loadDraft(draftId, false); }, reloadDraft: function () { return loadDraft(active().draftId, true); },
       editParams: editParams, editContext: editContext, save: function () { return write(saveInternal); }, capture: capture, importReference: importReference,
       refreshLayers: function () { return write(observeLayersInternal); }, selectLayer: selectLayer,
@@ -369,6 +382,10 @@
     var jobActions = node("div", "studio-row", null, jobsSection);
     button(jobActions, "studioCancel", "取消任务", function () { return controller.cancel(controller.snapshot().selectedJobId); });
     button(jobActions, "studioRollback", "撤销这次修改", function () { return controller.rollback(controller.snapshot().selectedJobId); });
+    var resultsApi = options.resultsApi || win.PXD_STUDIO_RESULTS || (typeof require === "function" && require("./studio-results-014.js"));
+    requireValue(resultsApi, "UI_UNAVAILABLE", "候选对比模块尚未加载");
+    var comparison = resultsApi.mount({ document: doc, ui: ui, parent: jobsSection, onError: showError, readAsset: function (assetId) { return transport.readAsset(assetId); }, onDerive: function (jobId, mode, resultId) { return controller.deriveDraft(jobId, mode, resultId); } });
+    Object.keys(comparison.nodes).forEach(function (key) { nodes[key] = comparison.nodes[key]; });
     node("div", "studio-results", null, jobsSection, "studioResults");
     var footer = node("div", "composer studio-footer", null, workspace);
     node("div", "studio-message", "", footer, "studioNotice").setAttribute("role", "status");
@@ -482,12 +499,14 @@
         state.jobs.forEach(function (job) { button(container, "job_" + job.jobId, (job.snapshot && job.snapshot.capabilityId === "ps.layer.update" ? "图层修改" : "图像编辑") + " · " + (labels[job.status] || job.status) + " · " + job.jobId.slice(0, 8), function () { controller.selectJob(job.jobId); }, "studio-list-item" + (job.jobId === state.selectedJobId ? " is-on" : "")); });
       });
       var job = state.jobs.find(function (j) { return j.jobId === state.selectedJobId; }), placement = job && job.placement || {};
+      comparison.render(state);
       nodes.studioJobDetail.textContent = job ? (labels[job.status] || job.status) + " · " + (labels[placement.status] || placement.status || "尚未回贴") + " · 草稿 r" + job.snapshot.revision + (job.error ? "\n" + job.error.message : "") + (placement.error ? "\n" + placement.error.message : "") : "运行后会在这里保留任务快照与结果。";
       nodes.studioCancel.hidden = !job || ["queued", "running", "recovery-required"].indexOf(job.status) < 0; nodes.studioRollback.hidden = placement.status !== "applied";
       list("studioResults", [job, busy, host], function (container) {
         (job && job.results || []).forEach(function (result, index) {
           var candidate = node("div", "studio-candidate", null, container), img = node("img", "studio-result-image", null, candidate); img.alt = "候选图 " + (index + 1); preview(img, result.assetId);
           node("div", "studio-note", "候选 " + (index + 1), candidate);
+          button(candidate, "compare_" + result.resultId, "与原输入对比", function () { comparison.selectResult(job.jobId, result.resultId); });
           var paste = button(candidate, "apply_" + result.resultId, placement.status === "applied" && placement.receipt && placement.receipt.resultId === result.resultId ? "已回贴" : "回贴此图", function () { return controller.apply(job.jobId, result.resultId); });
           ui.setDisabled(paste, busy || !host || job.status !== "succeeded" || ["not-requested", "failed"].indexOf(placement.status || "not-requested") < 0);
         });
@@ -503,13 +522,14 @@
     }
     function connect() {
       if (controller) controller.dispose(); if (unsubscribe) unsubscribe(); renderedLists = {}; assets.clear();
+      comparison.reset();
       var configured = win.PXD_NAV ? win.PXD_NAV.baseUrl() : doc.getElementById("baseUrl") && doc.getElementById("baseUrl").value;
       transport = options.transport || createTransport({ base: configured, location: win.location });
       controller = createController({ transport: transport, storage: options.storage || win.localStorage });
       unsubscribe = controller.subscribe(render); mounted.controller = controller; mounted.transport = transport;
       controller.refresh().catch(function () {});
     }
-    var mounted = { controller: null, transport: null, nodes: nodes, toAgent: toAgent, dispose: function () { disposed = true; if (controller) controller.dispose(); if (unsubscribe) unsubscribe(); if (proComposer) proComposer.close(); timers.forEach(clearInterval); var baseInput = doc.getElementById("baseUrl"); if (baseInput) baseInput.removeEventListener("change", connect); if (workspace.parentElement) workspace.parentElement.removeChild(workspace); } };
+    var mounted = { controller: null, transport: null, nodes: nodes, toAgent: toAgent, dispose: function () { disposed = true; comparison.dispose(); if (controller) controller.dispose(); if (unsubscribe) unsubscribe(); if (proComposer) proComposer.close(); timers.forEach(clearInterval); var baseInput = doc.getElementById("baseUrl"); if (baseInput) baseInput.removeEventListener("change", connect); if (workspace.parentElement) workspace.parentElement.removeChild(workspace); } };
     connect();
     if (win.PXD_COMPOSER) proComposer = win.PXD_COMPOSER.attach({ field: prompt, frame: prompt.parentElement, document: doc, native: !!(win.PXD_CONTEXT && win.PXD_CONTEXT.isPhotoshop), enterSends: function () { try { return win.localStorage.getItem("pxdls.enter-send") !== "false"; } catch (_) { return true; } }, send: handle(function () { if (!ui.isDisabled(nodes.studioRun)) return controller.run(); }), saveDraft: function () { if (controller.snapshot().draft && controller.snapshot().form.params.prompt !== prompt.value) controller.editParams({ prompt: prompt.value }); } });
     var baseInput = doc.getElementById("baseUrl"); if (baseInput) baseInput.addEventListener("change", connect);

@@ -15,6 +15,7 @@ function fixture(capabilityId = 'image.edit') {
     if (operation === 'listJobs') return copy(f.jobs);
     if (operation === 'getDraft') return copy(f.drafts.find(d => d.draftId === args.draftId));
     if (operation === 'createDraft') { const draft = { ...copy(args), draftId: 'draft-' + (f.drafts.length + 1), revision: 1 }; f.drafts.push(draft); return copy(draft); }
+    if (operation === 'deriveDraft') { const job = f.jobs.find(j => j.jobId === args.jobId), draft = { ...copy(job.snapshot), draftId: 'draft-' + (f.drafts.length + 1), revision: 1 }; if (args.mode === 'candidate-reference') draft.context.refs.push({ assetId: job.results.find(r => r.resultId === args.resultId).assetId, role: 'reference' }); f.drafts.push(draft); return copy(draft); }
     if (operation === 'updateDraft') {
       const draft = f.drafts.find(d => d.draftId === args.draftId);
       if (args.expectedRevision !== draft.revision) throw Object.assign(Error('Conflicting revision'), { code: 'REVISION_CONFLICT', status: 409, details: { current: copy(draft) } });
@@ -43,6 +44,35 @@ function fixture(capabilityId = 'image.edit') {
   f.controller = f.newController(); return f;
 }
 const code = expected => e => { assert.equal(e.code, expected); return true; };
+
+test('revision draft dispatch uses the chosen job and never saves or runs the current draft', async () => {
+  const f = fixture(); f.jobs.push({ jobId: 'historical-job', snapshot: { ...copy(f.drafts[0]), params: { prompt: 'Historical instruction' } }, results: [{ resultId: 'result-1', assetId: 'candidate-asset' }], placement: { status: 'not-requested' } });
+  await f.controller.refresh();
+  f.drafts[0].params.prompt = 'Current instruction'; f.drafts[0].revision++; await f.controller.refresh();
+  const revised = await f.controller.deriveDraft('historical-job', 'candidate-reference', 'result-1');
+  assert.equal(revised.params.prompt, 'Historical instruction'); assert.notEqual(revised.draftId, 'draft-1');
+  assert.equal(f.controller.snapshot().draft.draftId, revised.draftId); assert.equal(f.controller.snapshot().dirty, false);
+  assert.deepEqual(f.calls.find(c => c.operation === 'deriveDraft').args, { jobId: 'historical-job', mode: 'candidate-reference', resultId: 'result-1', source: 'ui' });
+  assert.equal(f.calls.some(c => ['updateDraft', 'run', 'apply'].includes(c.operation)), false);
+});
+test('unsaved edits prevent switching to a derived draft, including edits made while creation is pending', async () => {
+  const f = fixture(); f.jobs.push({ jobId: 'historical-job', snapshot: copy(f.drafts[0]), results: [] }); await f.controller.refresh();
+  f.controller.editParams({ prompt: 'Keep local' });
+  await assert.rejects(f.controller.deriveDraft('historical-job', 'original'), code('UNSAVED_CHANGES'));
+  assert.equal(f.calls.some(c => c.operation === 'deriveDraft'), false); await f.controller.reloadDraft();
+  let release; f.intercept = async operation => { if (operation === 'deriveDraft') await new Promise(resolve => { release = resolve; }); };
+  const pending = f.controller.deriveDraft('historical-job', 'original'); await new Promise(resolve => setImmediate(resolve));
+  f.controller.editParams({ prompt: 'Typed during request' }); release(); const derived = await pending;
+  assert.equal(f.controller.snapshot().draft.draftId, 'draft-1'); assert.equal(f.controller.snapshot().form.params.prompt, 'Typed during request');
+  assert.ok(f.controller.snapshot().drafts.some(d => d.draftId === derived.draftId)); assert.equal(f.calls.some(c => c.operation === 'run'), false);
+});
+test('a late derived draft cannot rebind a disposed workspace connection', async () => {
+  const f = fixture(); f.jobs.push({ jobId: 'historical-job', snapshot: copy(f.drafts[0]), results: [] }); await f.controller.refresh();
+  let release; f.intercept = async operation => { if (operation === 'deriveDraft') await new Promise(resolve => { release = resolve; }); };
+  const pending = f.controller.deriveDraft('historical-job', 'original'); await new Promise(resolve => setImmediate(resolve));
+  const rejected = assert.rejects(pending, code('DISPOSED')); f.controller.dispose(); release(); await rejected;
+  assert.equal(f.controller.snapshot().draft.draftId, 'draft-1'); assert.equal(f.calls.some(c => ['run', 'apply'].includes(c.operation)), false);
+});
 
 test('browser /ui/ uses the serving origin; transport sends shared operations and protected binary headers', async () => {
   const calls = [], location = { protocol: 'http:', origin: 'http://localhost:17881', pathname: '/ui/' };
