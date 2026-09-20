@@ -387,7 +387,7 @@ textarea.msg, input.msg, #prompt {
   color: var(--muted);
   cursor: pointer;
 }
-input[type=search], #compile, input[type=text], select, textarea#proTa {
+input[type=search], #compile, input[type=text], input:not([type]), input[type=number], input[type=password], select, textarea#proTa {
   width: 100%;
   background: transparent;
   border: var(--s1, 1px) solid var(--line);
@@ -654,7 +654,7 @@ header.chrome { display: block; width: 100%; height: auto; }
 
 /* UXP edit fields use the host's system font. Use the same system-font choice
  * for the web preview; do not recreate fields to try to force a custom face. */
-#app input[type=text], #app input[type=search], #app textarea, #app select {
+#app input[type=text], #app input:not([type]), #app input[type=search], #app input[type=number], #app input[type=password], #app textarea, #app select {
   font-family: -apple-system, "Segoe UI", Arial, "PingFang SC", "Microsoft YaHei";
   font-size: var(--s12, 12px);
   font-weight: 400;
@@ -665,11 +665,11 @@ header.chrome { display: block; width: 100%; height: auto; }
   -webkit-appearance: none;
   appearance: none;
 }
-input[type=text], input[type=search], select { height: var(--s28, 28px); }
+input[type=text], input:not([type]), input[type=search], input[type=number], input[type=password], select { height: var(--s32, 32px); }
 textarea.msg, #prompt, #proTa { display: block; flex: 1; min-width: 0; width: 0; height: var(--s56, 56px); min-height: var(--s56, 56px); max-height: var(--s56, 56px); resize: none; }
 #compile { flex: none; width: 100%; height: var(--s72, 72px); }
 /* Transparent edit fields expose the host's dark native surface in UXP. */
-textarea, #prompt, #proTa, input[type=text], input[type=search], select {
+textarea, #prompt, #proTa, input[type=text], input:not([type]), input[type=search], input[type=number], input[type=password], select {
   background-color: var(--bg);
   color: var(--text);
 }

@@ -17,15 +17,15 @@
 .studio-list { max-height: var(--s120, 120px); overflow: auto; margin: var(--s5, 5px) 0; }
 .studio-list-item { display: flex; justify-content: flex-start; width: 100%; height: auto; min-height: var(--s27, 27px); padding: var(--s5, 5px) var(--s6, 6px); border-bottom: var(--s1, 1px) solid var(--line); background: transparent; color: var(--muted); text-align: left; white-space: normal; word-break: break-word; font-family: Arial, "PingFang SC", "Microsoft YaHei"; font-size: var(--s11, 11px); line-height: var(--s17, 17px); }
 .studio-list-item.is-on { color: var(--text); border-left: var(--s2, 2px) solid var(--red); background: var(--surf); }
-.studio-field { display: flex; flex-direction: column; min-width: 0; margin-bottom: var(--s8, 8px); }
-.studio-field-label { margin-bottom: var(--s4, 4px); color: var(--muted); font-family: Arial, "PingFang SC", "Microsoft YaHei"; font-size: var(--s10, 10px); line-height: var(--s14, 14px); }
+.studio-field { display: flex; flex-direction: column; flex: none; min-width: 0; margin-bottom: var(--s8, 8px); }
+.studio-field-label { display: block; flex: none; align-self: stretch; text-align: left; margin-bottom: var(--s4, 4px); color: var(--muted); font-family: Arial, "PingFang SC", "Microsoft YaHei"; font-size: var(--s10, 10px); line-height: var(--s14, 14px); }
 .studio-workspace .studio-input, .studio-provider-settings .studio-input { display: block; width: 100%; min-width: 0; background: var(--bg); color: var(--text); padding: var(--s7, 7px) var(--s8, 8px); border: var(--s1, 1px) solid var(--line); font-family: Arial, "PingFang SC", "Microsoft YaHei"; font-size: var(--s12, 12px); line-height: var(--s18, 18px); }
 .studio-input:focus { border-color: var(--red); }
 .studio-field.is-focused .studio-input { border-color: var(--red); }
 .studio-workspace textarea.studio-input { height: var(--s88, 88px); min-height: var(--s55, 55px); }
 .studio-workspace #studioPreserve { height: var(--s55, 55px); }
 .studio-workspace #studioRecipeUserText { height: var(--s55, 55px); }
-.studio-options > .studio-field { flex: 1; min-width: var(--s96, 96px); }
+.studio-options > .studio-field { flex: 1 1 var(--s220, 220px); min-width: 0; }
 .studio-source { display: flex; align-items: center; margin-top: var(--s4, 4px); }
 .studio-source-image { width: var(--s56, 56px); height: var(--s56, 56px); object-fit: contain; flex: none; margin-right: var(--s8, 8px); background: var(--surf); }
 .studio-refs, .studio-results { display: flex; flex-wrap: wrap; margin-top: var(--s6, 6px); }
@@ -40,5 +40,10 @@
 .studio-footer .studio-run { margin-left: auto; min-width: var(--s80, 80px); background: var(--red); color: #fff; border-color: var(--red); }
 .studio-error { color: var(--red); max-height: var(--s80, 80px); overflow: auto; }
 .studio-message { color: var(--ok); }
-.studio-provider-settings .studio-row { margin-top: var(--s8, 8px); }
+/* The settings pane is a vertical flex scroller. The mount wrapper must own its
+ * full content height; otherwise its children paint over the next section. */
+#studioProviderSettingsPanel { flex: none; min-width: 0; }
+.studio-provider-settings { display: flex; flex-direction: column; min-width: 0; }
+.studio-provider-settings > .studio-note { flex: none; margin: 0 0 var(--s8, 8px); }
+.studio-provider-settings .studio-row { flex: none; margin-top: var(--s8, 8px); }
 .studio-provider-settings .studio-input:disabled { color: var(--muted); }
