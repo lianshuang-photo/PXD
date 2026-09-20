@@ -51,12 +51,26 @@ function fixture(options = {}) {
         for (const command of commands) {
           f.commands.push(structuredClone(command)); if (f.onCommand) await f.onCommand(command);
           if (f.failCommand && f.failCommand(command)) { responses.push({ _obj: 'error', result: -25922, message: 'fixture command failure' }); continue; }
-          const targetId = [...(command._target || []), ...(command.null instanceof Array ? command.null : [])].find(t => t._ref === 'layer')?._id;
+          // The installed Adobe SDK emits a layer-only _target for show/hide.
+          // Do not accept null aliases or silently fall back to the selected layer.
+          if (command._obj === 'show' || command._obj === 'hide') {
+            assert.equal(Object.hasOwn(command, 'null'), false, 'Visibility commands must not use null');
+            assert.ok(Array.isArray(command._target) && command._target.length === 1, 'Visibility requires one explicit layer target');
+            const target = command._target[0];
+            assert.ok(target && Number.isInteger(target._id) && target._id > 0, 'Visibility requires a layer ID');
+            assert.deepEqual(command._target, [{ _ref: 'layer', _id: target._id }], 'Visibility only accepts a layer reference');
+          }
+          const targetId = (command._target || []).find(t => t._ref === 'layer')?._id;
           const layer = targetId ? doc.layers.find(l => l.id === targetId) : doc.activeLayers[0];
           if (command._obj === 'set') {
             if (command.to.name != null) layer.name = command.to.name;
-            if (command.to.opacity != null && !f.ignoreOpacity && !(f.singlePropertyPerSet && command.to.name != null)) layer.opacity = command.to.opacity._value;
-          } else if (command._obj === 'show' || command._obj === 'hide') layer.visible = command._obj === 'show';
+            if (command.to.opacity != null && !f.ignoreOpacity && !(f.singlePropertyPerSet && command.to.name != null)) {
+              const requested = command.to.opacity._value;
+              layer.opacity = f.quantizeOpacity ? Math.round(requested * 255 / 100) * 100 / 255 : requested;
+            }
+          } else if (command._obj === 'show' || command._obj === 'hide') {
+            assert.ok(layer, 'Visibility target must exist'); layer.visible = command._obj === 'show';
+          }
           else if (command._obj === 'delete') { doc.layers = doc.layers.filter(l => l.id !== targetId); doc.activeLayers = [doc.layers[0]].filter(Boolean); }
           else if (command._obj === 'placeEvent') {
             const file = f.files.find(file => file.token === command.null._path), info = pixels.inspectImage(file.bytes, file.name.endsWith('.png') ? 'image/png' : 'image/jpeg');
@@ -161,6 +175,92 @@ test('native property edit has a receipt and rollback restores existing layer wi
   const count = f.commands.length;
   assert.deepEqual(await f.execute('studio_rollback', { receipt: changed.receipt }), rolled);
   assert.equal((await f.execute('studio_edit_layer', request)).receipt.rollbackStatus, 'rolled-back'); assert.equal(f.commands.length, count);
+});
+test('visibility fixture rejects missing, aliased, composite and invalid targets without changing a layer', async () => {
+  const layer = { _ref: 'layer', _id: 2 }, document = { _ref: 'document', _id: 1 };
+  for (const operation of ['show', 'hide']) {
+    for (const fields of [{}, { null: [layer] }, { _target: [layer], null: [layer] }, { _target: [] }, { _target: layer }, { _target: [layer, document] }, { _target: [document] }, { _target: [{ _ref: 'layer' }] }, { _target: [{ _ref: 'layer', _id: 999 }] }]) {
+      const f = fixture(), before = structuredClone(f.doc.layers);
+      await assert.rejects(f.ps.action.batchPlay([{ _obj: operation, ...fields }]), /visibility/i);
+      assert.deepEqual(f.doc.layers, before);
+    }
+  }
+});
+test('direct and combined visibility edits target an unselected layer and rollback either initial visibility', async () => {
+  for (const initialVisible of [true, false]) {
+    for (const combined of [false, true]) {
+      const f = fixture(); f.layer().visible = initialVisible;
+      const selected = { id: 3, name: 'Selected layer', visible: !initialVisible, opacity: 65, kind: 'pixel' };
+      f.doc.layers.push(selected, { id: 4, name: 'Other layer', visible: initialVisible, opacity: 25, kind: 'pixel' }); f.doc.activeLayers = [selected];
+      const before = structuredClone(f.doc.layers), capture = await f.capture();
+      const changes = { ...(combined ? { name: 'Changed target', opacity: 42 } : {}), visible: !initialVisible };
+      const changed = await f.execute('studio_edit_layer', edit(capture, 'visibility-edit', changes));
+      assert.equal(f.layer().visible, !initialVisible);
+      assert.deepEqual(f.doc.layers.slice(1), before.slice(1)); assert.deepEqual(f.doc.activeLayers.map(l => l.id), [3]);
+      const visibilityCommand = f.commands.find(c => c._obj === 'show' || c._obj === 'hide');
+      assert.deepEqual(visibilityCommand, { _obj: initialVisible ? 'hide' : 'show', _target: [{ _ref: 'layer', _id: 2 }], _options: { dialogOptions: 'dontDisplay' } });
+      const start = f.commands.length;
+      await f.execute('studio_rollback', { receipt: changed.receipt });
+      assert.deepEqual(f.doc.layers, before); assert.deepEqual(f.doc.activeLayers.map(l => l.id), [3]);
+      const restoration = f.commands.slice(start);
+      assert.equal(restoration.length, combined ? 3 : 1);
+      assert.deepEqual(restoration.at(-1), { _obj: initialVisible ? 'show' : 'hide', _target: [{ _ref: 'layer', _id: 2 }], _options: { dialogOptions: 'dontDisplay' } });
+    }
+  }
+});
+test('rollback emits only properties that actually changed and never unrelated visibility', async () => {
+  for (const initialVisible of [true, false]) {
+    for (const changes of [{ name: 'Renamed' }, { opacity: 42 }, { name: 'Renamed', opacity: 42 }, { name: 'Renamed', opacity: 80, visible: initialVisible }]) {
+      const f = fixture(); f.layer().visible = initialVisible;
+      const before = structuredClone(f.layer()), capture = await f.capture();
+      const changed = await f.execute('studio_edit_layer', edit(capture, 'property-edit', changes)), start = f.commands.length;
+      await f.execute('studio_rollback', { receipt: changed.receipt });
+      const restoredFields = f.commands.slice(start).map(command => {
+        assert.equal(command._obj, 'set'); return Object.keys(command.to).filter(key => key !== '_obj');
+      }).flat();
+      assert.deepEqual(restoredFields, [ ...(changes.name ? ['name'] : []), ...(changes.opacity !== undefined && changes.opacity !== before.opacity ? ['opacity'] : []) ]);
+      assert.deepEqual(f.layer(), before);
+    }
+  }
+});
+test('rollback uses actual opacity snapshots across quantization, unchanged buckets and tiny changes', async () => {
+  for (const scenario of [
+    { before: 80, requested: 50, after: 128 * 100 / 255, quantize: true, writes: 1 },
+    { before: 128 * 100 / 255, requested: 50.1, after: 128 * 100 / 255, quantize: true, writes: 0 },
+    { before: 80, requested: 80 + 0.0000005, after: 80 + 0.0000005, quantize: false, writes: 1 }
+  ]) {
+    const f = fixture(); f.layer().opacity = scenario.before; f.quantizeOpacity = scenario.quantize;
+    const capture = await f.capture(), changed = await f.execute('studio_edit_layer', edit(capture, 'opacity-edit', { opacity: scenario.requested }));
+    assert.equal(changed.receipt.modifiedLayers[0].after.opacity, scenario.after);
+    const start = f.commands.length; await f.execute('studio_rollback', { receipt: changed.receipt });
+    const restoration = f.commands.slice(start); assert.equal(restoration.length, scenario.writes);
+    if (scenario.writes) assert.deepEqual(restoration[0].to, { _obj: 'layer', opacity: { _unit: 'percentUnit', _value: scenario.before } });
+    assert.equal(f.layer().opacity, scenario.before); assert.equal(f.layer().name, 'Original layer'); assert.equal(f.layer().visible, true);
+  }
+});
+test('visibility edit and rollback reject document or history changes before issuing commands', async () => {
+  for (const operation of ['edit', 'rollback']) {
+    for (const conflict of ['document', 'history']) {
+      const f = fixture(), capture = await f.capture(), request = edit(capture, 'visibility-conflict', { visible: false });
+      const changed = operation === 'rollback' ? await f.execute('studio_edit_layer', request) : null;
+      const before = structuredClone(f.doc.layers), start = f.commands.length, suspensions = f.suspensions.length;
+      // Exercise the guard again after executeAsModal grants entry.
+      f.onModal = () => { if (conflict === 'document') f.ps.app.activeDocument = { id: 9 }; else f.doc.activeHistoryState.id++; };
+      await assert.rejects(operation === 'rollback' ? f.execute('studio_rollback', { receipt: changed.receipt }) : f.execute('studio_edit_layer', request), code(operation === 'rollback' ? 'ROLLBACK_CONFLICT' : 'DOCUMENT_CONFLICT'));
+      assert.equal(f.commands.length, start); assert.equal(f.suspensions.length, suspensions); assert.deepEqual(f.doc.layers, before);
+    }
+  }
+});
+test('rollback still guards unchanged fields and verifies the complete original state', async () => {
+  for (const phase of ['guard', 'verification']) {
+    const f = fixture(), capture = await f.capture(), changed = await f.execute('studio_edit_layer', edit(capture, 'name-only', { name: 'Renamed' }));
+    const start = f.commands.length;
+    if (phase === 'guard') f.layer().visible = false;
+    else f.onCommand = () => { f.layer().visible = false; };
+    await assert.rejects(f.execute('studio_rollback', { receipt: changed.receipt }), code(phase === 'guard' ? 'ROLLBACK_CONFLICT' : 'HOST_EXECUTION_FAILED'));
+    assert.equal(f.commands.length - start, phase === 'guard' ? 0 : 1);
+    assert.equal(f.layer().name, 'Renamed'); assert.equal(f.layer().visible, phase !== 'guard'); assert.equal(f.resumes.at(-1).commit, false);
+  }
 });
 test('repeated and concurrent mutation IDs issue one write and changed payload conflicts', async () => {
   const f = fixture(), capture = await f.capture(), request = edit(capture);
