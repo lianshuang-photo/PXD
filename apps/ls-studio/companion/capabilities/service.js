@@ -1,6 +1,7 @@
 'use strict';
 const { randomUUID } = require('node:crypto');
 const { DomainError, invariant, clone, id, capabilityDefinitions, validateSchema, hostOperations, validateContext, publicError } = require('../domain/contracts');
+const { createResultDrafts } = require('./result-drafts');
 
 const imageMime = new Set(['image/png', 'image/jpeg', 'image/webp']);
 const placementLimits = { pixels: 8000000, imageBytes: 32 * 1024 * 1024, mimeTypes: ['image/png', 'image/jpeg'], returnTypes: ['new-layer'], groupResults: false };
@@ -231,8 +232,10 @@ function createCapabilityService({ assets, jobs, provider, bridge, recipes }) {
     }
   }
   async function delegated(method, ...args) { await ready; return jobs[method](...args); }
+  const deriveResultDraft = createResultDrafts({ assets, jobs, provider, inputsFor });
+  async function deriveDraft(input) { await ready; invariant(!closing, 'SERVICE_CLOSING', 'Service is stopping', 503); return deriveResultDraft(input); }
   async function close() { closing = true; for (const controller of controllers.values()) controller.abort(); await Promise.allSettled([...executions.values()]); }
-  return { discover, capture, importAsset, observe, listRecipes, getRecipe, loadRecipe, run, cancel, apply, rollback, ready, close, readAsset: async assetId => { await ready; return assets.read(assetId); },
+  return { discover, capture, importAsset, observe, listRecipes, getRecipe, loadRecipe, deriveDraft, run, cancel, apply, rollback, ready, close, readAsset: async assetId => { await ready; return assets.read(assetId); },
     createDraft: input => delegated('createDraft', input), getDraft: draftId => delegated('getDraft', draftId), listDrafts: () => delegated('listDrafts'), updateDraft: input => delegated('updateDraft', input), getJob: jobId => delegated('getJob', jobId), listJobs: () => delegated('listJobs'),
     waitForIdle: async () => { await ready; await Promise.allSettled([...executions.values()]); },
   };

@@ -69,7 +69,7 @@ function checkedAsset(value) {
 }
 async function invoke(service, operation, args, source) {
   args = validateOperation(operation, args);
-  if (['createDraft', 'updateDraft', 'run', 'loadRecipe'].includes(operation)) args = { ...args, source };
+  if (['createDraft', 'deriveDraft', 'updateDraft', 'run', 'loadRecipe'].includes(operation)) args = { ...args, source };
   if (operation === 'getDraft') return service.getDraft(args.draftId);
   if (operation === 'getRecipe') return service.getRecipe(args.recipeId);
   if (operation === 'getJob' || operation === 'cancel') return service[operation](args.jobId);
