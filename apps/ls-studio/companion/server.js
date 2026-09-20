@@ -737,6 +737,7 @@ async function respondApply(res, body, routeModel) {
 }
 
 const server = http.createServer(async (req, res) => {
+  try {
   const url = new URL(req.url, "http://" + HOST + ":" + PORT);
   if (await agentHttp.handle(req, res, url)) return;
   if (req.method === "OPTIONS") {
@@ -750,7 +751,6 @@ const server = http.createServer(async (req, res) => {
 
   const pathName = url.pathname.replace(/\/+$/, "") || "/";
 
-  try {
     if (req.method === "GET" && pathName === "/health") {
       return send(res, 200, {
         ok: true,
@@ -1102,7 +1102,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(JSON.stringify({ time: STARTED_AT, event: "companion.started", pid: process.pid, host: HOST, port: PORT }));
+  console.log(JSON.stringify({ time: STARTED_AT, event: "companion.started", pid: process.pid, host: HOST, port: server.address().port }));
 });
 
 let lastAgentStatus = "";

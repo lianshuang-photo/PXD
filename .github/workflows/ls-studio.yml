@@ -1,0 +1,84 @@
+name: LS Studio
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ls-studio-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  modules:
+    name: Modules (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['22']
+        include:
+          - os: ubuntu-latest
+            node: '18'
+          - os: ubuntu-latest
+            node: '24'
+    env:
+      # Hosted macOS runners do not provide the interactive GUI launchd domain.
+      # Local launchd and Photoshop acceptance are recorded separately.
+      PXDLS_SKIP_LAUNCHD_TEST: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Check JavaScript, manifests and referenced assets
+        run: npm --prefix apps/ls-studio run check
+      - name: Verify module and integration tests
+        run: npm --prefix apps/ls-studio test
+  package:
+    name: Build and exercise distributable
+    needs: modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Package the actual PR head, not GitHub's synthetic merge commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm --prefix apps/ls-studio run build
+        env:
+          PXDLS_RELEASE_BUILD: '1'
+      - name: Exercise the extracted application
+        shell: bash
+        run: |
+          python3 -m zipfile -t apps/ls-studio/dist/ls-studio-*-uxp-source.zip
+          node apps/ls-studio/scripts/package-smoke.cjs "apps/ls-studio/dist/ls-studio-$(node -p "require('./apps/ls-studio/package.json').version").zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ls-studio-${{ github.event.pull_request.head.sha || github.sha }}
+          path: apps/ls-studio/dist/*
+          if-no-files-found: error
+          retention-days: 30
+  ls-studio-tests:
+    name: ls-studio-tests
+    if: always()
+    needs: [modules, package]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every matrix run and packaged smoke check
+        env:
+          MODULES: ${{ needs.modules.result }}
+          PACKAGE: ${{ needs.package.result }}
+        run: test "$MODULES" = success && test "$PACKAGE" = success
+
+# The separate required ls-studio/computer-use commit status is recorded only
+# after real Photoshop/UXP acceptance of this exact commit. Never synthesize it
+# from the fixture suite or a browser-only run.

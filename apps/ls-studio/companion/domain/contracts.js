@@ -48,7 +48,7 @@ const contextSchema = schema({
 }, ['documentRef', 'scope']);
 const capabilityDefinitions = [
   { id: 'image.edit', version: 1, title: '图像编辑', backend: 'gemini', inputSchema: schema({ prompt: text(64000), model: text(200), temperature: { type: 'number', minimum: 0, maximum: 2 }, aspectRatio: { enum: ['auto', '1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9', '4:5', '5:4'] }, imageSize: { enum: ['1K', '2K', '4K'] } }), outputSchema: { type: 'object', required: ['results'] }, errors: ['PROVIDER_NOT_CONFIGURED', 'PROVIDER_AUTH', 'PROVIDER_RATE_LIMIT', 'PROVIDER_REJECTED', 'PROVIDER_UNCERTAIN', 'CANCELLED'] },
-  { id: 'ps.layer.update', version: 1, title: '修改图层属性', backend: 'photoshop', inputSchema: schema({ layerId: integer, changes: schema({ name: text(1000), opacity: { type: 'number', minimum: 0, maximum: 100 }, visible: { type: 'boolean' } }) }), outputSchema: { type: 'object', required: ['receipt'] }, errors: ['HOST_UNAVAILABLE', 'DOCUMENT_CONFLICT', 'HOST_EXECUTION_FAILED', 'ROLLBACK_CONFLICT'] },
+  { id: 'ps.layer.update', version: 1, title: '修改图层属性', backend: 'photoshop', inputSchema: schema({ layerId: { type: ['integer', 'null'], minimum: 1 }, changes: schema({ name: text(1000), opacity: { type: 'number', minimum: 0, maximum: 100 }, visible: { type: 'boolean' } }) }), outputSchema: { type: 'object', required: ['receipt'] }, errors: ['HOST_UNAVAILABLE', 'DOCUMENT_CONFLICT', 'HOST_EXECUTION_FAILED', 'ROLLBACK_CONFLICT'] },
 ];
 
 function validateSchema(value, rule, label = 'input') {
@@ -59,7 +59,7 @@ function validateSchema(value, rule, label = 'input') {
     object(value, label);
     for (const key of rule.required || []) invariant(Object.hasOwn(value, key), 'INVALID_INPUT', label + '.' + key + ' is required');
     for (const [key, child] of Object.entries(value)) {
-      const sub = rule.properties && rule.properties[key];
+      const sub = (rule.properties && rule.properties[key]) || (rule.additionalProperties && typeof rule.additionalProperties === 'object' ? rule.additionalProperties : undefined);
       invariant(sub || rule.additionalProperties !== false, 'INVALID_INPUT', label + '.' + key + ' is not supported');
       if (sub) validateSchema(child, sub, label + '.' + key);
     }
@@ -129,4 +129,5 @@ const hostOperations = {
   studio_apply_result: schema({ documentRef: documentRefSchema, jobId: identifier, mutationId: identifier, image: schema({ base64: text(96 * 1024 * 1024), mimeType: { enum: ['image/png', 'image/jpeg', 'image/webp'] }, width: integer, height: integer }, ['base64', 'mimeType', 'width', 'height']), mask: { type: 'object' }, transform: contextSchema.properties.transform, settings: contextSchema.properties.settings }, ['documentRef', 'jobId', 'mutationId', 'image', 'transform']),
   studio_rollback: schema({ receipt: { type: 'object' } }, ['receipt']),
 };
+capabilityDefinitions[0].inputSchema.properties.recipe = schema({ recipeId: identifier, sourceHash: { type: 'string', pattern: '^[a-f0-9]{64}$' }, values: { type: 'object', additionalProperties: { type: 'number', minimum: 0, maximum: 1 } } }, ['recipeId', 'sourceHash', 'values']);
 module.exports = { DomainError, invariant, object, clone, id, schema, identifier, integer, contextSchema, documentRefSchema, capabilityDefinitions, capability, validateSchema, validateContext, validateDraft, validateRunSnapshot, assertTransition, jobTransitions, placementTransitions, publicError, hostOperations };
