@@ -34,10 +34,10 @@
 
 ## 本轮交付与启动条件
 
-已完成仓库评估、Alpha 保留、首批模块和三项功能实现、内部交叉 review 与私有组装。最新组装 240 pass／0 fail／1 项 launchd 生命周期明确跳过（总 241），78 JS 检查、clean build 和实际解压 smoke 通过。基础分支历史 193 项通过记录保持独立，各模块／功能计数不相加。
+已完成仓库评估、Alpha 保留、首批模块和三项功能实现、内部交叉 review 与私有组装。最新私有组装 `f0a622b162229fb99cc48cd5d45a55f5a82f17d2` 包含三个独立修正 PR，261 pass／0 fail／1 项 launchd 生命周期明确跳过（总 262），80 JS 检查、clean build 和实际解压 smoke 通过。其 Photoshop 验收待完成；历史基础／组装记录保持独立，各模块／功能计数不相加。
 
 早期真实 Photoshop 的抓图、羽化蒙版、组合属性修改、撤销及后续修改冲突已有[部分宿主记录](evidence/2026-09-20-host-partial.md)。本轮原生 Chrome/CUA 以隔离数据和合成图像验证结果派生／比较、预设管理、默认值／模型设置及 100–200% 缩放，见[浏览器记录](evidence/2026-09-20-feature-browser.md)。两份记录属于不同提交与环境，不能互相继承，也没有把浏览器结果标为宿主成功。
 
-新开的[独立验收 session](evidence/2026-09-20-independent-review.md)已复核十个公开提交及下载产物，发现两项可复现代码缺陷；真实撤销还遇到尚未归因的 Photoshop 原生崩溃。UI→实际 Agent 的只读接续已验证。下一步先完成[独立修复 PR 与复测](MODULAR-DELIVERY.md)，保留原现场证据，再补宿主缺项；每轮开发后继续采用新的独立 session 验收。
+首轮[独立验收 session](evidence/2026-09-20-independent-review.md)复核十个公开提交及下载产物，发现两项可复现代码缺陷和一次尚未归因的 Photoshop 原生崩溃。[第二轮真机验收](evidence/2026-09-20-independent-review-round2.md)在 `8ab0e1` 上跑通新的真实撤销、后续修改／文档身份保护和实际 Agent→专业 UI 共享草稿修改；另用明确标记的模型响应夹具跑通真实 PS 孔洞／羽化蒙版回贴及撤销。第二轮未重现崩溃，但不抹去首轮记录，不代表真实模型或较新提交通过。下一步按[独立修复 PR 与复测](MODULAR-DELIVERY.md)补足最终提交的宿主证据、原生面板交互、真实供应商和 COS 样片；每轮开发后继续采用新的独立 session 验收。
 
 G08 尚未通过；B05 实现完成、待宿主验收，B06 和 G10 之后未开始，G09／M1／M2 均未通过。所有 live status 保持 pending，独立 session 审查不能替代 GitHub 独立账号 approve。main 保护与发布门禁保持启用；三个功能 PR 待依赖进入 main 后 retarget／更新并重做审批、检查和精确提交真机证据，不合入临时比较分支。后续按[实施计划](EXECUTION-PLAN.md)推进。
