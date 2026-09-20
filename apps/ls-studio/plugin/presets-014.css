@@ -1,0 +1,7 @@
+.studio-presets { margin-top: var(--s12, 12px); padding: var(--s12, 12px) 0; border-top: var(--s1, 1px) solid var(--line); }
+.studio-presets h3 { margin: 0 0 var(--s10, 10px); font-size: inherit; }
+.studio-presets .preset-editor { margin-top: var(--s12, 12px); }
+.studio-presets .preset-editor textarea.studio-input { height: var(--s160, 160px); min-height: var(--s160, 160px); }
+.studio-presets .studio-list { max-height: var(--s220, 220px); overflow-y: auto; }
+.studio-presets .studio-field { margin-bottom: var(--s8, 8px); }
+.studio-presets .studio-note { white-space: normal; }

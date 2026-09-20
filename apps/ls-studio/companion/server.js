@@ -12,13 +12,14 @@ const { createJobStore } = require("./jobs");
 const { createGeminiProvider } = require("./providers");
 const { createCapabilityService } = require("./capabilities/service");
 const { createRecipeCatalog } = require("./capabilities/recipes");
+const { createRecipeLibrary } = require("./presets");
 const { createStudioHttp } = require("./http/studio-http");
 const STUDIO_DATA = process.env.PXDLS_DATA_DIR || path.join(os.homedir(), ".pxdls", "studio");
 const studio = createCapabilityService({
   assets: createAssetStore({ rootDir: path.join(STUDIO_DATA, "assets") }),
   jobs: createJobStore({ rootDir: path.join(STUDIO_DATA, "jobs") }),
   provider: createGeminiProvider(), bridge: agentHttp.agent.photoshop,
-  recipes: createRecipeCatalog({ rootDir: process.env.PXDLS_FACTORY_PRESETS || path.join(__dirname, "factory_presets") }),
+  recipes: createRecipeLibrary({ rootDir: path.join(STUDIO_DATA, "presets"), factoryCatalog: createRecipeCatalog({ rootDir: process.env.PXDLS_FACTORY_PRESETS || path.join(__dirname, "factory_presets") }) }),
 });
 const studioHttp = createStudioHttp({ service: studio, toolToken: agentHttp.agent.photoshop.toolToken });
 const PORT = Number(process.env.PXDLS_PORT || 17880);

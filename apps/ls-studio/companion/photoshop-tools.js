@@ -33,6 +33,8 @@ const revision = { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER
 const origin = { enum: ['ui', 'agent', 'system'] };
 const parameters = { type: 'object' };
 const draftContext = { ...contextSchema, type: ['object', 'null'] };
+const sourceHash = { type: 'string', pattern: '^[a-f0-9]{64}$' };
+const presetDefinition = schema({ title: { type: 'string', minLength: 1, maxLength: 1000 }, category: { type: 'string', minLength: 1, maxLength: 100 }, subCategory: { type: 'string', maxLength: 100 }, content: { type: 'string', minLength: 1, maxLength: 64000 }, refImages: { type: 'array', maxItems: 16, items: schema({ slotId: identifier, label: { type: 'string', minLength: 1, maxLength: 200 }, role: { enum: ['reference', 'identity', 'style', 'structure'] } }, ['slotId', 'label', 'role']) } }, ['title', 'category', 'content']);
 const operationSchemas = {
   discover: schema({}),
   capture: schema({ documentId: id, scope: { enum: ['selection', 'document'] } }, ['documentId', 'scope']),
@@ -48,9 +50,17 @@ const operationSchemas = {
   apply: schema({ jobId: identifier, resultId: identifier, requestId: identifier }, ['jobId', 'resultId', 'requestId']),
   rollback: schema({ jobId: identifier }, ['jobId']),
   readAsset: schema({ assetId: identifier }, ['assetId']),
-  listRecipes: schema({ q: { type: 'string', maxLength: 500 }, category: { type: 'string', maxLength: 100 }, offset: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER }, limit: { type: 'integer', minimum: 1, maximum: 200 } }),
-  getRecipe: schema({ recipeId: identifier }, ['recipeId']),
-  loadRecipe: schema({ recipeId: identifier, draftId: identifier, expectedRevision: revision, values: { type: 'object' }, userText: { type: 'string', maxLength: 64000 }, refs: contextSchema.properties.refs, source: origin }, ['recipeId', 'draftId', 'expectedRevision']),
+  listRecipes: schema({ q: { type: 'string', maxLength: 500 }, category: { type: 'string', maxLength: 100 }, kind: { enum: ['all', 'factory', 'user'] }, includeArchived: { type: 'boolean' }, offset: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER }, limit: { type: 'integer', minimum: 1, maximum: 200 } }),
+  getRecipe: schema({ recipeId: identifier, revision }, ['recipeId']),
+  createRecipe: schema({ definition: presetDefinition, requestId: identifier, source: origin }, ['definition', 'requestId']),
+  copyRecipe: schema({ recipeId: identifier, revision, expectedSourceHash: sourceHash, title: { type: 'string', minLength: 1, maxLength: 1000 }, requestId: identifier, source: origin }, ['recipeId', 'expectedSourceHash', 'requestId']),
+  updateRecipe: schema({ recipeId: identifier, expectedRevision: revision, definition: presetDefinition, source: origin }, ['recipeId', 'expectedRevision', 'definition']),
+  importRecipe: schema({ bundle: schema({ schemaVersion: { enum: [1] }, format: { enum: ['ls-studio-preset'] }, definition: presetDefinition }, ['schemaVersion', 'format', 'definition']), requestId: identifier, source: origin }, ['bundle', 'requestId']),
+  exportRecipe: schema({ recipeId: identifier, revision }, ['recipeId']),
+  listRecipeVersions: schema({ recipeId: identifier }, ['recipeId']),
+  archiveRecipe: schema({ recipeId: identifier, expectedRevision: revision, source: origin }, ['recipeId', 'expectedRevision']),
+  restoreRecipe: schema({ recipeId: identifier, expectedRevision: revision, targetRevision: revision, source: origin }, ['recipeId', 'expectedRevision']),
+  loadRecipe: schema({ recipeId: identifier, expectedSourceHash: sourceHash, draftId: identifier, expectedRevision: revision, values: { type: 'object' }, userText: { type: 'string', maxLength: 64000 }, refs: contextSchema.properties.refs, source: origin }, ['recipeId', 'draftId', 'expectedRevision']),
   observe: schema({ tool: { enum: tools.map(tool => tool.name) }, arguments: { type: 'object' } }, ['tool', 'arguments']),
 };
 const studioDefinitions = [
@@ -68,9 +78,17 @@ const studioDefinitions = [
   ['studio_apply_result', 'apply', 'Place a generated result belonging to this successful job into its captured Photoshop document through the shared execution service. Use a stable requestId; repeated placement cannot create duplicate layers. Document/runtime/history conflicts require inspection.', false, true],
   ['studio_rollback', 'rollback', 'Undo only this job’s recorded Photoshop mutation when its runtime/document/history guards still match. Restores previous properties for existing layers or removes created layers. Later user edits cause a conflict rather than a whole-history reset.', false, true],
   ['studio_read_asset', 'readAsset', 'Inspect actual image pixels from a managed asset ID, including generated candidates, source captures and references. Returns metadata plus an MCP image block; never accepts a path or remote URL.', true, true],
+  ['studio_create_recipe', 'createRecipe', 'Create a durable user preset definition with a unique requestId. Reference slots describe roles, not local paths or image bytes. Does not run an edit.', false, true],
+  ['studio_copy_recipe', 'copyRecipe', 'Copy a factory or user preset into an independent user preset. Read its sourceHash first; use a stable requestId. Factory data stays read-only.', false, true],
+  ['studio_update_recipe', 'updateRecipe', 'Save a complete user preset definition at expectedRevision. Conflicts preserve the current preset and return its current revision.', false, false],
+  ['studio_import_recipe', 'importRecipe', 'Import a versioned ls-studio-preset JSON definition as a new user preset. Does not open paths, fetch URLs or import document context. Use a stable requestId.', false, true],
+  ['studio_export_recipe', 'exportRecipe', 'Export a preset definition as portable JSON. Reference slots travel; local image IDs and document context do not. Images must be explicitly remapped when loading.', true, true],
+  ['studio_list_recipe_versions', 'listRecipeVersions', 'Read immutable preset revision metadata. Use studio_get_recipe with revision to inspect a historical definition.', true, true],
+  ['studio_archive_recipe', 'archiveRecipe', 'Archive a user preset at expectedRevision. Keeps all history and existing job snapshots; restore is supported.', false, false],
+  ['studio_restore_recipe', 'restoreRecipe', 'Restore an archived preset or a chosen targetRevision as a new current revision. Preserves history and requires expectedRevision.', false, false],
   ['studio_list_recipes', 'listRecipes', 'Browse available editing recipes by text/category with bounded pagination. Recipe content is guidance, not permission to execute an operation.', true, true],
-  ['studio_get_recipe', 'getRecipe', 'Read a recipe and its supported parameter definitions before loading it into a shared image-edit draft.', true, true],
-  ['studio_load_recipe', 'loadRecipe', 'Compile a recipe with normalized parameter values, optional instruction and managed references into an existing image.edit draft at expectedRevision. Updates the shared draft only; does not start a provider request or Photoshop write.', false, false],
+  ['studio_get_recipe', 'getRecipe', 'Read a recipe and optional historical revision. User preset loading requires its expectedSourceHash; reference slots require explicit managed asset mapping.', true, true],
+  ['studio_load_recipe', 'loadRecipe', 'Compile a recipe at expectedSourceHash (required for user presets) with normalized parameter values, optional instruction and managed references into an existing image.edit draft at expectedRevision. Updates the shared draft only; does not start a provider request or Photoshop write.', false, false],
 ];
 const studioTools = studioDefinitions.map(([name, operation, description, readOnlyHint, idempotentHint]) => ({
   name, description, inputSchema: operationSchemas[operation], annotations: { readOnlyHint, destructiveHint: false, idempotentHint, openWorldHint: operation === 'run' },
