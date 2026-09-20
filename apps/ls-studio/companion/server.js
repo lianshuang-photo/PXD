@@ -4,6 +4,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { URL } = require("url");
+const { checkClient, checkPreflight } = require("./http/local-client");
 const { createAgentHttp } = require("./agent-http");
 const agentHttp = createAgentHttp();
 const PORT = Number(process.env.PXDLS_PORT || 17880);
@@ -68,9 +69,9 @@ function send(res, status, body) {
   const json = JSON.stringify(body);
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "Vary": "Origin",
     "Content-Length": Buffer.byteLength(json),
   });
   res.end(json);
@@ -738,18 +739,20 @@ async function respondApply(res, body, routeModel) {
 
 const server = http.createServer(async (req, res) => {
   try {
-  const url = new URL(req.url, "http://" + HOST + ":" + PORT);
-  if (await agentHttp.handle(req, res, url)) return;
-  if (req.method === "OPTIONS") {
-    res.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    });
-    return res.end();
-  }
+    checkClient(req);
+    const url = new URL(req.url, "http://" + HOST + ":" + PORT);
+    if (await agentHttp.handle(req, res, url)) return;
+    if (req.method === "OPTIONS") checkPreflight(req, ["content-type"]);
+    if (req.headers.origin) res.setHeader("Access-Control-Allow-Origin", req.headers.origin);
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Vary", "Origin");
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      return res.end();
+    }
 
-  const pathName = url.pathname.replace(/\/+$/, "") || "/";
+    const pathName = url.pathname.replace(/\/+$/, "") || "/";
 
     if (req.method === "GET" && pathName === "/health") {
       return send(res, 200, {
@@ -1097,7 +1100,7 @@ const server = http.createServer(async (req, res) => {
 
     return send(res, 404, { ok: false, error: "not found", path: pathName });
   } catch (e) {
-    return send(res, 400, { ok: false, error: String(e && e.message ? e.message : e) });
+    return send(res, e && e.status === 403 ? 403 : 400, { ok: false, error: String(e && e.message ? e.message : e) });
   }
 });
 

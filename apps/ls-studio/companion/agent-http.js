@@ -2,12 +2,8 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { CodexAgent, safeText, fail } = require("./codex-agent");
+const { checkClient, checkPreflight } = require("./http/local-client");
 
-function localHost(name) { return ["localhost", "127.0.0.1", "[::1]"].includes(name); }
-function allowedOrigin(origin) {
-  if (!origin || origin === "null" || origin === "file://" || origin.startsWith("uxp://")) return true;
-  try { const u = new URL(origin); return ["http:", "https:"].includes(u.protocol) && localHost(u.hostname); } catch (_) { return false; }
-}
 function bodyJson(req) {
   if (!/^application\/json(?:;|$)/i.test(req.headers["content-type"] || "")) return Promise.reject(fail("需要 JSON 请求", 415));
   return new Promise((resolve, reject) => {
@@ -27,11 +23,13 @@ function createAgentHttp(options = {}) {
   async function handle(req, res, url) {
     const name = url.pathname;
     if (!(name === "/ui" || name.startsWith("/ui/") || name.startsWith("/agent/") || name.startsWith("/photoshop/"))) return false;
-    const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Access-Control-Allow-Headers": "Content-Type, X-PXDLS-Agent, X-PXDLS-Host, X-PXDLS-Tool", "Access-Control-Allow-Methods": "GET, POST, OPTIONS" };
+    const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Vary": "Origin" };
     function json(status, value) { const text = JSON.stringify(value); res.writeHead(status, { ...headers, "Content-Type": "application/json; charset=utf-8", "Content-Length": Buffer.byteLength(text) }); res.end(text); }
     try {
-      const requestHost = new URL("http://" + req.headers.host).hostname;
-      if (!localHost(requestHost) || !allowedOrigin(req.headers.origin)) { json(403, { ok: false, error: "仅允许本机 LS Studio 访问 Agent" }); return true; }
+      const client = checkClient(req);
+      if (name.startsWith("/photoshop/") && !["/photoshop/status", "/photoshop/call"].includes(name) && !client.native) throw fail("仅 Photoshop 插件可连接执行器", 403);
+      if (req.method === "OPTIONS") checkPreflight(req, ["content-type", "x-pxdls-agent", "x-pxdls-host", "x-pxdls-tool"]);
+      Object.assign(headers, { "Access-Control-Allow-Headers": "Content-Type, X-PXDLS-Agent, X-PXDLS-Host, X-PXDLS-Tool", "Access-Control-Allow-Methods": "GET, POST, OPTIONS" });
       if (req.headers.origin) headers["Access-Control-Allow-Origin"] = req.headers.origin;
       if (req.method === "OPTIONS") { res.writeHead(204, headers); res.end(); return true; }
       if (name === "/ui" || name.startsWith("/ui/")) {
@@ -52,14 +50,12 @@ function createAgentHttp(options = {}) {
       }
       if (req.headers["x-pxdls-agent"] !== "1") throw fail("缺少 LS Studio 客户端标识", 403);
       if (name.startsWith("/photoshop/")) {
-        const bridge = agent.photoshop, origin = req.headers.origin;
+        const bridge = agent.photoshop;
         if (name === "/photoshop/status" && req.method === "GET") { json(200, { ok: true, ...bridge.status() }); return true; }
         if (name === "/photoshop/call" && req.method === "POST") {
           if (req.headers["x-pxdls-tool"] !== bridge.toolToken) throw fail("工具连接凭据无效", 403);
           const body = await bodyJson(req); json(200, await bridge.request(body.tool, body.arguments)); return true;
         }
-        // Web previews are clients, never Photoshop executors. UXP has an opaque origin.
-        if (origin && origin !== "null" && origin !== "file://" && !origin.startsWith("uxp://")) throw fail("仅 Photoshop 插件可连接执行器", 403);
         if (name === "/photoshop/register" && req.method === "POST") json(200, { ok: true, ...bridge.register(await bodyJson(req)) });
         else if (name === "/photoshop/heartbeat" && req.method === "POST") {
           const body = await bodyJson(req); bridge.authorize(body.clientId, req.headers["x-pxdls-host"]); json(200, { ok: true });
@@ -112,4 +108,4 @@ function createAgentHttp(options = {}) {
   }
   return { agent, handle };
 }
-module.exports = { createAgentHttp, allowedOrigin };
+module.exports = { createAgentHttp };

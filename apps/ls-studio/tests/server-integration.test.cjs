@@ -70,18 +70,18 @@ function malformedRequest(port) {
   });
 }
 
-function jsonRequest(port, requestPath, body) {
+function jsonRequest(port, requestPath, body, options = {}) {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : JSON.stringify(body);
     const req = http.request({
-      host: '127.0.0.1', port, path: requestPath, method: payload ? 'POST' : 'GET', agent: false,
-      headers: { 'X-PXDLS-Agent': '1', ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}) },
+      host: '127.0.0.1', port, path: requestPath, method: options.method || (payload ? 'POST' : 'GET'), agent: false,
+      headers: { ...(options.agentMarker === false ? {} : { 'X-PXDLS-Agent': '1' }), ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}), ...options.headers },
     }, res => {
       let text = '';
       res.setEncoding('utf8');
       res.on('data', chunk => { text += chunk; });
       res.once('error', reject);
-      res.once('end', () => { try { resolve({ status: res.statusCode, value: JSON.parse(text) }); } catch (error) { reject(error); } });
+      res.once('end', () => { try { resolve({ status: res.statusCode, value: text ? JSON.parse(text) : null, headers: res.headers }); } catch (error) { reject(error); } });
     });
     req.setTimeout(5000, () => req.destroy(new Error('Local JSON request did not finish')));
     req.once('error', reject);
@@ -97,4 +97,80 @@ test('malformed request targets return 400 without terminating the preserved Com
   assert.equal(health.status, 200);
   assert.equal(health.value.ok, true);
   assert.equal(child.exitCode, null);
+});
+
+test('server entry rejects cross-site legacy reads and writes without CORS or state mutation', { timeout: 20000 }, async t => {
+  const { port } = await startCompanion(t);
+  const initial = {
+    instruction: { executionText: '{"@param:strength":0.5,"note":"synthetic-private-instruction"}' },
+    context: { document: { name: 'synthetic-only.png' }, selection: null, refs: [] },
+  };
+  const seeded = await jsonRequest(port, '/job', initial, { headers: { Origin: 'http://localhost:5174' } });
+  assert.equal(seeded.status, 200); assert.equal(seeded.headers['access-control-allow-origin'], 'http://localhost:5174');
+  const initialApply = (await jsonRequest(port, '/apply/last')).value;
+  const recipes = (await jsonRequest(port, '/recipes')).value.items;
+  assert.ok(recipes.length, 'use a real factory recipe for legacy load dispatch');
+  const recipePath = '/recipes/' + encodeURIComponent(recipes[0].id);
+  const changed = { instruction: { executionText: 'untrusted-replacement' }, context: { document: { name: 'untrusted-replacement.png' } } };
+  const attempts = [
+    ['GET', '/health'], ['GET', '/recipes'], ['GET', recipePath], ['POST', recipePath + '/load', {}],
+    ['GET', '/job'], ['POST', '/job', changed], ['POST', '/job/params', { values: { strength: 1 } }],
+    ['POST', '/job/context', { document: { name: 'untrusted-replacement.png' } }],
+    ['POST', '/plan', { text: 'synthetic-untrusted' }], ['POST', '/compile', { text: 'synthetic-untrusted' }],
+    ['GET', '/apply/last'], ['GET', '/lastApplyMeta'], ['POST', '/apply', { model: 'mock' }],
+    ...['face-box', 'mask', 'fx', 'grade', 'adjust-layer', 'select', 'readback', 'brighten'].map(name => ['POST', '/atom/' + name, {}]),
+    ['GET', '/agent/session'], ['POST', '/photoshop/register', { clientId: 'untrusted-fixture' }],
+  ];
+  for (const source of [
+    { Origin: 'https://untrusted.invalid', 'Sec-Fetch-Site': 'cross-site' },
+    { Origin: 'null', 'Sec-Fetch-Site': 'cross-site' },
+    { 'Sec-Fetch-Site': 'cross-site' },
+  ]) {
+    for (const [method, route, body] of attempts) {
+      const response = await jsonRequest(port, route, body, { method, headers: source });
+      assert.equal(response.status, 403, method + ' ' + route);
+      for (const header of ['access-control-allow-origin', 'access-control-allow-headers', 'access-control-allow-methods']) assert.equal(response.headers[header], undefined, route + ': ' + header);
+      assert.doesNotMatch(JSON.stringify(response.value), /synthetic-only|synthetic-private|hostToken/);
+    }
+    for (const route of ['/job', '/job/context', '/apply/last', recipePath + '/load', '/atom/readback']) {
+      const response = await jsonRequest(port, route, undefined, { method: 'OPTIONS', headers: { ...source, 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'content-type' } });
+      assert.equal(response.status, 403); assert.equal(response.headers['access-control-allow-origin'], undefined);
+    }
+  }
+  assert.deepEqual((await jsonRequest(port, '/job')).value, seeded.value, 'rejected writes cannot replace trusted context or instruction');
+  assert.deepEqual((await jsonRequest(port, '/apply/last')).value, initialApply, 'rejected apply cannot change lastApplyMeta');
+  assert.equal((await jsonRequest(port, '/photoshop/status')).value.connected, false, 'rejected registration cannot create an executor');
+});
+
+test('legacy CORS reflects accepted local sources and preflight stays bounded', { timeout: 20000 }, async t => {
+  const { port } = await startCompanion(t);
+  for (const source of [
+    { Origin: 'http://localhost:5174', 'Sec-Fetch-Site': 'cross-site' },
+    { 'Sec-Fetch-Site': 'same-origin' },
+    { Origin: 'null' }, { Origin: 'file://' }, { Origin: 'uxp://ls-studio' }, {},
+  ]) {
+    // Legacy callers send Content-Type only; the Agent marker is not their contract.
+    const options = { agentMarker: false, headers: source };
+    const written = await jsonRequest(port, '/job', { instruction: { executionText: 'synthetic-local' } }, options);
+    assert.equal(written.status, 200); assert.equal(written.headers['access-control-allow-origin'], source.Origin);
+    const read = await jsonRequest(port, '/job', undefined, options);
+    assert.equal(read.status, 200); assert.equal(read.value.instruction.executionText, 'synthetic-local');
+    assert.equal(read.headers['access-control-allow-origin'], source.Origin);
+    const context = await jsonRequest(port, '/job/context', { document: { name: 'synthetic-local.png' } }, options);
+    assert.equal(context.status, 200); assert.equal(context.value.context.document.name, 'synthetic-local.png');
+    const preflight = await jsonRequest(port, '/job', undefined, { agentMarker: false, method: 'OPTIONS', headers: { ...source, 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'Content-Type' } });
+    assert.equal(preflight.status, 204); assert.equal(preflight.headers['access-control-allow-origin'], source.Origin);
+    assert.equal(preflight.headers['access-control-allow-credentials'], undefined);
+  }
+  for (const headers of [
+    { Origin: 'http://localhost:5174', 'Access-Control-Request-Method': 'DELETE' },
+    { Origin: 'http://localhost:5174', 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'content-type,x-untrusted' },
+    { Origin: 'http://localhost:5174' },
+  ]) {
+    const response = await jsonRequest(port, '/job', undefined, { method: 'OPTIONS', headers });
+    assert.equal(response.status, 403);
+    for (const header of ['access-control-allow-origin', 'access-control-allow-headers', 'access-control-allow-methods']) assert.equal(response.headers[header], undefined);
+  }
+  const host = await jsonRequest(port, '/health', undefined, { headers: { Host: 'untrusted.invalid' } });
+  assert.equal(host.status, 403); assert.equal(host.headers['access-control-allow-origin'], undefined);
 });
