@@ -202,3 +202,86 @@ test('Windows persistence flushes files without opening unsupported directory ha
     assert.equal(createJobStore({ rootDir }).getJob(job.jobId).status, 'running');
   } finally { fs.openSync = open; Object.defineProperty(process, 'platform', platform); }
 });
+test('existing version-1 drafts and jobs without lineage stay readable without migration or invented provenance', t => {
+  const { rootDir, store, submit, restart } = setup(t), { draft, job } = submit('ordinary');
+  const file = path.join(rootDir, 'state.json'), before = fs.readFileSync(file);
+  assert.equal(Object.hasOwn(draft, 'lineage'), false); assert.equal(Object.hasOwn(job.snapshot, 'lineage'), false);
+  const reopened = restart();
+  assert.deepEqual(reopened.listDrafts(), [draft]); assert.deepEqual(reopened.listJobs(), [job]);
+  assert.deepEqual(fs.readFileSync(file), before, 'reading older storage does not rewrite it');
+  const updated = reopened.updateDraft({ draftId: draft.draftId, expectedRevision: 1, params: { prompt: 'ordinary edit' } });
+  assert.equal(Object.hasOwn(updated, 'lineage'), false);
+  assert.equal(Object.hasOwn(store.createJob({ draftId: draft.draftId, expectedRevision: 2, requestId: 'ordinary-next' }).job.snapshot, 'lineage'), false);
+});
+test('derived lineage is defensive, survives edits and restart, and freezes into subsequent job snapshots', t => {
+  for (const mode of ['original', 'candidate-reference']) {
+    const { store, submit, restart } = setup(t), { job: sourceJob } = submit('source');
+    store.addResults(sourceJob.jobId, [{ resultId: 'source-candidate', assetId: 'source-result-asset' }]);
+    const expected = { sourceJobId: sourceJob.jobId, mode, ...(mode === 'candidate-reference' ? { sourceResultId: 'source-candidate' } : {}) };
+    const input = copy(expected), derived = store.createDerivedDraft(copy(fixture.draft), input);
+    input.sourceJobId = 'caller-change'; derived.lineage.mode = 'caller-change';
+    assert.deepEqual(store.getDraft(derived.draftId).lineage, expected);
+    const edited = store.updateDraft({ draftId: derived.draftId, expectedRevision: 1, params: { prompt: 'revised prompt', model: 'revised-model' }, context: null, source: 'agent' });
+    assert.deepEqual(edited.lineage, expected); assert.equal(edited.source, 'agent');
+    assert.throws(() => store.updateDraft({ draftId: derived.draftId, expectedRevision: 1, params: {} }), error => {
+      assert.equal(error.code, 'REVISION_CONFLICT'); assert.deepEqual(error.details.current.lineage, expected);
+      error.details.current.lineage.sourceJobId = 'mutated-conflict'; return true;
+    });
+    const reopened = restart(), context = copy(fixture.context); context.refs = [];
+    const ready = reopened.updateDraft({ draftId: derived.draftId, expectedRevision: 2, context, source: 'ui' });
+    assert.deepEqual(ready.lineage, expected, 'changed references/model/context do not erase historical derivation');
+    const run = { draftId: derived.draftId, expectedRevision: 3, requestId: 'revision-run' }, { job } = reopened.createJob(run);
+    assert.deepEqual(job.snapshot.lineage, expected); assert.equal(job.snapshot.params.prompt, 'revised prompt');
+    job.snapshot.lineage.sourceJobId = 'mutated-job';
+    reopened.updateDraft({ draftId: derived.draftId, expectedRevision: 3, params: { prompt: 'later edit' }, context: null });
+    assert.deepEqual(restart().getJob(job.jobId).snapshot.lineage, expected);
+    assert.equal(store.getJob(job.jobId).snapshot.params.prompt, 'revised prompt');
+    const duplicate = restart().createJob(run);
+    assert.equal(duplicate.duplicate, true); assert.deepEqual(duplicate.job.snapshot.lineage, expected);
+    const listed = store.listDrafts().find(draft => draft.draftId === derived.draftId); listed.lineage.sourceJobId = 'mutated-list';
+    assert.deepEqual(restart().getDraft(derived.draftId).lineage, expected);
+  }
+});
+test('lineage is internal-only and invalid modes, fields and source ownership fail without a storage write', t => {
+  const { rootDir, store, submit } = setup(t), { draft, job } = submit('source'), other = submit('other').job;
+  store.addResults(other.jobId, [{ resultId: 'other-candidate', assetId: 'other-asset' }]);
+  const native = submit('native-source', { capabilityId: 'ps.layer.update', params: { layerId: 3, changes: { opacity: 60 } }, context: fixture.context }).job;
+  const lineage = { sourceJobId: job.jobId, mode: 'original' }, file = path.join(rootDir, 'state.json'), before = fs.readFileSync(file);
+  for (const value of [lineage, null, undefined]) {
+    assert.throws(() => store.createDraft({ ...fixture.draft, lineage: value }), { code: 'INVALID_INPUT' });
+    assert.throws(() => store.updateDraft({ draftId: draft.draftId, expectedRevision: 1, lineage: value }), { code: 'INVALID_INPUT' });
+    assert.throws(() => store.createJob({ draftId: draft.draftId, expectedRevision: 1, requestId: 'forged-run', lineage: value }), { code: 'INVALID_INPUT' });
+  }
+  for (const invalid of [undefined, null, {}, { ...lineage, mode: 'unknown' }, { ...lineage, sourceJobId: '../job' }, { ...lineage, sourceResultId: 'extra' }, { ...lineage, mode: 'candidate-reference' }, { ...lineage, mode: 'candidate-reference', sourceResultId: null }, { ...lineage, unexpected: true }]) {
+    assert.throws(() => store.createDerivedDraft(copy(fixture.draft), invalid), { code: 'INVALID_INPUT' });
+  }
+  assert.throws(() => store.createDerivedDraft(copy(fixture.draft), { ...lineage, sourceJobId: 'missing' }), { code: 'JOB_NOT_FOUND' });
+  assert.throws(() => store.createDerivedDraft(copy(fixture.draft), { ...lineage, mode: 'candidate-reference', sourceResultId: 'other-candidate' }), { code: 'RESULT_NOT_FOUND' });
+  assert.throws(() => store.createDerivedDraft(copy(fixture.draft), { ...lineage, sourceJobId: native.jobId }), { code: 'CAPABILITY_CONFLICT' });
+  assert.deepEqual(fs.readFileSync(file), before);
+});
+test('stored lineage rejects missing or foreign sources and snapshots whose lineage was replaced or removed', t => {
+  const { rootDir, store, submit, restart } = setup(t), { job } = submit('source'), other = submit('other').job;
+  store.addResults(job.jobId, [{ resultId: 'source-candidate', assetId: 'source-asset' }]);
+  store.addResults(other.jobId, [{ resultId: 'foreign-candidate', assetId: 'foreign-asset' }]);
+  const lineage = { sourceJobId: job.jobId, mode: 'candidate-reference', sourceResultId: 'source-candidate' };
+  const draft = store.createDerivedDraft(copy(fixture.draft), lineage);
+  const derivedJob = store.createJob({ draftId: draft.draftId, expectedRevision: 1, requestId: 'derived' }).job;
+  const file = path.join(rootDir, 'state.json'), valid = JSON.parse(fs.readFileSync(file));
+  for (const alter of [
+    (draft, job) => { draft.lineage.sourceJobId = 'missing-job'; job.snapshot.lineage.sourceJobId = 'missing-job'; },
+    (draft, job) => { draft.lineage.sourceResultId = 'foreign-candidate'; job.snapshot.lineage.sourceResultId = 'foreign-candidate'; },
+    draft => { draft.lineage = null; },
+    draft => { draft.lineage.extra = true; },
+    (draft, job) => { job.snapshot.lineage.mode = 'original'; delete job.snapshot.lineage.sourceResultId; },
+    (draft, job) => { delete job.snapshot.lineage; },
+    draft => { delete draft.lineage; },
+  ]) {
+    const envelope = copy(valid);
+    alter(envelope.state.drafts.find(value => value.draftId === draft.draftId), envelope.state.jobs.find(value => value.jobId === derivedJob.jobId));
+    envelope.checksum = createHash('sha256').update(JSON.stringify(envelope.state)).digest('hex');
+    fs.writeFileSync(file, JSON.stringify(envelope));
+    assert.throws(restart, { code: 'STORAGE_CORRUPT' });
+  }
+  fs.writeFileSync(file, JSON.stringify(valid)); assert.deepEqual(restart().getJob(derivedJob.jobId).snapshot.lineage, lineage);
+});

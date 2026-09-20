@@ -11,15 +11,29 @@ Export `createAssetStore({rootDir})`. Methods: `put({data, mimeType, purpose, wi
 Export `createJobStore({rootDir})`. Return defensive copies, store atomic versioned JSON, fail closed on corrupted data. One Companion process owns a data directory.
 
 - `createDraft({capabilityId,params,context,source}) → CapabilityDraft`; draft has `draftId`, `revision:1`, schema version and timestamps. Empty params and null context are valid drafts.
+- Internal `createDerivedDraft({capabilityId,params,context,source}, lineage) → CapabilityDraft`; used only by the result-draft service after verifying the immutable source job, input assets, selected candidate and model budget. The store independently validates the lineage shape and source job/candidate ownership. This method is not a service, HTTP or MCP operation.
 - `getDraft(draftId)` and `listDrafts()`.
-- `updateDraft({draftId,expectedRevision,params?,context?,source}) → draft`; shallow merge params, replace context if provided. Return `REVISION_CONFLICT` / 409 with `details.current` on a stale write. Every accepted update increments revision.
-- `createJob({draftId,expectedRevision,requestId,source}) → {job,duplicate}`. Validate a runnable draft; persist immutable `snapshot:{capabilityId,capabilityVersion,revision,params,context}` before dispatch. Dedupe requestId before revision checks, but reject its reuse for a different draft/revision. Initial state `queued`; results `[]`; placement `{status:'not-requested'}`; `jobId`, requestId, timestamps. No automatic execution in the store.
+- `updateDraft({draftId,expectedRevision,params?,context?,source}) → draft`; shallow merge params, replace context if provided, preserve existing lineage. Return `REVISION_CONFLICT` / 409 with `details.current` (including lineage if present) on a stale write. Every accepted update increments revision.
+- `createJob({draftId,expectedRevision,requestId,source}) → {job,duplicate}`. Validate a runnable draft; persist immutable `snapshot:{capabilityId,capabilityVersion,revision,params,context,lineage?}` before dispatch. Dedupe requestId before revision checks, but reject its reuse for a different draft/revision. Initial state `queued`; results `[]`; placement `{status:'not-requested'}`; `jobId`, requestId, timestamps. No automatic execution in the store.
 - `getJob(jobId)`, `listJobs()` (newest first).
 - `transition(jobId,status,patch={}) → job`: enforce domain transitions; patch allows only `error` (structured public error), `provider` (nonsecret request/model metadata). Cannot replace snapshot/IDs.
 - `addResults(jobId,results) → job`: append immutable `{resultId,assetId,jobId,index,provider,createdAt}` objects; no state revival when cancelled. Result IDs are idempotent and cannot be overwritten.
 - `cancel(jobId) → job`: queued/running/recovery-required become cancelled; completed jobs are returned unchanged. Cancellation is durable before a controller is aborted.
 - `setPlacement(jobId,{status,requestId?,receipt?,error?}) → job`: enforce placement transitions separately. `receipt` is immutable once attached; never discard a successfully generated result on host failure. Concurrent different placement requests conflict. Repeated already applied request returns the existing state; never repeats a host write.
 - `recover() → changedJobs`: startup moves queued/running to recovery-required, and interrupted applying/queued placements to rollback-conflict; no automatic resend to provider/host.
+
+### Revision lineage
+
+An image-edit draft created by `deriveDraft` has one immutable, optional `lineage` object:
+
+- Original inputs: `{sourceJobId, mode:'original'}`. `sourceResultId` must be absent.
+- Candidate reference: `{sourceJobId, mode:'candidate-reference', sourceResultId}`. The result must belong to that source job.
+
+IDs use the shared identifier contract; null, unknown fields and ambiguous mode/result combinations are invalid. Lineage records the direct parent job, not an embedded ancestry tree. Deriving from a derived job creates a new direct-parent link; the previous link remains in that parent's snapshot. Later prompt/model/reference/context edits do not erase or change this historical provenance, even if the selected reference is removed. `source:ui|agent|system` continues to identify the update entry point and is independent of lineage.
+
+Ordinary `createDraft`, `updateDraft` and `createJob` inputs, as well as `deriveDraft` inputs, reject caller-supplied lineage with `INVALID_INPUT`. The derive service constructs it from the verified job/result, never copies it from caller input or inherits the source snapshot's lineage. Existing HTTP/MCP get/list draft calls return `draft.lineage`; get/list job calls return `job.snapshot.lineage`. No separate UI/Agent copy, approval state, automatic run, recapture or placement is added.
+
+Storage remains at schema version 1 with these optional fields. Existing records without lineage load without migration or invented provenance; ordinary drafts and their snapshots omit the field. New derived records survive restart with lineage, and every submitted snapshot retains the same immutable lineage as its owning draft. Missing/foreign stored sources, malformed lineage and inconsistent draft/snapshot lineage fail closed as `STORAGE_CORRUPT`. Older binaries that reject unknown fields cannot read enriched records; schema version 1 here guarantees old-data readability by this implementation, not downgrade compatibility with older code.
 
 ## Provider (`providers/index.js`)
 

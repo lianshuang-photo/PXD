@@ -49,6 +49,7 @@ test('derivation uses immutable job inputs despite current draft edits, preservi
   const second = await f.service.deriveDraft({ jobId: f.job.jobId, mode: 'original', source: 'agent' });
   assert.notEqual(first.draftId, f.draft.draftId); assert.notEqual(first.draftId, second.draftId); assert.equal(first.revision, 1);
   assert.deepEqual(first.params, f.job.snapshot.params); assert.deepEqual(first.context, f.job.snapshot.context); assert.equal(second.source, 'agent');
+  assert.deepEqual(first.lineage, { sourceJobId: f.job.jobId, mode: 'original' }); assert.deepEqual(second.lineage, first.lineage);
   assert.deepEqual(f.jobs.getJob(f.job.jobId), originalJob); assert.equal(f.jobs.listJobs().length, 1); assert.deepEqual(f.calls, []);
   first.params.recipe.values.strength = 0;
   assert.equal(f.jobs.getDraft(second.draftId).params.recipe.values.strength, 0.6);
@@ -57,6 +58,7 @@ test('candidate revision appends a reference while preserving exact original sou
   const f = await fixture(t), draft = await f.service.deriveDraft({ jobId: f.job.jobId, mode: 'candidate-reference', resultId: 'candidate-1' });
   assert.deepEqual(draft.params, f.params);
   assert.deepEqual(draft.context, { ...f.context, refs: [...f.context.refs, { assetId: f.candidate.assetId, role: 'reference' }] });
+  assert.deepEqual(draft.lineage, { sourceJobId: f.job.jobId, mode: 'candidate-reference', sourceResultId: 'candidate-1' });
   assert.equal(f.jobs.getJob(f.job.jobId).snapshot.context.refs.length, 1); assert.equal(f.jobs.listJobs().length, 1); assert.deepEqual(f.calls, []);
 });
 test('candidate belonging to another job or missing/corrupted input fails before creating a draft', async t => {
@@ -121,6 +123,8 @@ test('failed, cancelled and uncertain tasks can derive drafts without retrying o
     const draft = await f.service.deriveDraft({ jobId: f.job.jobId, mode: 'original' });
     const revision = await f.service.deriveDraft({ jobId: f.job.jobId, mode: 'candidate-reference', resultId: 'candidate-1' });
     assert.notEqual(draft.draftId, revision.draftId); assert.equal(revision.context.refs.length, 2);
+    assert.deepEqual(draft.lineage, { sourceJobId: f.job.jobId, mode: 'original' });
+    assert.deepEqual(revision.lineage, { sourceJobId: f.job.jobId, mode: 'candidate-reference', sourceResultId: 'candidate-1' });
     assert.deepEqual(f.jobs.getJob(f.job.jobId), original); assert.equal(f.jobs.listJobs().length, 1); assert.deepEqual(f.calls, []);
   }
 });
@@ -187,4 +191,41 @@ test('derivation rejects ambiguous modes and native layer jobs', async t => {
   const native = f.jobs.createDraft({ capabilityId: 'ps.layer.update', params: { layerId: 2, changes: { opacity: 50 } }, context: f.context });
   const { job } = f.jobs.createJob({ draftId: native.draftId, expectedRevision: 1, requestId: 'native-request' });
   await assert.rejects(f.service.deriveDraft({ jobId: job.jobId, mode: 'original' }), { code: 'CAPABILITY_CONFLICT' }); assert.deepEqual(f.calls, []);
+});
+test('successive revisions record their direct source job without copying an ancestor lineage', async t => {
+  const f = await fixture(t), first = await f.service.deriveDraft({ jobId: f.job.jobId, mode: 'candidate-reference', resultId: 'candidate-1' });
+  const { job } = f.jobs.createJob({ draftId: first.draftId, expectedRevision: 1, requestId: 'child-job' });
+  const next = await f.service.deriveDraft({ jobId: job.jobId, mode: 'original' });
+  assert.deepEqual(next.lineage, { sourceJobId: job.jobId, mode: 'original' });
+  assert.deepEqual(f.jobs.getJob(job.jobId).snapshot.lineage, first.lineage);
+  assert.deepEqual(next.context, first.context); assert.deepEqual(next.params, first.params);
+  assert.equal(f.jobs.listJobs().length, 2); assert.deepEqual(f.calls, []);
+});
+test('service callers cannot supply or overwrite derivation lineage through ordinary or derived draft inputs', async t => {
+  const f = await fixture(t), before = f.jobs.listDrafts(), lineage = { sourceJobId: f.job.jobId, mode: 'original' };
+  await assert.rejects(f.service.createDraft({ capabilityId: 'image.edit', lineage }), { code: 'INVALID_INPUT' });
+  await assert.rejects(f.service.updateDraft({ draftId: f.draft.draftId, expectedRevision: 1, lineage }), { code: 'INVALID_INPUT' });
+  for (const extra of [{ lineage }, { lineage: null }, { sourceJobId: f.job.jobId }, { sourceResultId: 'candidate-1' }]) {
+    await assert.rejects(f.service.deriveDraft({ jobId: f.job.jobId, mode: 'original', ...extra }), { code: 'INVALID_INPUT' });
+  }
+  assert.deepEqual(f.jobs.listDrafts(), before); assert.deepEqual(f.calls, []);
+});
+test('lineage and candidate context use the validated request when caller input changes during async asset reads', async t => {
+  const f = await fixture(t), read = f.assets.read;
+  let release, entered;
+  const waiting = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
+  f.assets.read = async assetId => {
+    const value = await read(assetId);
+    if (assetId === f.candidate.assetId) { entered(); await gate; }
+    return value;
+  };
+  const input = { jobId: f.job.jobId, mode: 'candidate-reference', resultId: 'candidate-1', source: 'agent' };
+  const pending = f.service.deriveDraft(input);
+  await waiting;
+  Object.assign(input, { jobId: 'different-job', mode: 'original', resultId: 'different-candidate', source: 'system' });
+  release();
+  const draft = await pending;
+  assert.deepEqual(draft.lineage, { sourceJobId: f.job.jobId, mode: 'candidate-reference', sourceResultId: 'candidate-1' });
+  assert.equal(draft.source, 'agent'); assert.deepEqual(draft.context.refs.at(-1), { assetId: f.candidate.assetId, role: 'reference' });
+  assert.deepEqual(f.calls, []);
 });
