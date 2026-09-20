@@ -30,7 +30,10 @@ async function fixture(t, options = {}) {
   const { job } = jobs.createJob({ draftId: draft.draftId, expectedRevision: 1, requestId: 'request-original' });
   jobs.transition(job.jobId, 'running');
   const candidate = await asset('result', { jobId: job.jobId });
-  jobs.addResults(job.jobId, [{ resultId: 'candidate-1', assetId: candidate.assetId }]); jobs.transition(job.jobId, 'succeeded', options.recordedModel === undefined ? {} : { provider: { id: 'fixture', model: options.recordedModel } });
+  const status = options.status || 'succeeded', finish = () => jobs.transition(job.jobId, status, options.recordedModel === undefined ? {} : { provider: { id: 'fixture', model: options.recordedModel } });
+  if (status !== 'succeeded') finish();
+  jobs.addResults(job.jobId, [{ resultId: 'candidate-1', assetId: candidate.assetId, ...(options.resultModel ? { provider: { id: 'fixture', model: options.resultModel } } : {}) }]);
+  if (status === 'succeeded') finish();
   Object.assign(f, { service, jobs, assets, draft, job: jobs.getJob(job.jobId), candidate, context, params }); return f;
 }
 test('derivation uses immutable job inputs despite current draft edits, preserving recipe and settings without execution', async t => {
@@ -105,6 +108,23 @@ test('missing historical model stays unset in original mode and cannot use the c
   const count = f.jobs.listDrafts().length;
   await assert.rejects(f.service.deriveDraft({ jobId: f.job.jobId, mode: 'candidate-reference', resultId: 'candidate-1' }), { code: 'REFERENCE_LIMIT_UNKNOWN' });
   assert.equal(f.jobs.listDrafts().length, count); assert.deepEqual(f.calls, []);
+});
+test('failed, cancelled and uncertain tasks can derive drafts without retrying or reviving their original work', async t => {
+  for (const status of ['failed', 'cancelled', 'recovery-required']) {
+    const f = await fixture(t, { status }), original = structuredClone(f.job);
+    const draft = await f.service.deriveDraft({ jobId: f.job.jobId, mode: 'original' });
+    const revision = await f.service.deriveDraft({ jobId: f.job.jobId, mode: 'candidate-reference', resultId: 'candidate-1' });
+    assert.notEqual(draft.draftId, revision.draftId); assert.equal(revision.context.refs.length, 2);
+    assert.deepEqual(f.jobs.getJob(f.job.jobId), original); assert.equal(f.jobs.listJobs().length, 1); assert.deepEqual(f.calls, []);
+  }
+});
+test('late candidate metadata cannot supply an otherwise unknown cancelled-job model', async t => {
+  const f = await fixture(t, { status: 'cancelled', noExplicitModel: true, resultModel: 'late-model' }), original = structuredClone(f.job);
+  f.describe = () => { throw Error('Do not infer the task model from late candidate metadata'); };
+  assert.equal((await f.service.deriveDraft({ jobId: f.job.jobId, mode: 'original' })).params.model, undefined);
+  const count = f.jobs.listDrafts().length;
+  await assert.rejects(f.service.deriveDraft({ jobId: f.job.jobId, mode: 'candidate-reference', resultId: 'candidate-1' }), { code: 'REFERENCE_LIMIT_UNKNOWN' });
+  assert.equal(f.jobs.listDrafts().length, count); assert.deepEqual(f.jobs.getJob(f.job.jobId), original); assert.deepEqual(f.calls, []);
 });
 test('derivation rejects ambiguous modes and native layer jobs', async t => {
   const f = await fixture(t);
