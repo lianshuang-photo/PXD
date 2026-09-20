@@ -182,7 +182,9 @@
       // one property. Match the DOM's separate setters inside our one transaction.
       if (changes.name != null) commands.push({ _obj: "set", _target: target, to: { _obj: "layer", name: changes.name }, _options: { dialogOptions: "dontDisplay" } });
       if (changes.opacity != null) commands.push({ _obj: "set", _target: target, to: { _obj: "layer", opacity: { _unit: "percentUnit", _value: changes.opacity } }, _options: { dialogOptions: "dontDisplay" } });
-      if (changes.visible != null) commands.push({ _obj: changes.visible ? "show" : "hide", null: target, _options: { dialogOptions: "dontDisplay" } });
+      // Match the DOM's show/hide descriptor. The transaction guard already
+      // requires this layer's document to be active.
+      if (changes.visible != null) commands.push({ _obj: changes.visible ? "show" : "hide", _target: [{ _ref: "layer", _id: layerId }], _options: { dialogOptions: "dontDisplay" } });
       if (commands.length) await batchPlay(commands);
     }
     function remember(ref, result) {
@@ -264,7 +266,7 @@
             await setProperties(doc, args.layerId, args.changes);
             var after = properties(find(doc, args.layerId));
             // Photoshop can quantize opacity to an 8-bit channel. Record the actual
-            // returned value; rollback guards compare that value without tolerance.
+            // returned value; rollback guards use only a small floating-point tolerance.
             verifyProperties(after, expected, 50 / 255 + 0.000001, "Photoshop 图层属性未达到请求状态");
             return { createdLayerIds: [], modifiedLayers: [{ layerId: args.layerId, before: before, after: after }] };
           });
@@ -287,7 +289,11 @@
         receipt.modifiedLayers.forEach(function (change) { demand(sameProperties(properties(find(doc, change.layerId, "ROLLBACK_CONFLICT")), change.after), "ROLLBACK_CONFLICT", "目标图层已有后续修改，未覆盖用户编辑"); });
         if (receipt.createdLayerIds.length) await batchPlay(receipt.createdLayerIds.map(function (id) { return { _obj: "delete", _target: [{ _ref: "layer", _id: id }, { _ref: "document", _id: doc.id }], _options: { dialogOptions: "dontDisplay" } }; }));
         for (var i = 0; i < receipt.modifiedLayers.length; i++) {
-          var change = receipt.modifiedLayers[i]; await setProperties(doc, change.layerId, change.before);
+          var change = receipt.modifiedLayers[i], restore = {};
+          // Compare actual host snapshots, not requested values. Do not use the
+          // edit's opacity quantization tolerance to skip a recorded change.
+          ["name", "opacity", "visible"].forEach(function (field) { if (change.before[field] !== change.after[field]) restore[field] = change.before[field]; });
+          await setProperties(doc, change.layerId, restore);
           verifyProperties(properties(find(doc, change.layerId)), change.before, 0.000001, "原有图层属性未能恢复");
         }
         demand(receipt.createdLayerIds.every(function (id) { return !layers(doc).some(function (layer) { return layer.id === id; }); }), "HOST_EXECUTION_FAILED", "本次创建的图层未能撤销"); return {};
