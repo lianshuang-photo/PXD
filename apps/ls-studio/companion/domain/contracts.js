@@ -96,6 +96,18 @@ function validateDraft(input) {
   invariant(input.source == null || ['ui', 'agent', 'system'].includes(input.source), 'INVALID_INPUT', 'Unknown update source');
   return { capabilityId: def.id, capabilityVersion: def.version, params: clone(input.params || {}), context: validateContext(input.context), source: input.source || 'ui' };
 }
+function patchParams(capabilityId, current, patch = {}, unsetParams = []) {
+  const def = capability(capabilityId);
+  object(patch, 'params');
+  invariant(Array.isArray(unsetParams) && unsetParams.length <= 32 && new Set(unsetParams).size === unsetParams.length, 'INVALID_INPUT', 'unsetParams must contain unique top-level parameter names');
+  const params = clone(current);
+  for (const key of unsetParams) {
+    invariant(typeof key === 'string' && Object.hasOwn(def.inputSchema.properties, key), 'INVALID_INPUT', 'unsetParams contains an unsupported parameter');
+    invariant(!Object.hasOwn(patch, key), 'INVALID_INPUT', 'A parameter cannot be set and unset in the same update');
+    delete params[key];
+  }
+  return { ...params, ...clone(patch) };
+}
 function validateRunSnapshot(snapshot) {
   const draft = validateDraft(snapshot), c = draft.context;
   invariant(c && c.documentRef.historyStateId != null, 'CONTEXT_REQUIRED', 'Capture the source document before running');
@@ -130,4 +142,4 @@ const hostOperations = {
   studio_rollback: schema({ receipt: { type: 'object' } }, ['receipt']),
 };
 capabilityDefinitions[0].inputSchema.properties.recipe = schema({ recipeId: identifier, sourceHash: { type: 'string', pattern: '^[a-f0-9]{64}$' }, values: { type: 'object', additionalProperties: { type: 'number', minimum: 0, maximum: 1 } } }, ['recipeId', 'sourceHash', 'values']);
-module.exports = { DomainError, invariant, object, clone, id, schema, identifier, integer, contextSchema, documentRefSchema, capabilityDefinitions, capability, validateSchema, validateContext, validateDraft, validateRunSnapshot, assertTransition, jobTransitions, placementTransitions, publicError, hostOperations };
+module.exports = { DomainError, invariant, object, clone, id, schema, identifier, integer, contextSchema, documentRefSchema, capabilityDefinitions, capability, validateSchema, validateContext, validateDraft, patchParams, validateRunSnapshot, assertTransition, jobTransitions, placementTransitions, publicError, hostOperations };

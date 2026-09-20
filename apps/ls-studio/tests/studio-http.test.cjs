@@ -86,6 +86,16 @@ test('only observed bounded legacy tools are forwarded; internal host operations
   ]) assert.equal((await f.ui(operation, args)).body.ok, false);
   assert.deepEqual(calls.map(call => call.name), ['photoshop_get_document']);
 });
+test('UI and MCP use the same revision-checked unsetParams contract', async t => {
+  const { service } = await realService(t), f = await serverFor(t, service), mcp = createPhotoshopMcp({ base: f.base, token: TOKEN });
+  const draft = (await f.ui('createDraft', { capabilityId: 'image.edit', params: { model: 'gemini-3-pro-image-preview', imageSize: '2K', temperature: 0.5 } })).body.value;
+  const reset = (await mcp.handle({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'studio_update_draft', arguments: { draftId: draft.draftId, expectedRevision: 1, unsetParams: ['model', 'imageSize'] } } })).result;
+  assert.equal(reset.isError, false); assert.deepEqual(reset.structuredContent.params, { temperature: 0.5 }); assert.equal(reset.structuredContent.source, 'agent');
+  assert.equal((await f.ui('updateDraft', { draftId: draft.draftId, expectedRevision: 1, unsetParams: ['temperature'] })).status, 409);
+  const cleared = await f.ui('updateDraft', { draftId: draft.draftId, expectedRevision: 2, unsetParams: ['temperature'] }); assert.equal(cleared.status, 200); assert.deepEqual(cleared.body.value.params, {});
+  const invalid = await f.ui('updateDraft', { draftId: draft.draftId, expectedRevision: 3, unsetParams: ['model'], params: { model: 'other' } }); assert.equal(invalid.status, 400);
+  assert.equal((await f.ui('getDraft', { draftId: draft.draftId })).body.value.revision, 3);
+});
 test('local host/origin, client marker and MCP token checks happen before service access', async t => {
   let calls = 0;
   const f = await serverFor(t, { discover() { calls++; return {}; } });

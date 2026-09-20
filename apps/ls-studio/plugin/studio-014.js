@@ -14,11 +14,32 @@
     var chunks = []; for (var i = 0; i < bytes.length; i += 8192) chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)));
     return btoa(chunks.join(""));
   }
+  function modelProfile(provider, model) {
+    if (!provider) return {};
+    var requested = String(model || provider.defaultModel || provider.model || "").trim().replace(/^models\//, "");
+    if (requested === provider.model) return provider;
+    return (provider.models || []).find(function (profile) { return profile.id === requested; }) || provider.unknownModel || provider;
+  }
+  function inputBudget(state) {
+    var context = state.form.context, provider = state.discovery && state.discovery.provider, profile = modelProfile(provider, state.form.params.model);
+    return { used: context ? 1 + (context.selectionMaskAssetId ? 1 : 0) + (context.refs || []).length : 0, maximum: profile.limits && profile.limits.inputImages, bytes: profile.limits && profile.limits.inputBytes };
+  }
+  function generationIssue(state) {
+    if (state.draft && state.draft.capabilityId !== "image.edit") return "";
+    var params = state.form.params, provider = state.discovery && state.discovery.provider, profile = modelProfile(provider, params.model), settings = profile.settings || {}, budget = inputBudget(state);
+    if (params.model !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(String(params.model).trim().replace(/^models\//, ""))) return "模型名称无效，请填写模型 ID 或恢复服务默认。";
+    if (budget.maximum && budget.used > budget.maximum) return "当前模型最多接受 " + budget.maximum + " 张输入（源图和蒙版也占用额度），请减少参考图或切换模型。";
+    if (params.imageSize !== undefined && (settings.imageSize || []).indexOf(params.imageSize) < 0) return "当前模型不支持所选输出尺寸，请恢复模型默认或切换模型。";
+    if (params.aspectRatio !== undefined && (settings.aspectRatio || ["auto"]).indexOf(params.aspectRatio) < 0) return "当前模型不支持所选画面比例，请恢复模型默认。";
+    if (params.temperature !== undefined && (typeof params.temperature !== "number" || !Number.isFinite(params.temperature) || params.temperature < 0 || params.temperature > 2)) return "变化程度需在 0–2 之间，留空使用模型默认。";
+    if (state.form.context && state.form.context.settings && state.form.context.settings.autoApply && params.imageSize === "4K") return "4K 超出自动回贴限制，请关闭自动回贴或选择较小尺寸。";
+    return "";
+  }
   function createTransport(options) {
     var fetchImpl = options.fetchImpl || fetch, base = baseFor(options.location, options.base);
-    async function call(operation, args) {
+    async function request(path, body) {
       var response;
-      try { response = await fetchImpl(base + "/studio/call", { method: "POST", headers: { "Content-Type": "application/json", "X-PXDLS-Agent": "1" }, body: JSON.stringify({ operation: operation, arguments: args || {} }) }); }
+      try { response = await fetchImpl(base + path, { method: body === undefined ? "GET" : "POST", headers: { "Content-Type": "application/json", "X-PXDLS-Agent": "1" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
       catch (_) { throw error("NETWORK_ERROR", "连接中断。提交结果尚未确认，请先刷新任务；重试会沿用原请求编号。"); }
       var body;
       try { body = await response.json(); } catch (_) { throw error("INVALID_RESPONSE", "服务未返回有效结果，请刷新任务核对状态。"); }
@@ -28,6 +49,7 @@
       }
       return body.value;
     }
+    function call(operation, args) { return request("/studio/call", { operation: operation, arguments: args || {} }); }
     async function readAsset(assetId) {
       requireValue(validId(assetId), "INVALID_INPUT", "资产编号无效");
       var response = await fetchImpl(base + "/studio/assets/" + encodeURIComponent(assetId), { headers: { "X-PXDLS-Agent": "1" } });
@@ -40,7 +62,7 @@
       requireValue(bytes.length && bytes.length <= 32 * 1024 * 1024, "IMAGE_TOO_LARGE", "预览图像为空或超过 32 MiB");
       return "data:" + mime + ";base64," + base64(bytes);
     }
-    return { call: call, readAsset: readAsset, base: base };
+    return { call: call, readAsset: readAsset, base: base, getProviderSettings: function () { return request("/studio/provider-settings"); }, updateProviderSettings: function (value) { return request("/studio/provider-settings", value); } };
   }
   function createController(options) {
     var transport = options.transport, storage = options.storage, storageKey = "pxdls.studio.pending:" + (transport.base || "test"), listeners = [], disposed = false, epoch = 0, localVersion = 0, refreshPromise = null;
@@ -117,11 +139,13 @@
       });
     }
     function editParams(patch) { active(); state.form.params = Object.assign({}, state.form.params, clone(patch)); state.dirty = true; localVersion++; state.error = null; emit(); }
+    function unsetParams(names) { active(); names.forEach(function (name) { delete state.form.params[name]; }); state.dirty = true; localVersion++; state.error = null; emit(); }
     function editContext(patch) { active(); requireValue(state.form.context, "CONTEXT_REQUIRED", "请先捕获明确的选区或整图范围"); state.form.context = Object.assign({}, state.form.context, clone(patch)); state.dirty = true; localVersion++; state.error = null; emit(); }
     async function saveInternal() {
       var draft = active(); noConflict();
       if (!state.dirty) return clone(draft);
-      var version = localVersion, updated = await serviceCall("updateDraft", { draftId: draft.draftId, expectedRevision: draft.revision, params: clone(state.form.params), context: clone(state.form.context), source: "ui" });
+      var unset = Object.keys(draft.params || {}).filter(function (name) { return !Object.prototype.hasOwnProperty.call(state.form.params, name); });
+      var version = localVersion, updated = await serviceCall("updateDraft", { draftId: draft.draftId, expectedRevision: draft.revision, params: clone(state.form.params), ...(unset.length ? { unsetParams: unset } : {}), context: clone(state.form.context), source: "ui" });
       setDraft(updated, version !== localVersion); state.notice = "已保存共享草稿 · revision " + updated.revision; return clone(updated);
     }
     async function loadDraft(draftId, discard) {
@@ -158,6 +182,8 @@
       return write(async function () {
         active(); noConflict(); requireValue(state.form.context, "CONTEXT_REQUIRED", "请先捕获处理范围，再加入参考图");
         requireValue((state.form.context.refs || []).length < 16, "REFERENCE_LIMIT", "最多加入 16 张参考图");
+        var budget = inputBudget(state);
+        requireValue(!budget.maximum || budget.used < budget.maximum, "REFERENCE_LIMIT", "当前模型的输入额度已用完；源图和蒙版也占额度，请移除参考图或切换模型");
         requireValue(["reference", "identity", "style", "structure"].indexOf(role || "reference") >= 0, "INVALID_INPUT", "参考图用途无效");
         var asset = await serviceCall("importAsset", input), refs = (state.form.context.refs || []).concat([{ assetId: asset.assetId, role: role || "reference" }]);
         editContext({ refs: refs }); state.notice = "参考图已存入共享资产"; return clone(asset);
@@ -177,7 +203,10 @@
         var draft = active(); noConflict();
         requireValue(!state.pendingRun, "SUBMISSION_UNCERTAIN", "先刷新任务或重试原提交，不能创建另一个可能重复的任务");
         requireValue(state.discovery && state.discovery.photoshop && state.discovery.photoshop.connected, "HOST_UNAVAILABLE", "Photoshop 尚未连接");
-        if (draft.capabilityId === "image.edit") requireValue(state.discovery.provider && state.discovery.provider.configured, "PROVIDER_NOT_CONFIGURED", "图像服务尚未配置");
+        if (draft.capabilityId === "image.edit") {
+          requireValue(state.discovery.provider && state.discovery.provider.configured, "PROVIDER_NOT_CONFIGURED", "图像服务尚未配置");
+          requireValue(!generationIssue(state), "INVALID_INPUT", generationIssue(state));
+        }
         if (draft.capabilityId === "ps.layer.update") {
           await observeLayersInternal(); var layerId = state.form.params.layerId, observed = state.observed, context = state.form.context;
           if (context && observed.document.id === context.documentRef.documentId && observed.document.historyStateId === context.documentRef.historyStateId && Number.isInteger(layerId) && layerId > 0 && !observed.layers.some(function (layer) { return layer.id === layerId; })) {
@@ -267,7 +296,7 @@
       snapshot: snapshot, subscribe: function (listener) { listeners.push(listener); listener(snapshot()); return function () { listeners = listeners.filter(function (v) { return v !== listener; }); }; },
       refresh: refresh, createDraft: function (capabilityId) { return createDraft(capabilityId, false); }, saveAsNew: function () { return createDraft(active().capabilityId, true); },
       loadDraft: function (draftId) { return loadDraft(draftId, false); }, reloadDraft: function () { return loadDraft(active().draftId, true); },
-      editParams: editParams, editContext: editContext, save: function () { return write(saveInternal); }, capture: capture, importReference: importReference,
+      editParams: editParams, unsetParams: unsetParams, editContext: editContext, save: function () { return write(saveInternal); }, capture: capture, importReference: importReference,
       refreshLayers: function () { return write(observeLayersInternal); }, selectLayer: selectLayer,
       loadMoreLayers: function () { return write(async function () { var doc = state.observed.document, offset = state.observed.nextOffset; requireValue(doc && offset != null, "NO_MORE_LAYERS", "没有更多图层"); var result = await serviceCall("observe", { tool: "photoshop_list_layers", arguments: { documentId: doc.id, limit: 200, offset: offset } }); state.observed.layers = state.observed.layers.concat(result.layers); state.observed.nextOffset = result.nextOffset; return clone(state.observed); }); },
       run: run, retryRun: function () { return write(function () { requireValue(state.pendingRun, "NO_PENDING_REQUEST", "没有待核对的提交"); return submitRun(clone(state.pendingRun)); }); }, cancel: cancel, apply: apply, rollback: rollback,
@@ -281,7 +310,7 @@
 
   function mount(options) {
     options = options || {};
-    var win = options.window || root, doc = options.document || win.document, ui = options.ui || win.PXD_UI, pane = doc.getElementById("pane-pro"), nodes = {}, timers = [], unsubscribe = null, controller, transport, disposed = false, renderedLists = {}, assets = new Map(), proComposer = null;
+    var win = options.window || root, doc = options.document || win.document, ui = options.ui || win.PXD_UI, pane = doc.getElementById("pane-pro"), nodes = {}, timers = [], unsubscribe = null, controller, transport, disposed = false, renderedLists = {}, assets = new Map(), proComposer = null, providerPanel = null;
     requireValue(pane && ui, "UI_UNAVAILABLE", "专业工作区容器尚未加载");
     function node(tag, className, text, parent, id) { var el = doc.createElement(tag); if (className) el.className = className; if (text != null) el.textContent = text; if (id) { el.id = id; nodes[id] = el; } if (parent) parent.appendChild(el); return el; }
     function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
@@ -301,6 +330,7 @@
     button(toolbar, "studioRefresh", "刷新", function () { return controller.refresh(); });
     button(toolbar, "studioLoadLatest", "舍弃本地并重新载入", function () { return controller.reloadDraft(); });
     node("div", "studio-note studio-service", "读取服务状态…", draftSection, "studioService");
+    button(draftSection, "studioProviderSettings", "配置图像服务", function () { if (win.PXD_NAV) win.PXD_NAV.showTab("settings"); if (providerPanel) return providerPanel.load(); });
     node("div", "studio-list studio-drafts", null, draftSection, "studioDraftList");
     node("div", "studio-note studio-revision", "新建草稿，或选择 Agent 已建立的草稿。", draftSection, "studioRevision");
     var conflict = node("div", "studio-conflict", null, draftSection, "studioConflict");
@@ -327,9 +357,15 @@
     var preserve = field(imageSection, "studioPreserve", "必须保留（每行一项）", "textarea"); preserve.rows = 2; preserve.placeholder = "本人特征\n服装细节";
     preserve.addEventListener("input", handle(function () { controller.editContext({ preserve: preserve.value.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean).slice(0, 32) }); }));
     var imageOptions = node("div", "studio-row studio-options", null, imageSection);
+    var model = field(imageOptions, "studioModel", "图像模型（留空跟随服务）"), temperature = field(imageOptions, "studioTemperature", "变化程度（留空使用默认）"); temperature.type = "number"; temperature.min = "0"; temperature.max = "2"; temperature.step = "0.1";
+    model.addEventListener("input", handle(function () { if (model.value.trim()) controller.editParams({ model: model.value.trim().replace(/^models\//, "") }); else controller.unsetParams(["model"]); }));
+    temperature.addEventListener("input", handle(function () { if (temperature.value !== "") controller.editParams({ temperature: Number(temperature.value) }); else controller.unsetParams(["temperature"]); }));
     var ratio = field(imageOptions, "studioRatio", "画面比例", "select"), size = field(imageOptions, "studioImageSize", "输出尺寸", "select");
-    ratio.addEventListener("change", handle(function () { if (ratio.value) controller.editParams({ aspectRatio: ratio.value }); }));
-    size.addEventListener("change", handle(function () { if (size.value) controller.editParams({ imageSize: size.value }); }));
+    ratio.addEventListener("change", handle(function () { if (ratio.value) controller.editParams({ aspectRatio: ratio.value }); else controller.unsetParams(["aspectRatio"]); }));
+    size.addEventListener("change", handle(function () { if (size.value) controller.editParams({ imageSize: size.value }); else controller.unsetParams(["imageSize"]); }));
+    node("div", "studio-note", "", imageSection, "studioModelNote");
+    node("div", "studio-note", "", imageSection, "studioInputBudget");
+    node("div", "studio-error", "", imageSection, "studioInputIssue");
     var refsHead = node("div", "studio-row", null, imageSection);
     button(refsHead, "studioAddRef", "＋ 参考图", function () { return pickReferences(); });
     node("span", "studio-note", "保存到共享资产；用途可切换", refsHead);
@@ -418,7 +454,7 @@
     function list(name, signature, build) { var text = JSON.stringify(signature); if (renderedLists[name] === text) return; renderedLists[name] = text; clear(nodes[name]); build(nodes[name]); }
     function choices(select, values, selected) {
       var available = values || [], signature = JSON.stringify([available, selected]); if (select._signature === signature) return; select._signature = signature; clear(select);
-      var empty = node("option", "", "模型默认", select); empty.value = ""; empty.disabled = !!selected;
+      var empty = node("option", "", "模型默认", select); empty.value = "";
       available.forEach(function (value) { var option = node("option", "", value === "auto" ? "跟随源图" : value, select); option.value = value; });
       if (selected && available.indexOf(selected) < 0) { var old = node("option", "", selected + "（待服务校验）", select); old.value = selected; }
       setValue(select, selected || "");
@@ -439,7 +475,12 @@
       setValue(prompt, state.form.params.prompt); setValue(preserve, context && (context.preserve || []).join("\n"));
       if (proComposer) proComposer.sync();
       prompt.disabled = !draft || busy; preserve.disabled = !context || busy; ratio.disabled = !draft || busy; size.disabled = !draft || busy;
-      var providerSettings = provider && provider.settings || {}; choices(ratio, providerSettings.aspectRatio || ["auto"], state.form.params.aspectRatio); choices(size, providerSettings.imageSize || [], state.form.params.imageSize);
+      var profile = modelProfile(provider, state.form.params.model), providerSettings = profile.settings || {}, budget = inputBudget(state), issue = generationIssue(state);
+      setValue(model, state.form.params.model); model.placeholder = provider && (provider.defaultModel || provider.model) || "gemini-2.5-flash-image"; setValue(temperature, state.form.params.temperature); model.disabled = temperature.disabled = !draft || busy;
+      choices(ratio, providerSettings.aspectRatio || ["auto"], state.form.params.aspectRatio); choices(size, providerSettings.imageSize || [], state.form.params.imageSize);
+      nodes.studioModelNote.textContent = profile.knownModel === false ? "自定义模型使用保守的输入限制；供应商支持情况需实际验证。" : "留空或选择默认可清除覆盖值；模型限制包含源图和选区蒙版。";
+      nodes.studioInputBudget.textContent = budget.maximum ? (context ? "输入 " + budget.used + " / " + budget.maximum + " 张 · 源图 1" + (context.selectionMaskAssetId ? " + 蒙版 1" : "") + " + 参考图 " + (context.refs || []).length : "模型最多接受 " + budget.maximum + " 张输入；捕获后显示可用参考额度") + (budget.bytes ? " · 合计最多 " + Math.floor(budget.bytes / 1024 / 1024) + " MiB" : "") : "";
+      nodes.studioInputIssue.textContent = issue; nodes.studioInputIssue.hidden = !issue;
       var recipes = state.recipes;
       nodes.studioMoreRecipes.hidden = recipes.nextOffset == null;
       nodes.studioRecipeNote.textContent = recipes.error || (recipes.loading ? "读取配方…" : recipes.selected ? recipes.selected.title + " · 参数调整后点击载入，替换编辑指令并保留处理范围与参考图。" : "查找并载入到图像草稿；不会自动执行。");
@@ -496,27 +537,34 @@
       disable("studioLoadLatest", busy || !draft);
       ["studioCaptureSelection", "studioCaptureDocument", "studioRefreshLayers", "studioMoreLayers"].forEach(function (id) { disable(id, busy || !draft || !host); });
       ["studioAddRef", "studioAutoApply", "studioDisableGrouping"].forEach(function (id) { disable(id, busy || !context); });
+      disable("studioAddRef", busy || !context || !!(budget.maximum && budget.used >= budget.maximum));
       ["studioLayerVisible", "studioResetChanges"].forEach(function (id) { disable(id, busy || !selected || !layerContext); });
       disable("studioSave", busy || !draft || !state.dirty || !!state.conflict); disable("studioToAgent", busy || !draft || state.dirty || !!state.conflict); disable("studioRollback", busy || !host);
       nodes.studioRun.textContent = busy ? "处理中…" : imageMode ? "生成结果" : "修改图层";
-      disable("studioRun", busy || !draft || !context || !!state.conflict || !!state.pendingRun || !host || imageMode && !(provider && provider.configured) || !imageMode && (!selected || !Object.keys(changes).length));
+      disable("studioRun", busy || !draft || !context || !!state.conflict || !!state.pendingRun || !host || imageMode && (!(provider && provider.configured) || !!issue) || !imageMode && (!selected || !Object.keys(changes).length));
     }
     function connect() {
-      if (controller) controller.dispose(); if (unsubscribe) unsubscribe(); renderedLists = {}; assets.clear();
+      if (controller) controller.dispose(); if (unsubscribe) unsubscribe(); if (providerPanel) providerPanel.dispose(); providerPanel = null; renderedLists = {}; assets.clear();
       var configured = win.PXD_NAV ? win.PXD_NAV.baseUrl() : doc.getElementById("baseUrl") && doc.getElementById("baseUrl").value;
       transport = options.transport || createTransport({ base: configured, location: win.location });
       controller = createController({ transport: transport, storage: options.storage || win.localStorage });
       unsubscribe = controller.subscribe(render); mounted.controller = controller; mounted.transport = transport;
       controller.refresh().catch(function () {});
+      var settingsParent = doc.getElementById("studioProviderSettingsPanel");
+      if (settingsParent && win.PXD_PROVIDER_SETTINGS) {
+        var currentController = controller;
+        providerPanel = win.PXD_PROVIDER_SETTINGS.mount({ window: win, document: doc, parent: settingsParent, ui: ui, transport: transport, onSaved: async function () { await currentController.refresh(); return currentController.refresh(); } });
+        providerPanel.load().catch(function () {});
+      }
     }
-    var mounted = { controller: null, transport: null, nodes: nodes, toAgent: toAgent, dispose: function () { disposed = true; if (controller) controller.dispose(); if (unsubscribe) unsubscribe(); if (proComposer) proComposer.close(); timers.forEach(clearInterval); var baseInput = doc.getElementById("baseUrl"); if (baseInput) baseInput.removeEventListener("change", connect); if (workspace.parentElement) workspace.parentElement.removeChild(workspace); } };
+    var mounted = { controller: null, transport: null, nodes: nodes, toAgent: toAgent, dispose: function () { disposed = true; if (controller) controller.dispose(); if (unsubscribe) unsubscribe(); if (proComposer) proComposer.close(); if (providerPanel) providerPanel.dispose(); timers.forEach(clearInterval); var baseInput = doc.getElementById("baseUrl"); if (baseInput) baseInput.removeEventListener("change", connect); if (workspace.parentElement) workspace.parentElement.removeChild(workspace); } };
     connect();
     if (win.PXD_COMPOSER) proComposer = win.PXD_COMPOSER.attach({ field: prompt, frame: prompt.parentElement, document: doc, native: !!(win.PXD_CONTEXT && win.PXD_CONTEXT.isPhotoshop), enterSends: function () { try { return win.localStorage.getItem("pxdls.enter-send") !== "false"; } catch (_) { return true; } }, send: handle(function () { if (!ui.isDisabled(nodes.studioRun)) return controller.run(); }), saveDraft: function () { if (controller.snapshot().draft && controller.snapshot().form.params.prompt !== prompt.value) controller.editParams({ prompt: prompt.value }); } });
     var baseInput = doc.getElementById("baseUrl"); if (baseInput) baseInput.addEventListener("change", connect);
     if (options.poll !== false) timers.push(setInterval(function () { if (!disposed && doc.visibilityState !== "hidden") controller.refresh().catch(function () {}); }, 2500));
     return mounted;
   }
-  var api = { createTransport: createTransport, createController: createController, baseFor: baseFor, mount: mount };
+  var api = { createTransport: createTransport, createController: createController, baseFor: baseFor, modelProfile: modelProfile, inputBudget: inputBudget, generationIssue: generationIssue, mount: mount };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (root) {
     root.PXD_STUDIO_API = api;

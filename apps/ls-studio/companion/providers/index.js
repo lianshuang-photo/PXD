@@ -44,18 +44,18 @@ function profileFor(model) {
   }
   return { known: false, aspectRatios: [], imageSizes: [], maxInputImages: 3 };
 }
-function configuration(env, config) {
+function configuration(env, config, { allowMissingKey = false } = {}) {
   invariant(env && typeof env === 'object' && !Array.isArray(env), 'PROVIDER_NOT_CONFIGURED', 'The provider environment must be an object', 503);
   if (config !== undefined) object(config, 'config');
   const read = (name, variable, fallback) => config && Object.hasOwn(config, name) ? config[name] : env[variable] ?? fallback;
   const key = read('apiKey', 'PXDLS_GEMINI_API_KEY', '');
-  invariant(typeof key === 'string' && /^[\x21-\x7e]{1,4096}$/.test(key.trim()), 'PROVIDER_NOT_CONFIGURED', 'Set PXDLS_GEMINI_API_KEY to enable image generation', 503);
+  invariant(typeof key === 'string' && ((allowMissingKey && key.trim() === '') || /^[\x21-\x7e]{1,4096}$/.test(key.trim())), 'PROVIDER_NOT_CONFIGURED', 'Configure a Gemini API key to enable image generation', 503);
   const apiKey = key.trim();
   const model = normalizeModel(read('model', 'PXDLS_GEMINI_MODEL', DEFAULT_MODEL), apiKey);
   const baseUrl = read('baseUrl', 'PXDLS_GEMINI_BASE_URL', DEFAULT_BASE_URL);
   let url;
   try { url = new URL(baseUrl); } catch { /* Return only a fixed configuration message. */ }
-  invariant(typeof baseUrl === 'string' && url && url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash && !url.pathname.includes(':') && !baseUrl.includes(apiKey), 'PROVIDER_NOT_CONFIGURED', 'The Gemini base URL must be an HTTPS API root without credentials, query parameters or fragments', 503);
+  invariant(typeof baseUrl === 'string' && url && url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash && !url.pathname.includes(':') && (!apiKey || !baseUrl.includes(apiKey)), 'PROVIDER_NOT_CONFIGURED', 'The Gemini base URL must be an HTTPS API root without credentials, query parameters or fragments', 503);
   let apiRoot = url.href.replace(/\/+$/, '');
   if (!/\/v1(?:beta)?$/.test(apiRoot)) apiRoot += '/v1beta';
   const timeoutValue = read('timeoutMs', 'PXDLS_GEMINI_TIMEOUT_MS', 180_000);
@@ -239,8 +239,9 @@ function publicRequestId(data, fallback, apiKey) {
 }
 
 function createGeminiProvider({ env = process.env, fetchImpl = globalThis.fetch, config } = {}) {
-  let resolved, configError;
+  let resolved, preview, configError;
   try {
+    preview = configuration(env, config, { allowMissingKey: true });
     resolved = configuration(env, config);
     invariant(typeof fetchImpl === 'function', 'PROVIDER_NOT_CONFIGURED', 'This runtime does not provide fetch', 503);
   } catch (error) {
@@ -248,15 +249,23 @@ function createGeminiProvider({ env = process.env, fetchImpl = globalThis.fetch,
     configError = error instanceof DomainError ? error : new DomainError('PROVIDER_NOT_CONFIGURED', 'The image provider configuration is invalid', 503);
   }
   return {
-    describe() {
-      const model = resolved?.model || DEFAULT_MODEL;
-      const profile = profileFor(model);
+    describe({ model: requestedModel } = {}) {
+      const defaultModel = preview?.model || DEFAULT_MODEL;
+      let model = defaultModel;
+      if (requestedModel !== undefined) {
+        try { model = normalizeModel(requestedModel, preview?.apiKey); }
+        catch (_) { throw new DomainError('INVALID_INPUT', 'The requested Gemini model name is invalid'); }
+      }
+      const description = name => {
+        const profile = profileFor(name);
+        return { settings: { temperature: { minimum: 0, maximum: 2 }, aspectRatio: ['auto', ...profile.aspectRatios], imageSize: [...profile.imageSizes] }, knownModel: profile.known, limits: { ...LIMITS, inputImages: profile.maxInputImages } };
+      };
       return {
-        id: 'gemini', configured: Boolean(resolved), model,
+        id: 'gemini', configured: Boolean(resolved), model, defaultModel,
         capabilities: ['image.edit'], mask: 'advisory', automaticRetry: false,
-        settings: { temperature: { minimum: 0, maximum: 2 }, aspectRatio: ['auto', ...profile.aspectRatios], imageSize: [...profile.imageSizes] },
-        knownModel: profile.known,
-        limits: { ...LIMITS, inputImages: profile.maxInputImages },
+        ...description(model),
+        models: ['gemini-2.5-flash-image', 'gemini-2.5-flash-image-preview', 'gemini-3-pro-image-preview'].map(id => ({ id, ...description(id) })),
+        unknownModel: description('unverified-model'),
         ...(configError ? { configurationError: { code: 'PROVIDER_NOT_CONFIGURED', message: configError.message } } : {}),
       };
     },
@@ -313,4 +322,4 @@ function createGeminiProvider({ env = process.env, fetchImpl = globalThis.fetch,
   };
 }
 
-module.exports = { createGeminiProvider };
+module.exports = { createGeminiProvider, configuration };

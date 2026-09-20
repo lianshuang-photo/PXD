@@ -18,6 +18,7 @@ function fixture(capabilityId = 'image.edit') {
     if (operation === 'updateDraft') {
       const draft = f.drafts.find(d => d.draftId === args.draftId);
       if (args.expectedRevision !== draft.revision) throw Object.assign(Error('Conflicting revision'), { code: 'REVISION_CONFLICT', status: 409, details: { current: copy(draft) } });
+      (args.unsetParams || []).forEach(name => { delete draft.params[name]; });
       draft.params = { ...draft.params, ...copy(args.params) }; draft.context = copy(args.context); draft.revision++; return copy(draft);
     }
     if (operation === 'run') {
@@ -97,6 +98,29 @@ test('run saves refs, settings and prompt into the shared revision, and duplicat
   const first = f.controller.run(); await assert.rejects(f.controller.run(), code('UI_BUSY')); const job = await first;
   assert.equal(job.snapshot.revision, 2); assert.equal(job.snapshot.params.prompt, 'Retouch naturally'); assert.deepEqual(job.snapshot.context.refs, [{ assetId: 'imported-reference', role: 'identity' }]);
   assert.equal(f.calls.filter(c => c.operation === 'run').length, 1); assert.equal(f.controller.snapshot().dirty, false);
+});
+test('restoring parameter defaults persists explicit removals and keeps later edits during save', async () => {
+  const f = fixture(); f.drafts[0].params = { prompt: 'Keep', model: 'gemini-3-pro-image-preview', imageSize: '2K', temperature: 0.7, aspectRatio: '1:1' };
+  await f.controller.refresh(); f.controller.unsetParams(['model', 'imageSize', 'temperature', 'aspectRatio']);
+  let release; f.intercept = async operation => { if (operation === 'updateDraft') await new Promise(resolve => { release = resolve; }); };
+  const pending = f.controller.save(); await new Promise(resolve => setImmediate(resolve)); f.controller.editParams({ temperature: 0.3 }); release(); await pending;
+  assert.equal(f.controller.snapshot().dirty, true); assert.deepEqual(f.drafts[0].params, { prompt: 'Keep' });
+  assert.deepEqual(f.calls.find(call => call.operation === 'updateDraft').args.unsetParams.sort(), ['aspectRatio', 'imageSize', 'model', 'temperature']);
+  f.intercept = null; await f.controller.save(); await f.controller.refresh(); assert.deepEqual(f.controller.snapshot().form.params, { prompt: 'Keep', temperature: 0.3 });
+});
+test('reference budget and output validation follow the draft model and count the source plus real mask', async () => {
+  const { createGeminiProvider } = require('../companion/providers'); const f = fixture();
+  const provider = createGeminiProvider({ env: {}, config: { apiKey: 'fixture-test-provider-secret' } });
+  f.intercept = async operation => operation === 'discover' ? { handled: true, value: { photoshop: { connected: true }, provider: provider.describe() } } : undefined;
+  await f.controller.refresh(); await f.controller.importReference({ base64: 'AA==', mimeType: 'image/png' }, 'identity');
+  await assert.rejects(f.controller.importReference({ base64: 'AA==', mimeType: 'image/png' }), code('REFERENCE_LIMIT'));
+  assert.equal(f.calls.filter(call => call.operation === 'importAsset').length, 1);
+  f.controller.editParams({ model: 'gemini-3-pro-image-preview', imageSize: '2K' });
+  await f.controller.importReference({ base64: 'AA==', mimeType: 'image/png' });
+  f.controller.unsetParams(['model']); await assert.rejects(f.controller.run(), code('INVALID_INPUT'));
+  assert.equal(f.calls.some(call => call.operation === 'run'), false);
+  f.controller.editContext({ refs: [] }); await assert.rejects(f.controller.run(), code('INVALID_INPUT'));
+  f.controller.unsetParams(['imageSize']); const job = await f.controller.run(); assert.equal(job.snapshot.params.imageSize, undefined);
 });
 test('ambiguous submissions survive controller reload; refresh reconciles durable request without rerunning', async () => {
   const f = fixture(); await f.controller.refresh();

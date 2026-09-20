@@ -46,6 +46,21 @@ test('submitted pixels/refs/mask/params remain an immutable snapshot after calle
   assert.equal(stored.snapshot.context.refs[0].assetId, 'asset-ref');
   assert.equal(store.getDraft(draft.draftId).params.temperature, 0.5, 'draft updates shallow-merge parameters');
 });
+test('unsetParams removes only named parameters at the expected revision and survives restart without changing prior jobs', t => {
+  const { store, restart } = setup(t);
+  const draft = store.createDraft({ ...copy(fixture.draft), params: { prompt: 'Original', model: 'gemini-3-pro-image-preview', imageSize: '2K', temperature: 0.5 } });
+  const { job } = store.createJob({ draftId: draft.draftId, expectedRevision: 1, requestId: 'before-reset' });
+  const updated = store.updateDraft({ draftId: draft.draftId, expectedRevision: 1, unsetParams: ['model', 'imageSize', 'temperature'], params: { prompt: 'Use model defaults' }, source: 'agent' });
+  assert.deepEqual(updated.params, { prompt: 'Use model defaults' }); assert.equal(updated.revision, 2);
+  assert.deepEqual(restart().getDraft(draft.draftId).params, updated.params);
+  assert.equal(restart().getJob(job.jobId).snapshot.params.imageSize, '2K');
+  assert.throws(() => store.updateDraft({ draftId: draft.draftId, expectedRevision: 1, unsetParams: ['prompt'] }), { code: 'REVISION_CONFLICT' });
+  for (const patch of [{ unsetParams: ['bogus'] }, { unsetParams: ['model', 'model'] }, { unsetParams: ['__proto__'] }, { unsetParams: ['imageSize'], params: { imageSize: '1K' } }, { unsetParams: null }]) {
+    assert.throws(() => store.updateDraft({ draftId: draft.draftId, expectedRevision: 2, ...patch }), { code: 'INVALID_INPUT' });
+    assert.equal(store.getDraft(draft.draftId).revision, 2);
+  }
+  const reapplied = store.updateDraft({ draftId: draft.draftId, expectedRevision: 2, params: { imageSize: '1K' } }); assert.equal(reapplied.params.imageSize, '1K');
+});
 test('duplicate request lookup precedes stale revision checks and survives restart; conflicting reuse fails', t => {
   const { store, submit, restart } = setup(t), { draft, job } = submit('dedupe');
   store.updateDraft({ draftId: draft.draftId, expectedRevision: 1, params: { prompt: 'next' } });

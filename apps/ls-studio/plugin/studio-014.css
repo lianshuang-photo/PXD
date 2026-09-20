@@ -19,7 +19,7 @@
 .studio-list-item.is-on { color: var(--text); border-left: var(--s2, 2px) solid var(--red); background: var(--surf); }
 .studio-field { display: flex; flex-direction: column; min-width: 0; margin-bottom: var(--s8, 8px); }
 .studio-field-label { margin-bottom: var(--s4, 4px); color: var(--muted); font-family: Arial, "PingFang SC", "Microsoft YaHei"; font-size: var(--s10, 10px); line-height: var(--s14, 14px); }
-.studio-workspace .studio-input { display: block; width: 100%; min-width: 0; background: var(--bg); color: var(--text); padding: var(--s7, 7px) var(--s8, 8px); border: var(--s1, 1px) solid var(--line); font-family: Arial, "PingFang SC", "Microsoft YaHei"; font-size: var(--s12, 12px); line-height: var(--s18, 18px); }
+.studio-workspace .studio-input, .studio-provider-settings .studio-input { display: block; width: 100%; min-width: 0; background: var(--bg); color: var(--text); padding: var(--s7, 7px) var(--s8, 8px); border: var(--s1, 1px) solid var(--line); font-family: Arial, "PingFang SC", "Microsoft YaHei"; font-size: var(--s12, 12px); line-height: var(--s18, 18px); }
 .studio-input:focus { border-color: var(--red); }
 .studio-field.is-focused .studio-input { border-color: var(--red); }
 .studio-workspace textarea.studio-input { height: var(--s88, 88px); min-height: var(--s55, 55px); }
@@ -40,3 +40,5 @@
 .studio-footer .studio-run { margin-left: auto; min-width: var(--s80, 80px); background: var(--red); color: #fff; border-color: var(--red); }
 .studio-error { color: var(--red); max-height: var(--s80, 80px); overflow: auto; }
 .studio-message { color: var(--ok); }
+.studio-provider-settings .studio-row { margin-top: var(--s8, 8px); }
+.studio-provider-settings .studio-input:disabled { color: var(--muted); }

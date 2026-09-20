@@ -32,11 +32,11 @@ function tokenMatches(actual, expected) {
   const a = Buffer.from(actual), b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
 }
-function readJson(req) {
+function readJson(req, maxBytes = MAX_BODY_BYTES) {
   invariant(/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || ''), 'JSON_REQUIRED', 'A JSON request is required', 415);
   invariant(!req.headers['content-encoding'] || req.headers['content-encoding'] === 'identity', 'UNSUPPORTED_ENCODING', 'Compressed request bodies are not accepted', 415);
   const length = req.headers['content-length'];
-  invariant(length === undefined || (/^\d+$/.test(length) && Number(length) <= MAX_BODY_BYTES), 'BODY_TOO_LARGE', 'Request body exceeds 48 MiB', 413);
+  invariant(length === undefined || (/^\d+$/.test(length) && Number(length) <= maxBytes), 'BODY_TOO_LARGE', 'Request body exceeds its size limit', 413);
   return new Promise((resolve, reject) => {
     let bytes = 0, chunks = [], finished = false;
     const timer = setTimeout(() => finish(new DomainError('REQUEST_TIMEOUT', 'Request body timed out', 408)), 15000);
@@ -50,7 +50,7 @@ function readJson(req) {
     const aborted = failure;
     const data = chunk => {
       bytes += chunk.length;
-      if (bytes > MAX_BODY_BYTES) return finish(new DomainError('BODY_TOO_LARGE', 'Request body exceeds 48 MiB', 413));
+      if (bytes > maxBytes) return finish(new DomainError('BODY_TOO_LARGE', 'Request body exceeds its size limit', 413));
       chunks.push(chunk);
     };
     const end = () => {
@@ -80,7 +80,7 @@ async function invoke(service, operation, args, source) {
   invariant(typeof service[operation] === 'function', 'CAPABILITY_UNAVAILABLE', 'This Studio operation is not currently available', 503);
   return service[operation](args);
 }
-function createStudioHttp({ service, toolToken } = {}) {
+function createStudioHttp({ service, toolToken, providerSettings } = {}) {
   invariant(service && typeof service === 'object', 'INVALID_INPUT', 'A shared capability service is required');
   async function handle(req, res, url) {
     if (url.pathname !== '/studio' && !url.pathname.startsWith('/studio/')) return false;
@@ -101,12 +101,19 @@ function createStudioHttp({ service, toolToken } = {}) {
       if (req.headers.origin) headers['Access-Control-Allow-Origin'] = req.headers.origin;
       const assetMatch = /^\/studio\/assets\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})$/.exec(url.pathname);
       const isCall = url.pathname === '/studio/call', isMcp = url.pathname === '/studio/mcp';
-      invariant(assetMatch || isCall || isMcp, 'NOT_FOUND', 'Studio endpoint was not found', 404);
+      const isSettings = url.pathname === '/studio/provider-settings';
+      invariant(assetMatch || isCall || isMcp || isSettings, 'NOT_FOUND', 'Studio endpoint was not found', 404);
       if (req.method === 'OPTIONS') {
         invariant(['GET', 'POST'].includes(req.headers['access-control-request-method']) && (req.headers['access-control-request-headers'] || '').split(',').every(value => !value.trim() || ['content-type', 'x-pxdls-agent', 'x-pxdls-tool'].includes(value.trim().toLowerCase())), 'PREFLIGHT_REJECTED', 'Unsupported preflight request', 403);
         res.writeHead(204, headers); res.end(); return true;
       }
       invariant(req.headers['x-pxdls-agent'] === '1', 'CLIENT_MARKER_REQUIRED', 'Studio client marker is required', 403);
+      if (isSettings) {
+        invariant(providerSettings, 'CAPABILITY_UNAVAILABLE', 'Provider settings are not available', 503);
+        invariant(['GET', 'POST'].includes(req.method), 'METHOD_NOT_ALLOWED', 'Provider settings require GET or POST', 405);
+        const value = req.method === 'GET' ? providerSettings.read() : providerSettings.update((await readJson(req, 16 * 1024)).value);
+        json(200, { ok: true, value }); return true;
+      }
       if (assetMatch) {
         invariant(req.method === 'GET', 'METHOD_NOT_ALLOWED', 'Managed assets require GET', 405);
         const { asset, data } = checkedAsset(await service.readAsset(assetMatch[1]));
