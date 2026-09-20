@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
-const { DomainError, invariant, object, clone, id, validateDraft, validateRunSnapshot, assertTransition, jobTransitions, placementTransitions } = require('../domain/contracts');
+const { DomainError, invariant, object, clone, id, validateDraft, patchParams, validateRunSnapshot, assertTransition, jobTransitions, placementTransitions } = require('../domain/contracts');
 const digest = value => createHash('sha256').update(value).digest('hex');
 const MAX_STORE_BYTES = 64 * 1024 * 1024;
 const own = (value, key) => Object.hasOwn(value, key);
@@ -163,11 +163,11 @@ function createJobStore({ rootDir } = {}) {
     state.drafts.push(draft); return save(state, draft);
   }
   function updateDraft(input) {
-    fields(input, ['draftId', 'expectedRevision', 'params', 'context', 'source']);
+    fields(input, ['draftId', 'expectedRevision', 'params', 'unsetParams', 'context', 'source']);
     const state = read(), draft = draftFrom(state, input.draftId);
     expectRevision(draft, input.expectedRevision);
     if (own(input, 'params')) object(input.params, 'params');
-    const checked = validateDraft({ capabilityId: draft.capabilityId, params: { ...draft.params, ...(input.params || {}) }, context: own(input, 'context') ? input.context : draft.context, source: source(input.source, draft.source) });
+    const checked = validateDraft({ capabilityId: draft.capabilityId, params: patchParams(draft.capabilityId, draft.params, input.params, input.unsetParams), context: own(input, 'context') ? input.context : draft.context, source: source(input.source, draft.source) });
     invariant(draft.revision < Number.MAX_SAFE_INTEGER, 'STATE_CONFLICT', 'Draft revision limit reached', 409);
     Object.assign(draft, checked, { revision: draft.revision + 1, updatedAt: new Date().toISOString() });
     return save(state, draft);
@@ -278,6 +278,7 @@ function createJobStore({ rootDir } = {}) {
   }
   return {
     createDraft, getDraft: draftId => clone(draftFrom(read(), draftId)), listDrafts: () => clone(read().drafts.slice().reverse()), updateDraft,
+    findJobByRequestId: requestId => { id(requestId, 'requestId'); return clone(read().jobs.find(job => job.requestId === requestId) || null); },
     createJob, getJob: jobId => clone(jobFrom(read(), jobId)), listJobs: () => clone(read().jobs.slice().reverse()),
     transition, addResults, cancel, setPlacement, recover,
   };

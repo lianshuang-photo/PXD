@@ -24,7 +24,7 @@ description: 在 LS Studio 中读取 Photoshop 文档、图层、选区与实际
 2. 用 `studio_capture_context` 捕获明确的 `selection` 或 `document` 范围。保存返回的完整 context，其中包含文档与历史身份、生产图像 assetId、坐标变换，选区捕获还包含真实蒙版。不要自行拼装这些字段，也不要把预览充当生产输入。
 3. 参考图通过 `studio_import_asset` 导入用户提供的图像，随后在 context.refs 中使用 `{assetId, role}`。角色为 `reference`、`identity`、`style` 或 `structure`；按用途分配，遵守模型实际输入数量限制。工具不接收任意 URL 或本地路径。
 4. 用 `studio_list_drafts` / `studio_get_draft` 找到用户正在编辑的相关草稿，或用 `studio_create_draft` 创建草稿，`source` 设为 `agent`。图像生成使用 `image.edit`；已支持的原生属性修改使用 `ps.layer.update`，目前为已有图层的名称、可见性、透明度。
-5. 用 `studio_update_draft` 携带当前 `expectedRevision` 更新。params 浅合并，context 整体替换，因此修改 refs、preserve 或 settings 时应保留其余捕获字段。`REVISION_CONFLICT` 后重新读取草稿并与用户的新修改对齐，不能直接覆盖。
+5. 用 `studio_update_draft` 携带当前 `expectedRevision` 更新。params 浅合并；恢复模型、尺寸等默认值时，用 `unsetParams` 显式删除对应的顶层参数，不传 null，也不同时设置和删除同一字段。context 整体替换，因此修改 refs、preserve 或 settings 时应保留其余捕获字段。`REVISION_CONFLICT` 后重新读取草稿并与用户的新修改对齐，不能直接覆盖。
 
 配方需要时通过 `studio_list_recipes`、`studio_get_recipe` 检查内容和参数，再用 `studio_load_recipe` 写入已有的 image.edit 草稿。参数范围为 0–1，传数值并使用返回的参数 ID；保留用户原始补充文字和参考图角色。非空 refImages 的每个槽位必须按顺序明确映射到托管 assetId。加载配方只更新草稿，不会执行生成。
 

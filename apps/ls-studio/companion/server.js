@@ -9,18 +9,19 @@ const { createAgentHttp } = require("./agent-http");
 const agentHttp = createAgentHttp();
 const { createAssetStore } = require("./assets");
 const { createJobStore } = require("./jobs");
-const { createGeminiProvider } = require("./providers");
+const { createProviderSettings } = require("./providers/settings");
 const { createCapabilityService } = require("./capabilities/service");
 const { createRecipeCatalog } = require("./capabilities/recipes");
 const { createStudioHttp } = require("./http/studio-http");
 const STUDIO_DATA = process.env.PXDLS_DATA_DIR || path.join(os.homedir(), ".pxdls", "studio");
+const providerSettings = createProviderSettings({ rootDir: path.join(STUDIO_DATA, "provider-config") });
 const studio = createCapabilityService({
   assets: createAssetStore({ rootDir: path.join(STUDIO_DATA, "assets") }),
   jobs: createJobStore({ rootDir: path.join(STUDIO_DATA, "jobs") }),
-  provider: createGeminiProvider(), bridge: agentHttp.agent.photoshop,
+  provider: providerSettings, bridge: agentHttp.agent.photoshop,
   recipes: createRecipeCatalog({ rootDir: process.env.PXDLS_FACTORY_PRESETS || path.join(__dirname, "factory_presets") }),
 });
-const studioHttp = createStudioHttp({ service: studio, toolToken: agentHttp.agent.photoshop.toolToken });
+const studioHttp = createStudioHttp({ service: studio, toolToken: agentHttp.agent.photoshop.toolToken, providerSettings });
 const PORT = Number(process.env.PXDLS_PORT || 17880);
 const HOST = process.env.PXDLS_HOST || "127.0.0.1";
 const STARTED_AT = new Date().toISOString();

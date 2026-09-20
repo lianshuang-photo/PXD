@@ -57,8 +57,8 @@ function createCapabilityService({ assets, jobs, provider, bridge, recipes }) {
     for (const ref of context.refs || []) refs.push({ ...await assets.read(ref.assetId), role: ref.role });
     return { base, mask, refs };
   }
-  async function discover() {
-    await ready; const backend = provider.describe(), photoshop = hostStatus();
+  async function discover(input = {}) {
+    await ready; const backend = provider.describe(input), photoshop = hostStatus();
     return { schemaVersion: 1, capabilities: capabilityDefinitions.map(def => ({ ...clone(def), available: def.backend === 'gemini' ? backend.configured : photoshop.connected })), provider: backend, photoshop, limits: { capturePixels: 8000000, imageBytes: 32 * 1024 * 1024, placement: clone(placementLimits) }, hostAcceptance: 'requires-live-validation' };
   }
   async function capture(args) {
@@ -120,7 +120,7 @@ function createCapabilityService({ assets, jobs, provider, bridge, recipes }) {
       throw error;
     }
   }
-  async function runJob(job) {
+  async function runJob(job, executionProvider) {
     const controller = new AbortController(); controllers.set(job.jobId, controller);
     try {
       if (closing || (await jobs.getJob(job.jobId)).status !== 'queued') return;
@@ -143,7 +143,7 @@ function createCapabilityService({ assets, jobs, provider, bridge, recipes }) {
       validateGenerationPlacement(job.snapshot);
       const inputs = await inputsFor(job.snapshot);
       if (controller.signal.aborted || (await jobs.getJob(job.jobId)).status === 'cancelled') return;
-      const result = await provider.generate({ jobId: job.jobId, requestId: job.requestId, params: job.snapshot.params, context: job.snapshot.context, inputs }, { signal: controller.signal });
+      const result = await executionProvider.generate({ jobId: job.jobId, requestId: job.requestId, params: job.snapshot.params, context: job.snapshot.context, inputs }, { signal: controller.signal });
       invariant(result.images && result.images.length > 0 && result.images.length <= 8, 'PROVIDER_REJECTED', 'Provider returned no usable image or too many results', 502);
       for (const image of result.images) {
         const asset = await assets.put({ data: image.data, mimeType: image.mimeType, ...(image.width ? { width: image.width } : {}), ...(image.height ? { height: image.height } : {}), purpose: 'result', source: { jobId: job.jobId, provider: result.provider } });
@@ -162,9 +162,22 @@ function createCapabilityService({ assets, jobs, provider, bridge, recipes }) {
   }
   async function run(input) {
     await ready; invariant(!closing, 'SERVICE_CLOSING', 'Service is stopping', 503);
+    // Reconciliation uses the original submission even if current provider
+    // configuration is missing/corrupt. createJob still validates ID reuse.
+    if (await jobs.findJobByRequestId(input.requestId)) return jobs.createJob(input);
+    const draft = await jobs.getDraft(input.draftId);
+    // Bind before the durable submission. Settings saved while this job is
+    // queued/running must not redirect its pixels or change its model/key.
+    let executionProvider;
+    try { executionProvider = draft.capabilityId === 'image.edit' && typeof provider.snapshot === 'function' ? provider.snapshot() : provider; }
+    catch (error) {
+      // Another caller may have submitted during the reads above.
+      if (await jobs.findJobByRequestId(input.requestId)) return jobs.createJob(input);
+      throw error;
+    }
     const created = await jobs.createJob(input);
     if (!created.duplicate) {
-      const execution = Promise.resolve().then(() => runJob(created.job));
+      const execution = Promise.resolve().then(() => runJob(created.job, executionProvider));
       executions.set(created.job.jobId, execution);
       execution.catch(() => { /* Store errors fail closed; recovery inspects persisted state. */ }).finally(() => executions.delete(created.job.jobId));
     }

@@ -103,5 +103,8 @@ test('malformed request targets return 400 without terminating health or Studio 
   assert.equal(studio.value.value.provider.configured, false);
   assert.equal(studio.value.value.photoshop.connected, false);
   assert.deepEqual(studio.value.value.capabilities.map(item => item.id), ['image.edit', 'ps.layer.update']);
+  const settings = await jsonRequest(port, '/studio/provider-settings');
+  assert.equal(settings.status, 200); assert.equal(settings.value.value.hasApiKey, false);
+  assert.equal(settings.value.value.sources.apiKey, 'environment'); assert.equal(settings.value.value.configured, false);
   assert.equal(child.exitCode, null);
 });
