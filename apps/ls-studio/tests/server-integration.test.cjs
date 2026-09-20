@@ -89,12 +89,19 @@ function jsonRequest(port, requestPath, body) {
   });
 }
 
-test('malformed request targets return 400 without terminating the preserved Companion', { timeout: 20000 }, async t => {
+test('malformed request targets return 400 without terminating health or Studio dispatch', { timeout: 20000 }, async t => {
   const { child, port } = await startCompanion(t);
   const rejected = await malformedRequest(port);
   assert.match(rejected, /^HTTP\/1\.1 400 /);
   const health = await jsonRequest(port, '/health');
   assert.equal(health.status, 200);
   assert.equal(health.value.ok, true);
+  assert.equal(health.value.product, 'LS Studio V2');
+  const studio = await jsonRequest(port, '/studio/call', { operation: 'discover', arguments: {} });
+  assert.equal(studio.status, 200);
+  assert.equal(studio.value.ok, true);
+  assert.equal(studio.value.value.provider.configured, false);
+  assert.equal(studio.value.value.photoshop.connected, false);
+  assert.deepEqual(studio.value.value.capabilities.map(item => item.id), ['image.edit', 'ps.layer.update']);
   assert.equal(child.exitCode, null);
 });

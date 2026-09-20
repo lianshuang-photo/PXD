@@ -54,14 +54,14 @@ test('HTTP separates web clients, native host tokens and MCP tokens; abandoned p
   assert.equal(b.listenerCount('job'),0);
 });
 test('stdio MCP exposes tools and returns actual image content, including useful errors',async t=>{
-  const server=http.createServer((req,res)=>{let data='';req.on('data',c=>data+=c);req.on('end',()=>{assert.equal(req.headers['x-pxdls-tool'],'fixture-token');const body=JSON.parse(data);res.setHeader('Content-Type','application/json');res.end(JSON.stringify(body.tool==='photoshop_render_preview'?{ok:true,width:1,image:{base64:'aW1hZ2U=',mimeType:'image/png'}}:{ok:false,error:'没有文档'}));});});
+  const server=http.createServer((req,res)=>{let data='';req.on('data',c=>data+=c);req.on('end',()=>{assert.equal(req.headers['x-pxdls-tool'],'fixture-token');assert.equal(req.url,'/studio/mcp');const body=JSON.parse(data);assert.equal(body.operation,'observe');res.setHeader('Content-Type','application/json');res.end(JSON.stringify(body.arguments.tool==='photoshop_render_preview'?{ok:true,value:{ok:true,width:1,image:{base64:'aW1hZ2U=',mimeType:'image/png'}}}:{ok:false,error:{code:'HOST_UNAVAILABLE',message:'没有文档'}}));});});
   server.listen(0,'127.0.0.1');await once(server,'listening');
   const child=spawn(process.execPath,[path.join(__dirname,'../companion/photoshop-mcp.cjs')],{env:{...process.env,PXDLS_BRIDGE_URL:'http://127.0.0.1:'+server.address().port,PXDLS_BRIDGE_TOKEN:'fixture-token'},stdio:['pipe','pipe','pipe']});
   t.after(()=>{child.kill();server.closeAllConnections();server.close();});
   const waiting=new Map();let text='',id=0;child.stdout.on('data',c=>{text+=c;let end;while((end=text.indexOf('\n'))>=0){const m=JSON.parse(text.slice(0,end));text=text.slice(end+1);waiting.get(m.id)(m.result);}});
   function rpc(method,params={}){return new Promise(resolve=>{waiting.set(++id,resolve);child.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');});}
   assert.equal((await rpc('initialize',{protocolVersion:'2024-11-05'})).serverInfo.name,'ls-photoshop');
-  assert.equal((await rpc('tools/list')).tools.length,7);
+  assert.equal((await rpc('tools/list')).tools.length,24);
   const image=await rpc('tools/call',{name:'photoshop_render_preview',arguments:{documentId:1}});
   assert.deepEqual(image.content[1],{type:'image',mimeType:'image/png',data:'aW1hZ2U='});
   assert.equal((await rpc('tools/call',{name:'photoshop_get_document',arguments:{}})).isError,true);

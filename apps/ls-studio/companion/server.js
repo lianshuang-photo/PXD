@@ -3,9 +3,24 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 const { URL } = require("url");
 const { createAgentHttp } = require("./agent-http");
 const agentHttp = createAgentHttp();
+const { createAssetStore } = require("./assets");
+const { createJobStore } = require("./jobs");
+const { createGeminiProvider } = require("./providers");
+const { createCapabilityService } = require("./capabilities/service");
+const { createRecipeCatalog } = require("./capabilities/recipes");
+const { createStudioHttp } = require("./http/studio-http");
+const STUDIO_DATA = process.env.PXDLS_DATA_DIR || path.join(os.homedir(), ".pxdls", "studio");
+const studio = createCapabilityService({
+  assets: createAssetStore({ rootDir: path.join(STUDIO_DATA, "assets") }),
+  jobs: createJobStore({ rootDir: path.join(STUDIO_DATA, "jobs") }),
+  provider: createGeminiProvider(), bridge: agentHttp.agent.photoshop,
+  recipes: createRecipeCatalog({ rootDir: process.env.PXDLS_FACTORY_PRESETS || path.join(__dirname, "factory_presets") }),
+});
+const studioHttp = createStudioHttp({ service: studio, toolToken: agentHttp.agent.photoshop.toolToken });
 const PORT = Number(process.env.PXDLS_PORT || 17880);
 const HOST = process.env.PXDLS_HOST || "127.0.0.1";
 const STARTED_AT = new Date().toISOString();
@@ -738,24 +753,26 @@ async function respondApply(res, body, routeModel) {
 
 const server = http.createServer(async (req, res) => {
   try {
-  const url = new URL(req.url, "http://" + HOST + ":" + PORT);
-  if (await agentHttp.handle(req, res, url)) return;
-  if (req.method === "OPTIONS") {
-    res.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    });
-    return res.end();
-  }
+    const url = new URL(req.url, "http://" + HOST + ":" + PORT);
+    if (await studioHttp.handle(req, res, url)) return;
+    if (await agentHttp.handle(req, res, url)) return;
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+      });
+      return res.end();
+    }
 
-  const pathName = url.pathname.replace(/\/+$/, "") || "/";
+    const pathName = url.pathname.replace(/\/+$/, "") || "/";
 
     if (req.method === "GET" && pathName === "/health") {
       return send(res, 200, {
         ok: true,
         status: "ok",
-        product: "PXD/LS studio alpha",
+        product: "LS Studio V2",
+        version: require("./package.json").version,
         service: "com.pxdls.companion",
         pid: process.pid,
         startedAt: STARTED_AT,
@@ -768,6 +785,8 @@ const server = http.createServer(async (req, res) => {
         label: MOCK_VENDOR_LABEL,
         recipes: loadFactoryPresets().length,
         agent: { engine: "codex-app-server", status: agentHttp.agent.connection.status },
+        studio: await studio.discover(),
+        legacyRoutes: { vendor: "mock", production: false },
       });
     }
 
@@ -1097,6 +1116,8 @@ const server = http.createServer(async (req, res) => {
 
     return send(res, 404, { ok: false, error: "not found", path: pathName });
   } catch (e) {
+    if (res.destroyed || res.writableEnded) return;
+    if (res.headersSent) return res.destroy();
     return send(res, 400, { ok: false, error: String(e && e.message ? e.message : e) });
   }
 });
@@ -1119,6 +1140,7 @@ agentHttp.agent.on("change", () => {
 for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, () => {
   console.log(JSON.stringify({ time: new Date().toISOString(), event: "companion.stopping", signal }));
   agentHttp.agent.close();
+  studio.close().catch(() => {});
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1500).unref();
 });
