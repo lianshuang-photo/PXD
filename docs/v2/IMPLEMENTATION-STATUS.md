@@ -6,17 +6,19 @@ Planning #50 and broad integration #51 are closed as superseded without merging.
 
 Internal cross-review and integrator review are complete for the three features and their private assembly. Independent GitHub-account approval and exact proposed-commit Photoshop/UXP acceptance are still required. All `ls-studio/computer-use` statuses remain pending. The code in this #58 tree contains the foundation professional UI; the three feature implementations and their own documents are in their linked PRs.
 
+The subsequent [independent acceptance session](evidence/2026-09-20-independent-review.md) did **not pass** the merge/host gate. It independently reran all ten public heads and downloaded/tested all ten CI artifacts, then found an HTTP-origin bypass and late-result model inheritance defect. Real capture and a combined layer edit succeeded, but rollback coincided with a native Photoshop crash and an uncertain outcome. Corrections and their separate retests are tracked in the [delivery index](MODULAR-DELIVERY.md); the original acceptance commit remains unchanged.
+
 | Package | Status | Evidence / remaining work |
 |---|---|---|
 | G00 | Implemented | 180 files imported with matching SHA256; separate CommonJS application; original 38 tests passed in the new directory; Alpha baseline tagged |
 | G01 | Implemented | Shared validation, schemas, transitions, fixtures and module APIs; three domain boundary tests passed |
 | G02 | Implemented and integrated | `bcf68a4`: immutable managed assets, revisioned drafts, durable jobs, deduplication and uncertain-outcome recovery; 24 module tests |
-| G03 | Implemented; partial live acceptance | Capture, feather mask, combined name/opacity update, rollback and subsequent-edit conflict exercised on PS 26 / UXP 8; `b088846` fixes actual multi-property set behavior; placement still pending |
+| G03 | Implemented; current host acceptance blocked | Historical `f0cd2e5` exercised capture/mask/edit/rollback. Fresh `6121333` capture and edit succeeded, but rollback produced `HOST_UNCERTAIN` and a native PS crash; cause and recovery are unresolved. Placement still pending |
 | G04 | Implemented and integrated; live provider pending | `4cbb207`: Gemini BYOK, capability limits, bounded image parsing, cancellation and redacted errors; 16 fixture tests; no configured key or real generation |
 | G05 | Integrated and independently reviewed | Professional workspace consumes shared drafts, source capture, jobs and results; native Chrome UI exercised the real UXP bridge; floating plugin panel visual/input acceptance remains pending |
-| G06 | Foundation implemented and reviewed; feature extensions reviewed | Foundation/#58: 17 Studio tools plus 7 existing Photoshop tools. The private three-feature assembly exposes 33 MCP tools; see exact commit and evidence below |
+| G06 | Implemented; independent review found HTTP-origin defect | Foundation/#58: 17 Studio tools plus 7 existing Photoshop tools; private assembly: 33. Browser UI to actual Agent read-only draft/job handoff succeeded. HTTP correction and exact-head acceptance remain separate |
 | G07 | Implemented and reviewed | `fa789db`: 121 recipes, 101 numeric parameters, immutable source hashes, explicit reference mapping and two project Skills; 14 catalog/service tests |
-| G08 | Not passed | [Earlier partial host evidence](evidence/2026-09-20-host-partial.md) and [feature browser evidence](evidence/2026-09-20-feature-browser.md) have different commits/environments; provider, native panel, full Agent handoff and real sample cases remain outstanding |
+| G08 | Not passed | [Independent report](evidence/2026-09-20-independent-review.md): rollback crash; native panel input, real provider/placement and COS sample cases missing. Actual Agent read-only handoff is partial coverage, not complete bidirectional editing acceptance |
 | G09 / B05 | Implementation complete; host acceptance pending | #60: durable user library, read-only factory copy, edit/import/export/archive, optimistic history/restore, explicit reference mapping and same-source UI/MCP; browser assembly workflow exercised |
 | G09 / B06 | Not started | Body silhouette / 17-part navigation remains separate; B05 does not complete G09 |
 | G10–G21 | Not started | Later product phases remain in the approved scope |

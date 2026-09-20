@@ -38,4 +38,6 @@
 
 早期真实 Photoshop 的抓图、羽化蒙版、组合属性修改、撤销及后续修改冲突已有[部分宿主记录](evidence/2026-09-20-host-partial.md)。本轮原生 Chrome/CUA 以隔离数据和合成图像验证结果派生／比较、预设管理、默认值／模型设置及 100–200% 缩放，见[浏览器记录](evidence/2026-09-20-feature-browser.md)。两份记录属于不同提交与环境，不能互相继承，也没有把浏览器结果标为宿主成功。
 
-G08 尚未通过；B05 实现完成、待宿主验收，B06 和 G10 之后未开始，G09／M1／M2 均未通过。所有 live status 保持 pending，内部审查不能替代 GitHub 独立账号 approve。main 保护与发布门禁保持启用；三个功能 PR 待依赖进入 main 后 retarget／更新并重做审批、检查和精确提交真机证据，不合入临时比较分支。后续按[实施计划](EXECUTION-PLAN.md)推进。
+新开的[独立验收 session](evidence/2026-09-20-independent-review.md)已复核十个公开提交及下载产物，发现两项可复现代码缺陷；真实撤销还遇到尚未归因的 Photoshop 原生崩溃。UI→实际 Agent 的只读接续已验证。下一步先完成[独立修复 PR 与复测](MODULAR-DELIVERY.md)，保留原现场证据，再补宿主缺项；每轮开发后继续采用新的独立 session 验收。
+
+G08 尚未通过；B05 实现完成、待宿主验收，B06 和 G10 之后未开始，G09／M1／M2 均未通过。所有 live status 保持 pending，独立 session 审查不能替代 GitHub 独立账号 approve。main 保护与发布门禁保持启用；三个功能 PR 待依赖进入 main 后 retarget／更新并重做审批、检查和精确提交真机证据，不合入临时比较分支。后续按[实施计划](EXECUTION-PLAN.md)推进。

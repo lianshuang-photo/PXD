@@ -13,7 +13,9 @@
 - 2026-09-20 较早的基础集成运行 `f0cd2e5`：193 项本机自动化通过；真实 PS 抓图、250×188 羽化蒙版、已有层组合修改、完整撤销与后续手动修改冲突已验证。操作入口为 native Chrome UI，执行宿主为真实 PS/UXP；不能计为插件面板交互验收，也不继承到后来提交。详见[部分真机记录](evidence/2026-09-20-host-partial.md)。
 - 本轮三功能私有组装 `6121333dd4fe9f99a065c2d7e76920bcf88b1992`：240 pass／0 fail／1 项 launchd 生命周期明确跳过（总 241），78 JS 检查、clean build 和实际解压 smoke 通过。通过原生 Chrome/CUA 验证了合成素材下的默认参数清除、历史派生草稿、候选 B／2× 放大、预设复制至恢复、本地无 Key 模型设置、设置生效后的新空草稿以及 100–200% 缩放。完整步骤与中间／最终数据检查点见[浏览器记录](evidence/2026-09-20-feature-browser.md)。
 
-当前 [#52–#58 模块及 #59–#61 功能 PR](MODULAR-DELIVERY.md) 的已观察提交均通过 CI；#50／#51 已关闭且未合并。不同分支和组装的测试计数不相加。浏览器组装证据不等于公开 PR head 的 Photoshop／UXP 验收，原生文件 picker、完整 Agent 接续、真实 provider／COS 样片仍缺证据，所有 live status 保持 pending。内部交叉 review 也不能替代 GitHub 独立账号 approve。
+随后开启的[独立 session 验收](evidence/2026-09-20-independent-review.md)逐一跑通 10 个公开 HEAD 的全套测试与 10 份 CI 下载产物，同时确认来源校验与迟到候选模型继承两项缺陷。`6121333` 的真实抓图／图层修改和 UI→实际 Agent 只读接续跑通；首次撤销时 Photoshop 原生崩溃，任务保留 `HOST_UNCERTAIN`。独立组装 launchd 专项 1/1 通过，不与各分支重复计数相加。报告的 V01–V12 逐项结果仍判定真机门禁不通过，修复提交另行复测。
+
+当前 [#52–#58 模块及 #59–#61 功能 PR](MODULAR-DELIVERY.md) 的已观察提交均通过 CI；#50／#51 已关闭且未合并。浏览器组装证据不等于公开 PR head 的 Photoshop／UXP 验收，原生文件 picker、完整双向 Agent 编辑、真实 provider／COS 样片仍缺证据，所有 live status 保持 pending。内部交叉 review 或独立 session 都不能替代 GitHub 独立账号 approve。
 
 历史完整日志、截图、会话标识与绝对路径留在本机记录，不随公开文档发布。G00 导入回归已单独记录；本轮只发布不含无关标签页、私人图像或个体任务 ID 的浏览器步骤与结果摘要。
 
