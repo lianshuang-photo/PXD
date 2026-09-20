@@ -26,7 +26,7 @@ LS Studio 是在 Photoshop 中工作的创作工具：专业可视化工作区�
 
 ## 3. 保留的 Alpha 基线与 V2 实施
 
-下表描述固定保留的 Alpha 0.1.5。V2 0.1.6 已接入共享资产／草稿／任务、17 个 Studio 工具、Gemini BYOK 适配、完整配方参数，以及受约束的 PS 抓图／修改／回贴。图层修改、撤销和羽化蒙版已部分真机验证；完整供应商和插件面板验收未通过。当前实现与证据以 [IMPLEMENTATION-STATUS.md](IMPLEMENTATION-STATUS.md) 为准。
+下表描述固定保留的 Alpha 0.1.5。V2 0.1.6 的 #58 基础树已接入共享资产／草稿／任务、17 个 Studio 加 7 个 PS 工具、Gemini 适配、完整配方参数，以及受约束的 PS 抓图／修改／回贴。另有 #59 结果、#60 B05 预设、#61 Provider 设置三个独立功能 PR；临时组装暴露 33 个 MCP 工具，不能把这个数字套用于基础树。图层修改、撤销和羽化蒙版只有早期部分真机记录，本轮新增功能只完成合成素材的浏览器验证；完整供应商和原生插件验收未通过。#50／#51 已关闭且未合并，当前 PR 与准确提交见[模块索引](MODULAR-DELIVERY.md)，实现与证据以 [IMPLEMENTATION-STATUS.md](IMPLEMENTATION-STATUS.md) 为准。
 
 | 已有内容 | 当前边界 |
 |---|---|
