@@ -4,15 +4,17 @@ Updated 2026-09-20 after the user requested smaller independently reviewable PRs
 
 ## Initial decomposition
 
-| Branch | Review scope | Declared comparison base |
-|---|---|---|
-| `codex/v2-core` | Mechanical Alpha import, shared contracts, isolated dev launcher, CI/artifacts/release gates | `main` |
-| `codex/v2-assets-jobs` | Immutable image assets, versioned drafts, durable jobs and replay/recovery rules | `codex/v2-core` |
-| `codex/v2-photoshop` | Capture/mask, bound native mutations, new-layer placement, receipts and guarded rollback | `codex/v2-assets-jobs` |
-| `codex/v2-image-provider` | Gemini adapter, model limits, input/output validation, cancellation and redacted errors | `codex/v2-photoshop` |
-| `codex/v2-recipes` | Full factory recipe normalization, search, parameters and pure compilation | `codex/v2-image-provider` |
-| `codex/v2-runtime` | One execution service, HTTP/MCP registration, Agent/Skill guidance and entrypoint wiring | `codex/v2-recipes` |
-| `codex/v2-professional-ui` | Shared draft/job workspace and UXP-compatible controls | `codex/v2-runtime` |
+| PR / branch | Review scope | Declared comparison base | Local verification |
+|---|---|---|---|
+| [#52](https://github.com/lianshuang-photo/PXD/pull/52) `codex/v2-core` | Mechanical Alpha import, shared contracts, isolated dev launcher, CI/artifacts/release gates | `main` | 58 tests + extracted package smoke |
+| [#53](https://github.com/lianshuang-photo/PXD/pull/53) `codex/v2-assets-jobs` | Immutable image assets, versioned drafts, durable jobs and replay/recovery rules | `codex/v2-core` | 28 domain/module tests |
+| [#54](https://github.com/lianshuang-photo/PXD/pull/54) `codex/v2-photoshop` | Capture/mask, bound native mutations, new-layer placement, receipts and guarded rollback | `codex/v2-assets-jobs` | 37 host tests |
+| [#55](https://github.com/lianshuang-photo/PXD/pull/55) `codex/v2-image-provider` | Gemini adapter, model limits, input/output validation, cancellation and redacted errors | `codex/v2-photoshop` | 16 provider tests |
+| [#56](https://github.com/lianshuang-photo/PXD/pull/56) `codex/v2-recipes` | Full factory recipe normalization, search, parameters and pure compilation | `codex/v2-image-provider` | 11 catalog tests |
+| [#57](https://github.com/lianshuang-photo/PXD/pull/57) `codex/v2-runtime` | One execution service, HTTP/MCP registration, Agent/Skill guidance and entrypoint wiring | `codex/v2-recipes` | 38 integration tests |
+| [#58](https://github.com/lianshuang-photo/PXD/pull/58) `codex/v2-professional-ui` | Shared draft/job workspace, UXP-compatible controls and assembled status docs | `codex/v2-runtime` | 27 UI/control tests; full application 193/193 |
+
+These targeted suite counts overlap and must not be summed. Every PR runs its full current branch suite and packages its own commit in hosted CI. New PRs remain drafts; no successful host status or approval is inherited from #51. The reassembled runtime matches the original reference source; app documentation now explains the modular workflow.
 
 The sequence is for review/merge ordering; host and provider modules do not acquire an artificial runtime dependency on each other. Import final reviewed files from the integration reference so the split includes fixes found by actual Photoshop tests, rather than reintroducing intermediate broken versions.
 

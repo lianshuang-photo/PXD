@@ -4,7 +4,7 @@
 
 ## 主来源
 
-PXD 仓库的 `docs/v2/` 是本轮规划主来源。目前在 `codex/pxd-v2-planning` 分支供审阅；只有用户审阅和合并后的版本才进入仓库 main。不能把 draft PR 已建立写成计划已获批准。
+PXD 仓库的 `docs/v2/` 是规划与实施状态的主来源。规划 #50 和原集成 #51 保留历史，当前按 [#52–#58 模块 PR](MODULAR-DELIVERY.md) 开发。用户确认、模块测试通过和 main 合并是不同状态；合并仍须满足独立 review、自动化和 computer use 真机门禁。
 
 | 内容 | 主文档 | 修改要求 |
 |---|---|---|
@@ -19,13 +19,13 @@ PXD 仓库的 `docs/v2/` 是本轮规划主来源。目前在 `codex/pxd-v2-plan
 
 ## Alpha 目录同步方式
 
-迁移前仍需用户在当前 LS 目录阅读，所以把同一套 `docs/v2/` 镜像到 Alpha 的 `docs/v2/`。镜像文件逐字一致，编辑主工作区再单向同步；不在两个目录分别推进内容。
+迁移前曾把同一套 `docs/v2/` 镜像到 Alpha 的 `docs/v2/`。G00 已导入源码，现按用户要求完整保留旧 Alpha，停止继续改写该镜像；当前文档只在 GitHub 的实施分支推进。
 
 Alpha 原 `docs/PRD-LS-Studio.md` 改为指向新 PRD 的入口，README 更新范围和当前运行事实，旧 `companion/ide.md`／`recipes.md` 改为明确的 Alpha 接口记录。原 PRD／README／接口文件保留在本机带日期的归档目录，不能再次被误当成 V2 限制。
 
 原研究与验证记录保留原日期和证据，顶部补上新文档入口。公开版研究移除个人绝对路径、私人任务标识与完整运行日志，只保留来源标识与公共材料；原始本机证据不删除。
 
-G00 后 `apps/ls-studio/README.md` 链接根 `docs/v2/`，不再次复制整个规划树到应用里。Downloads 变为来源快照，停止持续镜像；在入口文档中标明正式工作区。
+`apps/ls-studio/README.md` 已链接根 `docs/v2/`，不再次复制整个规划树到应用里。Downloads 是来源快照；正式工作区与保留标签见 [COLLABORATION.md](COLLABORATION.md)。
 
 ## 同步检查
 

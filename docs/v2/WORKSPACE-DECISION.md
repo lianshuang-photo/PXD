@@ -1,6 +1,6 @@
 # 工作区决策：PXD V2 与 LS Studio
 
-日期：2026-09-20。结论：**沿用 PXD 仓库；独立 V2 工作区与应用目录；实现待用户确认。**
+日期：2026-09-20。结论：**沿用 PXD 仓库；独立 V2 工作区与应用目录；用户已确认实施。** Alpha 已按固定标签保留，后续合并与发布门禁见 [COLLABORATION.md](COLLABORATION.md)。以下保留当时的评估依据，实际进度见 [IMPLEMENTATION-STATUS.md](IMPLEMENTATION-STATUS.md)。
 
 ## 事实依据
 
@@ -25,17 +25,17 @@
 
 ## 目录与工作区
 
-当前已创建的本机规划 worktree：`~/Developer/PXD-v2`，分支 `codex/pxd-v2-planning`，基于上述 GitHub main。旧 `PXD-codex` 以及 24 个历史 issue worktree 保留。
+本机原 V2 worktree `~/Developer/PXD-v2` 及 `codex/pxd-v2-foundation` 保留为集成参考。当前模块与功能使用 `~/Developer/PXD-v2-modules/` 下的独立 worktree，分支和 PR 见[模块索引](MODULAR-DELIVERY.md)。旧 `PXD-codex` 和历史 issue worktree 保留。
 
-确认后采用以下布局。标为“计划”的目录不表示本次已经创建或导入。
+已经采用以下布局：
 
 ```text
 PXD/
   src/                       # 既有 PXD React/TS 应用，初期保留
   public/ manifest.json ...  # 既有应用构建入口
   docs/v2/                   # V2 需求、契约、路线图、验收的主来源
-  apps/ls-studio/             # 计划：从 LS Alpha 导入
-    package.json             # 计划：明确独立模块作用域，避免继承根 type: module
+  apps/ls-studio/             # 已从 LS Alpha 导入，后续代码在此演进
+    package.json             # 独立 CommonJS 作用域，避免继承根 type: module
     plugin/                  # 当前已验证的 UXP 面板及宿主执行器
     companion/               # Codex 会话、共享任务、供应商、MCP
     scripts/
@@ -47,8 +47,9 @@ PXD/
 
 ## GitHub 管理方式
 
-- 当前使用一个文档 draft PR 供用户审阅。此次不修改 main、默认分支、仓库权限或旧 PR 状态。
-- 确认后按 G00 导入 LS 基线，开独立 PR；再按小型任务分支推进。日常 PR 以已合并基线为起点，不创建长期相互堆叠的 issue 分支链。
+- 规划 PR #50、原集成 PR #51 保留历史；当前 #52–#58 分别提交基础、各生产模块、共享服务和 UI。
+- 按用户要求，main 已启用独立 review、最新 push 审批、自动化和 computer-use 检查，管理员也适用；未修改 main 代码、默认分支或旧 PR 状态。
+- 日常 PR 以已合并基线为起点。首次基础尚未合并时，短期使用声明依赖的 PR 栈保持每份差异只包含本模块；依赖合并后改以 main 为目标，重新 review、CI 和适用真机验收，不往中间分支合并或无限延长分支链。
 - 旧根目录应用保留，直到 V2 迁移和发布有明确验收；不在初始化时删除旧代码或历史 worktree。
 - 新任务统一使用 `V2` 前缀与 Gxx 工作包编号。旧 issue #1–#24 的状态不直接改成 V2 完成；需要复用时建立对应关系。
 - 尚未创建远端 milestone／issue；文档先明确工作包，用户确认后再落为任务，避免未确认计划占满看板。
@@ -71,4 +72,4 @@ G00 顺序：
 
 仓库名：PXD。产品工作名：LS Studio。路线名：PXD V2。旧 PXD 包版本 0.2.0、LS Alpha 包版本 0.1.5 与产品代际分别记录，不能以改版本号制造“V2 已发布”的印象。
 
-不在本次更换 UXP 插件 ID、认证目录或会话 ID。这些属于迁移行为，需和运行回归一起验证。
+已安装 Alpha 的 UXP ID、认证目录和会话保持原样。真机开发副本使用独立 `com.pxdls.studio.v2.dev` ID、17881 端口及应用内忽略的 `.local/` 数据；这是隔离测试，不是生产迁移。
