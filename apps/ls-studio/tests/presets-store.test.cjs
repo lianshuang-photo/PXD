@@ -48,6 +48,18 @@ test('request identity prevents duplicate creations/imports after restart and re
   assert.deepEqual(Object.keys(bundle).sort(), ['definition', 'format', 'schemaVersion']);
   assert.equal(JSON.stringify(bundle).includes(first.recipeId), false);
 });
+test('copy retries resolve the original request after source edits and reject changed request content', t => {
+  const f = setup(t), original = create(f.library), request = { recipeId: original.recipeId, expectedSourceHash: original.sourceHash, requestId: 'durable-copy', source: 'agent' };
+  const copied = f.library.copy(request);
+  f.library.update({ recipeId: original.recipeId, expectedRevision: 1, definition: { ...definition(), title: 'Changed source' }, source: 'ui' });
+  f.library.update({ recipeId: copied.recipeId, expectedRevision: 1, definition: { ...definition(), title: 'Edited copy' }, source: 'ui' });
+  const retry = f.open().copy(request);
+  assert.equal(retry.recipeId, copied.recipeId); assert.equal(retry.revision, 2); assert.equal(retry.title, 'Edited copy');
+  assert.deepEqual(retry.origin, { recipeId: original.recipeId, sourceHash: original.sourceHash });
+  assert.equal(f.library.list({ kind: 'user' }).total, 2);
+  for (const change of [{ title: 'Other title' }, { revision: 1 }, { expectedSourceHash: '0'.repeat(64) }, { recipeId: 'f_013' }]) assert.throws(() => f.library.copy({ ...request, ...change }), { code: 'REQUEST_CONFLICT' });
+  assert.throws(() => f.library.copy({ ...request, requestId: 'new-copy' }), { code: 'RECIPE_REVISION_CONFLICT' });
+});
 test('archives disappear from normal queries; restoring appends history and never deletes definitions', t => {
   const { library } = setup(t), first = create(library);
   library.archive({ recipeId: first.recipeId, expectedRevision: 1, source: 'ui' });

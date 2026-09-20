@@ -111,20 +111,29 @@ function createRecipeLibrary({ rootDir, factoryCatalog }) {
     const checked = definition(value);
     entry.versions.push({ revision: entry.versions.length + 1, definition: checked, sourceHash: normalized(entry.recipeId, checked).recipe.sourceHash, archived, action, source: source(from), createdAt: new Date().toISOString(), ...(origin ? { origin: clone(origin) } : {}) });
   }
-  function create(input, action = 'create', origin) {
+  function replay(state, requestId, signature) {
+    const previous = state.requests.find(item => item.requestId === requestId);
+    if (!previous) return null;
+    invariant(previous.signature === signature, 'REQUEST_CONFLICT', 'Preset request ID was already used with different content', 409);
+    return view(user(state, previous.recipeId));
+  }
+  function create(input, action = 'create', origin, requestSignature) {
     const value = definition(input.definition); id(input.requestId, 'requestId'); source(input.source);
-    const signature = hash(canonical({ action, definition: value, ...(origin ? { origin } : {}) })), state = read();
-    const previous = state.requests.find(item => item.requestId === input.requestId);
-    if (previous) { invariant(previous.signature === signature, 'REQUEST_CONFLICT', 'Preset request ID was already used with different content', 409); return view(user(state, previous.recipeId)); }
+    const signature = requestSignature || hash(canonical({ action, definition: value, ...(origin ? { origin } : {}) })), state = read();
+    const previous = replay(state, input.requestId, signature); if (previous) return previous;
     invariant(state.recipes.length < 1000, 'STORAGE_FULL', 'User preset library reached its 1000-preset limit', 507);
     const entry = { recipeId: 'user-' + randomUUID(), versions: [] }; addVersion(entry, value, action, input.source, false, origin);
     state.recipes.push(entry); state.requests.push({ requestId: input.requestId, signature, recipeId: entry.recipeId }); write(state); return view(entry);
   }
   function copy(input) {
+    id(input.recipeId, 'recipeId'); id(input.requestId, 'requestId'); source(input.source);
+    const signature = hash(canonical({ action: 'copy', recipeId: input.recipeId, expectedSourceHash: input.expectedSourceHash, ...(input.revision === undefined ? {} : { revision: input.revision }), ...(input.title === undefined ? {} : { title: input.title }) }));
+    // Reconcile the submitted request before reading a possibly changed source.
+    const previous = replay(read(), input.requestId, signature); if (previous) return previous;
     const original = get(input.recipeId, input.revision);
     invariant(input.expectedSourceHash === original.sourceHash, 'RECIPE_REVISION_CONFLICT', 'Source preset changed; read its current definition before copying', 409, { current: original });
     const slots = original.refImages.map((slot, index) => ({ slotId: slot && slot.slotId || 'reference-' + (index + 1), label: slot && slot.label || '参考 ' + (index + 1), role: slot && roles.includes(slot.role) ? slot.role : 'reference' }));
-    return create({ definition: { title: input.title === undefined ? original.title + ' 副本' : input.title, category: original.category, subCategory: original.subCategory, content: original.content, refImages: slots }, requestId: input.requestId, source: input.source }, 'copy', { recipeId: original.recipeId, sourceHash: original.sourceHash });
+    return create({ definition: { title: input.title === undefined ? original.title + ' 副本' : input.title, category: original.category, subCategory: original.subCategory, content: original.content, refImages: slots }, requestId: input.requestId, source: input.source }, 'copy', { recipeId: original.recipeId, sourceHash: original.sourceHash }, signature);
   }
   function change(input, action) {
     const state = read(), entry = user(state, input.recipeId); expect(entry, input.expectedRevision);

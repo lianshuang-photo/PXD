@@ -12,7 +12,7 @@ Exports are `{schemaVersion:1,format:"ls-studio-preset",definition}`. They conta
 
 ## Revisions and errors
 
-- `create({definition,requestId,source})`, `copy({recipeId,revision?,expectedSourceHash,title?,requestId,source})` and `import({bundle,requestId,source})` durably deduplicate the request ID. Reusing it with different content fails with `REQUEST_CONFLICT`. A retry returns the current preset for that identity.
+- `create({definition,requestId,source})`, `copy({recipeId,revision?,expectedSourceHash,title?,requestId,source})` and `import({bundle,requestId,source})` durably deduplicate the request ID. Reusing it with different content fails with `REQUEST_CONFLICT`. A retry returns the current preset for that identity. Copy retries reconcile the original source/hash/revision/title request before consulting the source, so later source edits cannot prevent recovery of an already created copy.
 - `update({recipeId,expectedRevision,definition,source})` replaces a complete definition. A stale revision returns `RECIPE_REVISION_CONFLICT` with `details.current`; the caller's unsaved form remains available.
 - `archive({recipeId,expectedRevision,source})` appends an archived version and hides the preset from normal lists. Nothing is deleted.
 - `restore({recipeId,expectedRevision,targetRevision?,source})` appends a new active version from the chosen history entry (or current definition when unarchiving). Earlier records are never rewritten.

@@ -110,7 +110,7 @@
     function el(tag, id, parent, text) { var node = doc.createElement(tag); if (id) { node.id = id; nodes[id] = node; } if (text !== undefined) node.textContent = text; if (parent) parent.appendChild(node); return node; }
     function handle(fn) { return function () { try { Promise.resolve(fn()).catch(controller.reportError); } catch (e) { controller.reportError(e); } }; }
     function button(id, label, fn, parent) { var node = ui.createButton("studio-button ghost", label, handle(fn)); node.id = id; nodes[id] = node; (parent || actions).appendChild(node); return node; }
-    function field(id, label, tag, parent) { var wrap = el("label", null, parent || form); wrap.className = "studio-field"; el("span", null, wrap, label); var input = el(tag || "input", id, wrap); input.className = "studio-input"; input.setAttribute("aria-label", label); return input; }
+    function field(id, label, tag, parent) { var wrap = el("label", null, parent || form); wrap.className = "studio-field"; el("span", null, wrap, label).className = "studio-field-label"; var input = el(tag || "input", id, wrap); input.className = "studio-input"; input.setAttribute("aria-label", label); return input; }
     clear(container); container.className += " studio-presets";
     el("h3", null, container, "共享预设库");
     var filters = el("div", null, container), query = field("presetQuery", "搜索预设", "input", filters), kind = field("presetKind", "来源", "select", filters), archived = field("presetArchived", "包含归档", "input", filters); archived.type = "checkbox";
