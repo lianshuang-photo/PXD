@@ -1,0 +1,52 @@
+{
+  "sourceCommit": "f0cd2e5619a8819195377bc0a7a8cb32d85ae3af",
+  "jobs": [
+    {
+      "jobId": "job-bff34afd-2e55-4d75-9b77-43b53ab3ac70",
+      "status": "succeeded",
+      "placementStatus": "rolled-back",
+      "modifiedLayers": [
+        {
+          "layerId": 3,
+          "before": {
+            "name": "图层 1",
+            "opacity": 100,
+            "visible": true
+          },
+          "after": {
+            "name": "LS V2 Combined Check",
+            "opacity": 60,
+            "visible": true
+          }
+        }
+      ],
+      "createdLayerIds": [],
+      "error": null
+    },
+    {
+      "jobId": "job-b81b98d4-4023-4bf7-9630-d73d36655724",
+      "status": "succeeded",
+      "placementStatus": "rollback-conflict",
+      "modifiedLayers": [
+        {
+          "layerId": 3,
+          "before": {
+            "name": "图层 1",
+            "opacity": 100,
+            "visible": true
+          },
+          "after": {
+            "name": "LS V2 Combined Check",
+            "opacity": 60,
+            "visible": true
+          }
+        }
+      ],
+      "createdLayerIds": [],
+      "error": {
+        "code": "ROLLBACK_CONFLICT",
+        "message": "源文档身份或历史状态已变化，请重新捕获后操作 [dev: document-guard; 源文档身份或历史状态已变化，请重新捕获后操作]"
+      }
+    }
+  ]
+}

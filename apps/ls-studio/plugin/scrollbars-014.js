@@ -22,7 +22,7 @@
   function clamp(n, max) { return Math.max(0, Math.min(max, n)); }
   function owner() {
     if (document.getElementById("pane-settings").classList.contains("is-on")) return document.getElementById("pane-settings");
-    if (document.getElementById("pane-pro").classList.contains("is-on")) return document.getElementById(app.classList.contains("wide") ? "proR" : "proBody");
+    if (document.getElementById("pane-pro").classList.contains("is-on")) return document.getElementById("studioBody") || document.getElementById(app.classList.contains("wide") ? "proR" : "proBody");
     return document.getElementById("th");
   }
   function endDrag() {
@@ -108,8 +108,9 @@
     event.preventDefault();
     scrollTo(next);
   });
-  ["pane-settings", "th", "proBody", "proR"].forEach(function (id) {
-    document.getElementById(id).addEventListener("scroll", refresh);
+  ["pane-settings", "th", "studioBody", "proBody", "proR"].forEach(function (id) {
+    var target = document.getElementById(id);
+    if (target) target.addEventListener("scroll", refresh);
   });
   window.addEventListener("resize", refresh);
   window.addEventListener("pxd-layout-change", refresh);

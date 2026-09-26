@@ -2,7 +2,17 @@
 (function () {
   const ui = window.PXD_UI;
 
-  const DEFAULT_BASE = "http://127.0.0.1:17880";
+  const runtimeBase = window.PXD_RUNTIME && window.PXD_RUNTIME.companionBase;
+  const DEFAULT_BASE = runtimeBase || "http://127.0.0.1:17880";
+  // V2 preview always talks to the service that served /ui/. Native development
+  // uses its isolated service, never the preserved installed Alpha by default.
+  const previewOrigin = window.location && /^https?:$/.test(window.location.protocol) && /^\/ui(?:\/|$)/.test(window.location.pathname) ? window.location.origin : null;
+  const serviceInput = document.getElementById("baseUrl");
+  if (serviceInput) {
+    if (previewOrigin) { serviceInput.value = previewOrigin; serviceInput.setAttribute("readonly", ""); }
+    else if (!serviceInput.value || runtimeBase && /:17880\/?$/.test(serviceInput.value)) serviceInput.value = DEFAULT_BASE;
+  }
+  const SHARED_STUDIO = true;
   /* global window.ps from <script src="ps-encode/capture/return"> — not function ps() */
   const hostPs = (typeof window !== "undefined" && window.ps) ? window.ps : {};
 
@@ -469,7 +479,7 @@
 
   function baseUrl() {
     const el = $("baseUrl");
-    return (el && el.value.trim()) || DEFAULT_BASE;
+    return previewOrigin || (el && el.value.trim()) || DEFAULT_BASE;
   }
 
   function selScope() {
@@ -1759,6 +1769,7 @@
   }
 
   async function rollbackLastLayer() {
+    if (SHARED_STUDIO) throw new Error("请在共享任务记录中撤销，本地旧图层记录不能用于生产撤销");
     if (lastResultLayerId == null) {
       return { applied: false, reason: "no-result-layer" };
     }
@@ -1827,6 +1838,7 @@
   /* ---- Companion ---- */
 
   async function post(path, body) {
+    if (SHARED_STUDIO) throw new Error("旧版模拟执行入口已停用，请使用专业工作区的共享草稿");
     const r = await fetch(baseUrl() + path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1846,6 +1858,12 @@
   }
 
   async function runPipeline(text, opts) {
+    if (SHARED_STUDIO) {
+      if (!window.PXD_STUDIO || !window.PXD_STUDIO.controller) throw new Error("共享专业工作区尚未加载，未执行旧版模拟流程");
+      await window.PXD_STUDIO.controller.loadRecipe({ prompt: String(text || "") });
+      showTab("pro");
+      return; // Legacy controls may stage a shared draft, never run a mock pipeline.
+    }
     hideEmptyChips();
     if ($("resultCard")) $("resultCard").hidden = true;
     opts = opts || {};
@@ -2360,7 +2378,10 @@
       else p.setAttribute("hidden", "");
     });
     markWide();
-    if (id === "pro") { refreshJob(); searchRecipes(); }
+    if (id === "pro") {
+      if (SHARED_STUDIO) { if (window.PXD_STUDIO && window.PXD_STUDIO.controller) window.PXD_STUDIO.controller.refresh().catch(function () {}); }
+      else { refreshJob(); searchRecipes(); }
+    }
   }
 
   document.querySelectorAll(".tab").forEach((btn) => {
@@ -2563,6 +2584,7 @@
   }
 
   async function refreshJob() {
+    if (SHARED_STUDIO) return;
     try {
       const r = await fetch(baseUrl() + "/job");
       const j = await r.json();
@@ -2571,6 +2593,7 @@
   }
 
   async function searchRecipes() {
+    if (SHARED_STUDIO) return;
     if (!recipeHits) return;
     const q = recipeQ ? recipeQ.value.trim() : "";
     const r = await fetch(baseUrl() + "/recipes?q=" + encodeURIComponent(q) + "&region=&limit=8");
@@ -2642,6 +2665,7 @@
   if ($("compRetry")) $("compRetry").addEventListener("click", function () { pingHealth(); });
   if ($("toAgent")) {
     $("toAgent").addEventListener("click", function () {
+      if (SHARED_STUDIO) { if (window.PXD_STUDIO) window.PXD_STUDIO.toAgent(); return; }
       showTab("agent");
       const compile = $("compile");
       if (compile && compile.value) $("prompt").value = compile.value;
@@ -2651,6 +2675,11 @@
   if ($("proTa")) $("proTa").addEventListener("input", updatePrimaryLabel);
   if ($("applyBtn")) {
     $("applyBtn").addEventListener("click", async function () {
+      if (SHARED_STUDIO) {
+        try { await runPipeline(($("proTa") && $("proTa").value) || ($("compile") && $("compile").value) || ""); }
+        catch (e) { log(String(e && e.message ? e.message : e), "err"); }
+        return;
+      }
       if (ui.isDisabled($("applyBtn"))) return;
       if (document.querySelector("input[name=ret][value=cover]") &&
           document.querySelector("input[name=ret][value=cover]").checked &&
@@ -2693,7 +2722,7 @@
 
   setConnected(false);
   updatePrimaryLabel();
-  try {
+  if (!SHARED_STUDIO) try {
     const restored = restoreLastCapture();
     if (captureUsable(restored)) {
       lastCapture = restored;
@@ -2704,7 +2733,7 @@
   } catch (_) {
     lastCapture = null;
   }
-  try {
+  if (!SHARED_STUDIO) try {
     const recs = restoreRecords();
     if (recs && recs.length) {
       taskRecords = recs;
@@ -2722,5 +2751,12 @@
       return hostPs.capture();
     }
   };
+  window.PXD_NAV = { showTab: showTab, baseUrl: baseUrl };
+  if (SHARED_STUDIO) {
+    ["proRow", "proComposer"].forEach(function (id) { const el = $(id); if (el) { el.hidden = true; el.style.display = "none"; } });
+    // These Alpha-only switches do not represent the current shared draft.
+    ["swConfirm", "swGroup", "swAuto", "swBatch", "swBrush", "swJson"].forEach(function (id) { const el = $(id); if (el && el.parentElement) el.parentElement.hidden = true; });
+    document.querySelectorAll("input[name=defRet]").forEach(function (el) { if (el.parentElement && el.parentElement.parentElement && el.parentElement.parentElement.parentElement) el.parentElement.parentElement.parentElement.hidden = true; });
+  }
 
 })();
