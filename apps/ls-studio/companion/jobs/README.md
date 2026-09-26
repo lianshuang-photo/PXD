@@ -1,0 +1,17 @@
+# Durable drafts and jobs
+
+`createJobStore({rootDir})` implements the G01 API with synchronous atomic operations. One Companion process owns a directory; this is not a multi-process database. Each operation reads the authoritative state before checking revisions or request IDs, so two callers in that process cannot interleave a stale read and later write. Every result is a defensive copy.
+
+`state.json` is a versioned, checksummed transaction containing drafts, job snapshots, request deduplication and placement receipts. Writes use a new temporary file, flush it, atomically rename it, then flush the directory. Failed publication leaves the previous transaction authoritative. The `.initialized` marker makes a missing primary file after initialization an error. Corrupt, incompatible, missing or unreadable state fails closed as `STORAGE_CORRUPT`; a stale backup is never promoted because it could lose an acknowledged request or repeat a host mutation. `.state-*.tmp` crash residue is ignored and can be removed while the Companion is stopped.
+
+Directory flushing is POSIX-only. Windows still flushes the file and atomically replaces it, but Node cannot `fsync` a Windows directory handle; the same sudden-power-loss durability is not claimed there. Process restart, corruption and request deduplication semantics remain unchanged.
+
+Draft updates require `expectedRevision`. Job request IDs are deduplicated before checking the current draft revision, and cannot be reused for a different draft/revision. A submitted job owns a frozen copy of the capability version, revision, parameters and context. The application resolves managed asset references before dispatch; this store does not open asset bytes or call providers/Photoshop.
+
+Generation `status` and `placement.status` remain separate. Cancelling queued/running/uncertain work is durable; late results can be retained for inspection but cannot revive it. An already applied placement request returns its existing state on a retry. A receipt cannot be replaced: successful rollback updates placement status while preserving the original receipt. Native edits may succeed with an applied receipt and no image results.
+
+The application must call `recover()` once before accepting work after startup. Interrupted generation becomes `recovery-required`; queued or applying host work becomes `rollback-conflict`. This deliberately requests inspection instead of replaying an operation whose outcome may be unknown. `recover` itself performs no dispatch.
+
+This initial implementation has a 64 MiB state limit and reads/writes one JSON transaction; it does not claim unbounded archive throughput or retention management. A failed filesystem flush after rename can mean a mutation was published despite a storage error, so callers retry with the same request ID and re-read authoritative state. Provider metadata is limited to nonsecret JSON, and binary payloads, credential fields and request URLs are rejected.
+
+Validation: `node --test tests/jobs-store.test.cjs` from the LS application directory. Tests exercise cross-caller revision conflicts, restart deduplication, snapshot independence, cancellation and late results, result conflicts, native placement, immutable receipts, explicit retries, recovery, publication failures, crash residue, missing/corrupt state and forbidden patches. Live provider and Photoshop acceptance remain separate.

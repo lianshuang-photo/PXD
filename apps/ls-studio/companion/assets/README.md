@@ -1,0 +1,13 @@
+# Managed image assets
+
+`createAssetStore({rootDir})` implements the G01 API without runtime dependencies. Only opaque IDs reach file lookup; caller paths are never opened. Each `put` creates a new asset, including when its bytes match an existing asset. Its purpose, source, and capture metadata therefore cannot be silently changed by content deduplication.
+
+An asset directory contains bytes and a versioned, checksummed manifest. Both files are flushed before its directory is atomically published. Reads verify the manifest checksum, byte count, SHA-256 and parsed dimensions/format; missing or changed files produce `ASSET_INTEGRITY`. Unpublished `.tmp-*` directories are ignored after a crash. They may be removed manually when the Companion is stopped. No garbage collector removes referenced assets in this first implementation.
+
+POSIX additionally flushes directory entries. Windows retains file flushing and atomic publication, but Node does not expose directory handles for `fsync`; this implementation does not promise equivalent sudden-power-loss durability on Windows. The CI matrix exercises Windows behavior separately from the POSIX fixtures.
+
+Input limits are **64 MiB, 32,768 pixels per dimension, and 32 Mi pixels total**. PNG inflation is bounded to the exact expected row count and at most 256 MiB. PNG signature, chunks, CRCs, palette/header constraints, compressed byte count, row filters and pixel byte count are checked. JPEG and static WebP receive container, marker/chunk, format and dimension validation; this module does **not** implement a full JPEG/WebP entropy decoder. Animated PNG/WebP and unsupported JPEG coding modes are explicitly rejected. Declared MIME type, dimensions or bit depth must match the image. `colorSpace` records the caller's capture/provider declaration; this module does not transform or independently certify an ICC profile.
+
+Bytes are copied before publication, and all returned metadata is defensive. Metadata cannot carry binary payloads or credential fields. The only exported API is `put`, `get`, and `read`; mutation and deletion are deliberately absent. The host may impose smaller production limits and is responsible for rejecting a result it cannot safely place; the asset store never silently rescales it.
+
+Validation: `node --test tests/assets-store.test.cjs` from the LS application directory. Fixtures cover actual PNG/JPEG/WebP files, immutable content and metadata, format/dimension lies, decompression bounds, publication failure, restart, checksum failures, missing bytes, and symlinks. These are local storage tests, not Photoshop or provider acceptance.
