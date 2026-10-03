@@ -41,7 +41,7 @@ async function realService(t) {
   const provider = { describe: () => ({ id: 'fixture', model: 'fixture-model', configured: true, mask: 'advisory', limits: { inputImages: 3, inputBytes: 14 * 1024 * 1024 } }), generate: async input => { calls.push({ name: 'generate', args: input }); return { images: [{ data: PNG, mimeType: 'image/png' }], provider: { id: 'fixture', model: 'fixture-model' } }; } };
   const service = createCapabilityService({ assets, jobs, provider, bridge });
   t.after(async () => { await service.close(); fs.rmSync(rootDir, { recursive: true, force: true }); });
-  return { service, assets, jobs, calls };
+  return { service, assets, jobs, calls, rootDir };
 }
 test('professional HTTP and MCP share revisions, immutable jobs, result pixels and idempotent placement', async t => {
   const { service, calls } = await realService(t), http = await serverFor(t, service);
@@ -81,6 +81,62 @@ test('professional HTTP and MCP share revisions, immutable jobs, result pixels a
   assert.equal((await http.ui('apply', placement)).body.value.placement.status, 'applied');
   assert.equal(calls.filter(call => call.name === 'studio_apply_result').length, 1);
   assert.equal((await tool('studio_rollback', { jobId: job.jobId })).structuredContent.placement.status, 'rolled-back');
+});
+test('HTTP and MCP expose the same read-only lineage through editing, explicit runs, lists and storage restart', async t => {
+  const { service, jobs, calls, rootDir } = await realService(t), http = await serverFor(t, service);
+  const mcp = createPhotoshopMcp({ base: http.base, token: TOKEN }); let sequence = 0;
+  const tool = async (name, args = {}) => (await mcp.handle({ jsonrpc: '2.0', id: ++sequence, method: 'tools/call', params: { name, arguments: args } })).result;
+  const captured = (await http.ui('capture', { documentId: 1, scope: 'selection' })).body.value;
+  const initial = (await http.ui('createDraft', { capabilityId: 'image.edit', params: { prompt: 'original' }, context: captured })).body.value;
+  assert.equal(Object.hasOwn(initial, 'lineage'), false);
+  const submitted = (await http.ui('run', { draftId: initial.draftId, expectedRevision: 1, requestId: 'lineage-source' })).body.value;
+  await service.waitForIdle();
+  const sourceJob = jobs.getJob(submitted.job.jobId), descendants = [];
+  assert.equal(Object.hasOwn(sourceJob.snapshot, 'lineage'), false);
+  for (const mode of ['original', 'candidate-reference']) {
+    const args = { jobId: sourceJob.jobId, mode, ...(mode === 'candidate-reference' ? { resultId: sourceJob.results[0].resultId } : {}) };
+    const expected = { sourceJobId: sourceJob.jobId, mode, ...(mode === 'candidate-reference' ? { sourceResultId: args.resultId } : {}) }, before = calls.map(call => call.name);
+    const draft = mode === 'original' ? (await http.ui('deriveDraft', args)).body.value : (await tool('studio_derive_draft', args)).structuredContent;
+    assert.deepEqual(draft.lineage, expected); assert.equal(draft.source, mode === 'original' ? 'ui' : 'agent');
+    assert.deepEqual(calls.map(call => call.name), before, 'derive cannot generate, recapture or place even when reached through a transport');
+    assert.deepEqual((await http.ui('getDraft', { draftId: draft.draftId })).body.value, (await tool('studio_get_draft', { draftId: draft.draftId })).structuredContent);
+    const uiDrafts = (await http.ui('listDrafts')).body.value, agentDrafts = JSON.parse((await tool('studio_list_drafts')).content[0].text);
+    assert.deepEqual(uiDrafts, agentDrafts); assert.deepEqual(uiDrafts.find(value => value.draftId === draft.draftId).lineage, expected);
+    for (const [operation, name, input] of [
+      ['createDraft', 'studio_create_draft', { capabilityId: 'image.edit', lineage: expected }],
+      ['deriveDraft', 'studio_derive_draft', { ...args, lineage: expected }],
+      ['updateDraft', 'studio_update_draft', { draftId: draft.draftId, expectedRevision: 1, lineage: null }],
+    ]) {
+      assert.equal((await http.ui(operation, input)).body.error.code, 'INVALID_INPUT');
+      assert.equal((await tool(name, input)).structuredContent.error.code, 'INVALID_INPUT');
+    }
+    const updated = (await tool('studio_update_draft', { draftId: draft.draftId, expectedRevision: 1, params: { prompt: 'revised ' + mode } })).structuredContent;
+    assert.deepEqual(updated.lineage, expected); assert.equal(updated.source, 'agent');
+    const stale = (await http.ui('updateDraft', { draftId: draft.draftId, expectedRevision: 1, params: { prompt: 'stale' } })).body.error;
+    assert.equal(stale.code, 'REVISION_CONFLICT'); assert.deepEqual(stale.details.current.lineage, expected);
+    assert.deepEqual(calls.map(call => call.name), before, 'reads, edits and rejected forgeries have no provider or host side effects');
+    const input = { draftId: draft.draftId, expectedRevision: 2, requestId: 'lineage-' + mode };
+    const run = mode === 'original' ? (await tool('studio_run', input)).structuredContent : (await http.ui('run', input)).body.value;
+    assert.deepEqual(run.job.snapshot.lineage, expected);
+    await service.waitForIdle();
+    const job = (await http.ui('getJob', { jobId: run.job.jobId })).body.value;
+    assert.equal(job.status, 'succeeded'); assert.deepEqual(job.snapshot.lineage, expected);
+    assert.deepEqual(job, (await tool('studio_get_job', { jobId: job.jobId })).structuredContent);
+    await http.ui('updateDraft', { draftId: draft.draftId, expectedRevision: 2, params: { prompt: 'changed after run' }, context: null });
+    assert.equal((await tool('studio_get_job', { jobId: job.jobId })).structuredContent.snapshot.params.prompt, 'revised ' + mode);
+    descendants.push({ draftId: draft.draftId, jobId: job.jobId, lineage: expected });
+  }
+  const listed = (await http.ui('listJobs')).body.value;
+  assert.deepEqual(listed, JSON.parse((await tool('studio_list_jobs')).content[0].text));
+  const reopened = createJobStore({ rootDir: path.join(rootDir, 'jobs') });
+  for (const record of descendants) {
+    assert.deepEqual(reopened.getDraft(record.draftId).lineage, record.lineage);
+    assert.deepEqual(reopened.getJob(record.jobId).snapshot.lineage, record.lineage);
+    assert.deepEqual(listed.find(job => job.jobId === record.jobId).snapshot.lineage, record.lineage);
+  }
+  assert.deepEqual(jobs.getJob(sourceJob.jobId), sourceJob);
+  assert.equal(calls.filter(call => call.name === 'generate').length, 3);
+  assert.deepEqual(calls.filter(call => call.name !== 'generate').map(call => call.name), ['studio_capture']);
 });
 test('only observed bounded legacy tools are forwarded; internal host operations remain unavailable', async t => {
   const { service, calls } = await realService(t), f = await serverFor(t, service);

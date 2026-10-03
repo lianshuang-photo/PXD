@@ -1,6 +1,6 @@
 'use strict';
 
-const { invariant, clone, id, capability, validateRunSnapshot } = require('../domain/contracts');
+const { invariant, clone, id, object, capability, validateRunSnapshot } = require('../domain/contracts');
 
 function modelName(value) { return typeof value === 'string' ? value.trim().replace(/^models\//, '') : ''; }
 function providerModel(provider) {
@@ -41,10 +41,13 @@ function createResultDrafts({ assets, jobs, provider, inputsFor }) {
     return model;
   }
   return async function deriveDraft(input) {
-    id(input.jobId, 'jobId');
-    invariant(['original', 'candidate-reference'].includes(input.mode), 'INVALID_INPUT', 'Choose original inputs or a candidate reference');
-    invariant(input.mode === 'candidate-reference' ? typeof input.resultId === 'string' : input.resultId === undefined, 'INVALID_INPUT', 'A candidate result is required only for candidate-reference mode');
-    const job = await jobs.getJob(input.jobId), snapshot = clone(job.snapshot);
+    object(input);
+    for (const key of Object.keys(input)) invariant(['jobId', 'mode', 'resultId', 'source'].includes(key), 'INVALID_INPUT', 'Unsupported derivation field: ' + key);
+    const { jobId, mode, resultId, source } = input;
+    id(jobId, 'jobId');
+    invariant(['original', 'candidate-reference'].includes(mode), 'INVALID_INPUT', 'Choose original inputs or a candidate reference');
+    invariant(mode === 'candidate-reference' ? typeof resultId === 'string' : resultId === undefined, 'INVALID_INPUT', 'A candidate result is required only for candidate-reference mode');
+    const job = await jobs.getJob(jobId), snapshot = clone(job.snapshot), lineage = { sourceJobId: job.jobId, mode };
     invariant(snapshot.capabilityId === 'image.edit', 'CAPABILITY_CONFLICT', 'Only image editing jobs can create a revision draft');
     invariant(snapshot.capabilityVersion === capability(snapshot.capabilityId).version, 'CAPABILITY_VERSION_CONFLICT', 'This historical capability version cannot be edited by the current service');
     validateRunSnapshot(snapshot);
@@ -52,10 +55,11 @@ function createResultDrafts({ assets, jobs, provider, inputsFor }) {
     // Read verifies existence, integrity and original capture provenance before
     // creating anything. Current drafts and the current PS document are unused.
     const inputs = await inputsFor(snapshot);
-    if (input.mode === 'candidate-reference') {
-      id(input.resultId, 'resultId');
-      const result = job.results.find(item => item.resultId === input.resultId);
+    if (mode === 'candidate-reference') {
+      id(resultId, 'resultId');
+      const result = job.results.find(item => item.resultId === resultId);
       const { candidate, model: resultModel } = await readResult(job, result);
+      lineage.sourceResultId = result.resultId;
       inheritModel(snapshot, job, resultModel);
       const refs = snapshot.context.refs || [];
       if (!refs.some(ref => ref.assetId === result.assetId && ref.role === 'reference')) {
@@ -71,7 +75,7 @@ function createResultDrafts({ assets, jobs, provider, inputsFor }) {
     } else if (snapshot.params.model === undefined) inheritModel(snapshot, job, await originalModel(job));
     // Preserve the compiled prompt and recipe sourceHash/values; do not recompile
     // against a possibly changed recipe catalog or start any execution here.
-    return jobs.createDraft({ capabilityId: snapshot.capabilityId, params: snapshot.params, context: snapshot.context, source: input.source || 'ui' });
+    return jobs.createDerivedDraft({ capabilityId: snapshot.capabilityId, params: snapshot.params, context: snapshot.context, source: source || 'ui' }, lineage);
   };
 }
 

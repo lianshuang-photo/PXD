@@ -46,6 +46,7 @@ const contextSchema = schema({
   settings: schema({ autoApply: { type: 'boolean' }, groupResults: { type: 'boolean' }, returnType: { enum: ['new-layer'] } }),
   transform: schema({ sourceBounds: rect, inputWidth: integer, inputHeight: integer }, ['sourceBounds', 'inputWidth', 'inputHeight']),
 }, ['documentRef', 'scope']);
+const lineageSchema = schema({ sourceJobId: identifier, mode: { enum: ['original', 'candidate-reference'] }, sourceResultId: identifier }, ['sourceJobId', 'mode']);
 const capabilityDefinitions = [
   { id: 'image.edit', version: 1, title: '图像编辑', backend: 'gemini', inputSchema: schema({ prompt: text(64000), model: text(200), temperature: { type: 'number', minimum: 0, maximum: 2 }, aspectRatio: { enum: ['auto', '1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9', '4:5', '5:4'] }, imageSize: { enum: ['1K', '2K', '4K'] } }), outputSchema: { type: 'object', required: ['results'] }, errors: ['PROVIDER_NOT_CONFIGURED', 'PROVIDER_AUTH', 'PROVIDER_RATE_LIMIT', 'PROVIDER_REJECTED', 'PROVIDER_UNCERTAIN', 'CANCELLED'] },
   { id: 'ps.layer.update', version: 1, title: '修改图层属性', backend: 'photoshop', inputSchema: schema({ layerId: { type: ['integer', 'null'], minimum: 1 }, changes: schema({ name: text(1000), opacity: { type: 'number', minimum: 0, maximum: 100 }, visible: { type: 'boolean' } }) }), outputSchema: { type: 'object', required: ['receipt'] }, errors: ['HOST_UNAVAILABLE', 'DOCUMENT_CONFLICT', 'HOST_EXECUTION_FAILED', 'ROLLBACK_CONFLICT'] },
@@ -90,11 +91,18 @@ function validateContext(context) {
   }
   return clone(context);
 }
+function validateLineage(lineage) {
+  validateSchema(lineage, lineageSchema, 'lineage');
+  invariant(lineage.mode === 'candidate-reference' ? Object.hasOwn(lineage, 'sourceResultId') : !Object.hasOwn(lineage, 'sourceResultId'), 'INVALID_INPUT', 'A lineage result is required only for candidate-reference mode');
+  return clone(lineage);
+}
 function validateDraft(input) {
   object(input); const def = capability(input.capabilityId);
   validateSchema(input.params || {}, def.inputSchema, 'params');
   invariant(input.source == null || ['ui', 'agent', 'system'].includes(input.source), 'INVALID_INPUT', 'Unknown update source');
-  return { capabilityId: def.id, capabilityVersion: def.version, params: clone(input.params || {}), context: validateContext(input.context), source: input.source || 'ui' };
+  const lineage = Object.hasOwn(input, 'lineage') ? validateLineage(input.lineage) : undefined;
+  invariant(!lineage || def.id === 'image.edit', 'CAPABILITY_CONFLICT', 'Only image editing drafts can have revision lineage');
+  return { capabilityId: def.id, capabilityVersion: def.version, params: clone(input.params || {}), context: validateContext(input.context), source: input.source || 'ui', ...(lineage ? { lineage } : {}) };
 }
 function validateRunSnapshot(snapshot) {
   const draft = validateDraft(snapshot), c = draft.context;
@@ -130,4 +138,4 @@ const hostOperations = {
   studio_rollback: schema({ receipt: { type: 'object' } }, ['receipt']),
 };
 capabilityDefinitions[0].inputSchema.properties.recipe = schema({ recipeId: identifier, sourceHash: { type: 'string', pattern: '^[a-f0-9]{64}$' }, values: { type: 'object', additionalProperties: { type: 'number', minimum: 0, maximum: 1 } } }, ['recipeId', 'sourceHash', 'values']);
-module.exports = { DomainError, invariant, object, clone, id, schema, identifier, integer, contextSchema, documentRefSchema, capabilityDefinitions, capability, validateSchema, validateContext, validateDraft, validateRunSnapshot, assertTransition, jobTransitions, placementTransitions, publicError, hostOperations };
+module.exports = { DomainError, invariant, object, clone, id, schema, identifier, integer, contextSchema, documentRefSchema, lineageSchema, capabilityDefinitions, capability, validateSchema, validateContext, validateLineage, validateDraft, validateRunSnapshot, assertTransition, jobTransitions, placementTransitions, publicError, hostOperations };

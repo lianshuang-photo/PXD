@@ -49,6 +49,11 @@ function validateReceipt(value, jobId) {
   id(result.mutationId, 'mutationId');
   return result;
 }
+function assertLineageSource(lineage, job) {
+  invariant(job, 'JOB_NOT_FOUND', 'The revision source job was not found', 404);
+  invariant(job.snapshot.capabilityId === 'image.edit', 'CAPABILITY_CONFLICT', 'Only image editing jobs can be revision sources');
+  if (lineage.mode === 'candidate-reference') invariant(job.results.some(result => result.resultId === lineage.sourceResultId && result.jobId === job.jobId), 'RESULT_NOT_FOUND', 'The revision source candidate does not belong to this job', 404);
+}
 function syncDirectory(directory) {
   // File flush + atomic rename also works on Windows, whose Node fs API cannot
   // fsync directory handles. POSIX gets the extra parent-directory flush.
@@ -63,23 +68,24 @@ function writeFile(file, contents) {
 function validateState(state) {
   fields(state, ['schemaVersion', 'sequence', 'drafts', 'jobs']);
   invariant(state.schemaVersion === 1 && Number.isSafeInteger(state.sequence) && state.sequence >= 0 && Array.isArray(state.drafts) && Array.isArray(state.jobs), 'INVALID_INPUT', 'Unsupported task state');
-  const draftIds = new Set(), jobIds = new Set(), requestIds = new Set(), resultIds = new Set();
+  const drafts = new Map(), jobs = new Map(), requestIds = new Set(), resultIds = new Set();
   for (const draft of state.drafts) {
-    fields(draft, ['schemaVersion', 'draftId', 'revision', 'capabilityId', 'capabilityVersion', 'params', 'context', 'source', 'createdAt', 'updatedAt']);
+    fields(draft, ['schemaVersion', 'draftId', 'revision', 'capabilityId', 'capabilityVersion', 'params', 'context', 'source', 'lineage', 'createdAt', 'updatedAt']);
     id(draft.draftId); revision(draft.revision);
-    invariant(draft.schemaVersion === 1 && !draftIds.has(draft.draftId) && timestamp(draft.createdAt) && timestamp(draft.updatedAt), 'INVALID_INPUT', 'Invalid stored draft');
+    invariant(draft.schemaVersion === 1 && !drafts.has(draft.draftId) && timestamp(draft.createdAt) && timestamp(draft.updatedAt), 'INVALID_INPUT', 'Invalid stored draft');
     const checked = validateDraft(draft);
-    invariant(checked.capabilityVersion === draft.capabilityVersion && same(checked.params, draft.params) && same(checked.context, draft.context) && checked.source === draft.source, 'INVALID_INPUT', 'Invalid stored draft contract');
-    draftIds.add(draft.draftId);
+    invariant(checked.capabilityVersion === draft.capabilityVersion && same(checked.params, draft.params) && same(checked.context, draft.context) && checked.source === draft.source && same(checked.lineage, draft.lineage), 'INVALID_INPUT', 'Invalid stored draft contract');
+    drafts.set(draft.draftId, draft);
   }
   for (const job of state.jobs) {
     fields(job, ['schemaVersion', 'jobId', 'draftId', 'requestId', 'source', 'snapshot', 'status', 'results', 'placement', 'provider', 'error', 'createdAt', 'updatedAt']);
     id(job.jobId); id(job.requestId); id(job.draftId); source(job.source);
-    invariant(job.schemaVersion === 1 && !jobIds.has(job.jobId) && !requestIds.has(job.requestId) && draftIds.has(job.draftId) && own(jobTransitions, job.status) && timestamp(job.createdAt) && timestamp(job.updatedAt) && Array.isArray(job.results), 'INVALID_INPUT', 'Invalid stored job');
-    fields(job.snapshot, ['capabilityId', 'capabilityVersion', 'revision', 'params', 'context']);
+    invariant(job.schemaVersion === 1 && !jobs.has(job.jobId) && !requestIds.has(job.requestId) && drafts.has(job.draftId) && own(jobTransitions, job.status) && timestamp(job.createdAt) && timestamp(job.updatedAt) && Array.isArray(job.results), 'INVALID_INPUT', 'Invalid stored job');
+    fields(job.snapshot, ['capabilityId', 'capabilityVersion', 'revision', 'params', 'context', 'lineage']);
     revision(job.snapshot.revision);
     const checked = validateRunSnapshot(job.snapshot);
     invariant(checked.capabilityVersion === job.snapshot.capabilityVersion, 'INVALID_INPUT', 'Invalid stored capability version');
+    invariant(same(job.snapshot.lineage, drafts.get(job.draftId).lineage), 'INVALID_INPUT', 'Stored snapshot lineage differs from its draft');
     if (own(job, 'provider')) provider(job.provider);
     if (own(job, 'error')) publicError(job.error);
     for (let index = 0; index < job.results.length; index++) {
@@ -96,8 +102,9 @@ function validateState(state) {
     if (own(job.placement, 'receipt')) validateReceipt(job.placement.receipt, job.jobId);
     if (['applied', 'rolled-back'].includes(job.placement.status)) invariant(job.placement.receipt, 'INVALID_INPUT', 'Completed placement is missing its receipt');
     if (own(job.placement, 'error')) publicError(job.placement.error);
-    jobIds.add(job.jobId); requestIds.add(job.requestId);
+    jobs.set(job.jobId, job); requestIds.add(job.requestId);
   }
+  for (const draft of state.drafts) if (draft.lineage) assertLineageSource(draft.lineage, jobs.get(draft.lineage.sourceJobId));
   return state;
 }
 function createJobStore({ rootDir } = {}) {
@@ -156,18 +163,31 @@ function createJobStore({ rootDir } = {}) {
     invariant(draft.revision === expectedRevision, 'REVISION_CONFLICT', 'Draft has changed; read its current revision before updating or running', 409, { current: clone(draft) });
   }
   function save(state, value) { state.sequence++; write(state); return clone(value); }
-  function createDraft(input) {
-    fields(input, ['capabilityId', 'params', 'context', 'source']);
-    const checked = validateDraft(input), state = read(), now = new Date().toISOString();
+  function insertDraft(state, checked) {
+    const now = new Date().toISOString();
     const draft = { schemaVersion: 1, draftId: 'draft-' + randomUUID(), revision: 1, ...checked, createdAt: now, updatedAt: now };
     state.drafts.push(draft); return save(state, draft);
+  }
+  function createDraft(input) {
+    fields(input, ['capabilityId', 'params', 'context', 'source']);
+    invariant(!own(input, 'lineage'), 'INVALID_INPUT', 'Lineage can only be set by deriving a draft');
+    const checked = validateDraft(input);
+    return insertDraft(read(), checked);
+  }
+  // Internal only: the derive service supplies lineage after validating source
+  // assets/model/budget. Public create/update never accept lineage fields.
+  function createDerivedDraft(input, lineage) {
+    fields(input, ['capabilityId', 'params', 'context', 'source']);
+    const checked = validateDraft({ ...input, lineage }), state = read();
+    assertLineageSource(checked.lineage, state.jobs.find(job => job.jobId === checked.lineage.sourceJobId));
+    return insertDraft(state, checked);
   }
   function updateDraft(input) {
     fields(input, ['draftId', 'expectedRevision', 'params', 'context', 'source']);
     const state = read(), draft = draftFrom(state, input.draftId);
     expectRevision(draft, input.expectedRevision);
     if (own(input, 'params')) object(input.params, 'params');
-    const checked = validateDraft({ capabilityId: draft.capabilityId, params: { ...draft.params, ...(input.params || {}) }, context: own(input, 'context') ? input.context : draft.context, source: source(input.source, draft.source) });
+    const checked = validateDraft({ capabilityId: draft.capabilityId, params: { ...draft.params, ...(input.params || {}) }, context: own(input, 'context') ? input.context : draft.context, source: source(input.source, draft.source), ...(draft.lineage ? { lineage: draft.lineage } : {}) });
     invariant(draft.revision < Number.MAX_SAFE_INTEGER, 'STATE_CONFLICT', 'Draft revision limit reached', 409);
     Object.assign(draft, checked, { revision: draft.revision + 1, updatedAt: new Date().toISOString() });
     return save(state, draft);
@@ -184,7 +204,7 @@ function createJobStore({ rootDir } = {}) {
     const draft = draftFrom(state, input.draftId);
     expectRevision(draft, input.expectedRevision);
     const checked = validateRunSnapshot(draft), now = new Date().toISOString();
-    const snapshot = { capabilityId: checked.capabilityId, capabilityVersion: checked.capabilityVersion, revision: draft.revision, params: checked.params, context: checked.context };
+    const snapshot = { capabilityId: checked.capabilityId, capabilityVersion: checked.capabilityVersion, revision: draft.revision, params: checked.params, context: checked.context, ...(checked.lineage ? { lineage: checked.lineage } : {}) };
     const job = { schemaVersion: 1, jobId: 'job-' + randomUUID(), draftId: draft.draftId, requestId: input.requestId, source: from, snapshot, status: 'queued', results: [], placement: { status: 'not-requested' }, createdAt: now, updatedAt: now };
     state.jobs.push(job); return { job: save(state, job), duplicate: false };
   }
@@ -277,7 +297,7 @@ function createJobStore({ rootDir } = {}) {
     return changed.length ? save(state, changed) : [];
   }
   return {
-    createDraft, getDraft: draftId => clone(draftFrom(read(), draftId)), listDrafts: () => clone(read().drafts.slice().reverse()), updateDraft,
+    createDraft, createDerivedDraft, getDraft: draftId => clone(draftFrom(read(), draftId)), listDrafts: () => clone(read().drafts.slice().reverse()), updateDraft,
     createJob, getJob: jobId => clone(jobFrom(read(), jobId)), listJobs: () => clone(read().jobs.slice().reverse()),
     transition, addResults, cancel, setPlacement, recover,
   };
