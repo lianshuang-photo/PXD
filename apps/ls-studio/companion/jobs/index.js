@@ -170,6 +170,7 @@ function createJobStore({ rootDir } = {}) {
   }
   function createDraft(input) {
     fields(input, ['capabilityId', 'params', 'context', 'source']);
+    invariant(!own(input, 'lineage'), 'INVALID_INPUT', 'Lineage can only be set by deriving a draft');
     const checked = validateDraft(input);
     return insertDraft(read(), checked);
   }

@@ -247,6 +247,8 @@ test('lineage is internal-only and invalid modes, fields and source ownership fa
   store.addResults(other.jobId, [{ resultId: 'other-candidate', assetId: 'other-asset' }]);
   const native = submit('native-source', { capabilityId: 'ps.layer.update', params: { layerId: 3, changes: { opacity: 60 } }, context: fixture.context }).job;
   const lineage = { sourceJobId: job.jobId, mode: 'original' }, file = path.join(rootDir, 'state.json'), before = fs.readFileSync(file);
+  const hiddenLineageInput = Object.defineProperty({ ...fixture.draft }, 'lineage', { value: lineage });
+  assert.throws(() => store.createDraft(hiddenLineageInput), { code: 'INVALID_INPUT' });
   for (const value of [lineage, null, undefined]) {
     assert.throws(() => store.createDraft({ ...fixture.draft, lineage: value }), { code: 'INVALID_INPUT' });
     assert.throws(() => store.updateDraft({ draftId: draft.draftId, expectedRevision: 1, lineage: value }), { code: 'INVALID_INPUT' });
