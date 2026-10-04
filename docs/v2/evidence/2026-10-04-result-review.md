@@ -25,6 +25,8 @@ The automatic tests use dedicated small image fixtures, temporary real stores an
 
 The private assembly applies the module to `9d8c43eeb38d2fc50a89b43ec79f15bfe336cd63`. Five merge-conflict points were resolved by retaining both implementations: parameter clearing helpers and review helpers; all preset source handling and revision-aware recipe reads; review reads/writes; and the new three-tool discovery assertions alongside the assembled total of 36 tools. The separate reviewer verified these points and the unchanged duplicate-run guard/provider snapshot behavior. Assembly results cannot be transferred to a different module head.
 
+Subsequent delivery: [PR #70 candidate review UI](2026-10-04-result-review-ui.md) implements the UI follow-up below with its own final-source browser and automated evidence. This backend report retains the verification scope recorded above; its assembly is not the later UI assembly.
+
 ## Remaining gates and next scope
 
 The [frontend follow-up](2026-10-04-frontend-followup.md) belongs to #66 `b5a9bc1e7701f48767ce4479cbc381216a5b4249`, not either source above. It records actual browser form recovery and a connected PS bridge, while the computer-use surface still did not expose an operable native floating panel. Native theme/size/control/keyboard/IME checks remain unverified.

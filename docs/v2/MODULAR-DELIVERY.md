@@ -4,6 +4,9 @@ Updated 2026-10-04. The [revision-lineage delivery record](evidence/2026-10-04-r
 
 The subsequent [shared review delivery](evidence/2026-10-04-result-review.md) records [PR #69](https://github.com/lianshuang-photo/PXD/pull/69), head `8a3feef68f039623efe87c8be7ef06f015280e03`, with temporary comparison base #68. It adds backend candidate feedback/acceptance and ancestor lookup, passes 244 local tests with one explicit skip, and has no remaining independent code-review blockers. Private assembly `51638fdaddcd017becf9d17d41235c624f54a816` passes 300 tests with one explicit skip; both builds and extracted smoke passed. No aggregate PR, new UI acceptance, main merge or successful host status is implied. The separate [#66 browser follow-up](evidence/2026-10-04-frontend-followup.md) retains its own source and native-panel limitation.
 
+
+The next [candidate review UI delivery](evidence/2026-10-04-result-review-ui.md) records [PR #70](https://github.com/lianshuang-photo/PXD/pull/70), head `93add732f49eeae71795cb1fd3c1eab8083f5c72`, temporary comparison base #69. Feedback editing, separate adoption and ancestor-candidate navigation are implemented; local full suite **264 pass / 0 fail / 1 launchd skip**, 74 checks, CI/build/extracted smoke and independent code review passed. Actual browser synthetic-job success/recovery and eight theme/scale/size combinations were exercised. Private assembly `3b40836ad52d0869339437b9e003eee428d5185f` passed **320 / 0 / 1**, 84 checks, build/smoke and separate integration review. Native-panel acceptance and independent GitHub-account approval remain missing. This is a separate feature PR, not an aggregate merge; assembly automation cannot inherit the module's browser evidence.
+
 ## Initial decomposition
 
 | PR / branch | Review scope | Declared comparison base | Local verification |
