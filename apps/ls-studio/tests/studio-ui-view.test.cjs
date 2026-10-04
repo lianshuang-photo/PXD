@@ -27,9 +27,10 @@ function fixture() {
   const values = new Map(), calls = [], win = { document: doc, location: { protocol: 'http:', pathname: '/ui/', origin: 'http://localhost:17881' }, localStorage: { getItem: key => values.get(key), setItem: (key, value) => values.set(key, value) }, PXD_COMPOSER: composer, PXD_CONTEXT: { isPhotoshop: false }, PXD_NAV: { baseUrl: () => 'http://localhost:17881', showTab: tab => calls.push({ operation: 'showTab', tab }) } };
   vm.runInNewContext(fs.readFileSync(require.resolve('../plugin/ui-014'), 'utf8'), { window: win, document: doc, Event });
   const draft = { draftId: 'draft-1', revision: 1, capabilityId: 'image.edit', params: { prompt: 'Keep the details <not HTML>' }, context: { documentRef: { documentId: 1, historyStateId: 10, name: 'source.psd' }, scope: 'selection', transform: { inputWidth: 4, inputHeight: 3 }, baseAssetId: 'source-1', refs: [], preserve: [], settings: { autoApply: false, groupResults: false } } };
-  let configured = false, jobs = [], reader = async () => 'data:image/png;base64,AA==';
+  let configured = false, jobs = [], reader = async () => 'data:image/png;base64,AA==', beforeCall = null;
   const transport = { base: 'http://localhost:17881', readAsset: async assetId => { calls.push({ operation: 'readAsset', assetId }); return reader(assetId); }, call: async (operation, args) => {
     calls.push({ operation, args });
+    if (beforeCall) await beforeCall(operation, args);
     if (operation === 'discover') return { photoshop: { connected: true }, provider: { configured, model: 'fixture', settings: { aspectRatio: ['auto'], imageSize: ['1K'] } } };
     if (operation === 'listDrafts') return [structuredClone(draft)];
     if (operation === 'listJobs') return structuredClone(jobs);
@@ -59,7 +60,7 @@ function fixture() {
     throw Error('Unexpected operation ' + operation);
   } };
   const mounted = mount({ window: win, document: doc, transport, poll: false });
-  return { doc, win, calls, mounted, ready: () => mounted.refresh(), configure: () => { configured = true; }, draft, setJobs: value => { jobs = structuredClone(value); }, getJobs: () => structuredClone(jobs), setAssetReader: value => { reader = value; } };
+  return { doc, win, calls, mounted, ready: () => mounted.refresh(), configure: () => { configured = true; }, draft, setJobs: value => { jobs = structuredClone(value); }, getJobs: () => structuredClone(jobs), setAssetReader: value => { reader = value; }, setBeforeCall: value => { beforeCall = value; } };
 }
 const turn = () => new Promise(resolve => setImmediate(resolve));
 test('mounted workspace displays shared draft, protects missing-provider action and populates Agent with record identity', async () => {
@@ -179,5 +180,27 @@ test('workspace refreshes ancestor acceptance without a child revision change an
     assert.equal(n.studioCompareCandidate.value, 'candidate-b');
     assert.match(n.studioReviewStatus.textContent, /候选 2 · 已采用此候选/);
     assert.equal(f.calls.some(call => ['run', 'apply', 'deriveDraft', 'rollback'].includes(call.operation)), false);
+  } finally { f.mounted.dispose(); }
+});
+
+test('manual refresh reports a read failure once and clears it through the real toolbar recovery path', async () => {
+  const f = fixture(); try {
+    await f.ready(); const n = f.mounted.nodes;
+    f.setBeforeCall(operation => { if (operation === 'listJobs') throw Object.assign(Error('private read error'), { code: 'NETWORK_ERROR' }); });
+    n.studioRefresh.click(); await turn(); await turn();
+    assert.match(n.studioError.textContent, /无法读取工作区/); assert.doesNotMatch(n.studioError.textContent, /private|未确认/);
+    f.setBeforeCall(null); n.studioRefresh.click(); await turn(); await turn();
+    assert.equal(f.mounted.controller.snapshot().error, null); assert.equal(n.studioError.textContent, '');
+  } finally { f.mounted.dispose(); }
+});
+
+test('a late failed manual refresh cannot report into a reconnected workspace', async () => {
+  const f = fixture(); try {
+    await f.ready(); let rejectRead;
+    f.setBeforeCall(operation => operation === 'listJobs' ? new Promise((_, reject) => { rejectRead = reject; }) : undefined);
+    f.mounted.nodes.studioRefresh.click(); await turn();
+    f.setBeforeCall(null); f.doc.getElementById('baseUrl').dispatchEvent(new Event('change')); await f.ready();
+    rejectRead(Object.assign(Error('old connection'), { code: 'NETWORK_ERROR' })); await turn(); await turn();
+    assert.equal(f.mounted.controller.snapshot().error, null); assert.equal(f.mounted.nodes.studioError.textContent, '');
   } finally { f.mounted.dispose(); }
 });

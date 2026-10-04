@@ -414,6 +414,10 @@
       return activeController.refresh().then(function (state) {
         if (disposed || controller !== activeController) return state;
         return review.refresh().then(function () { return state; });
+      }, function () {
+        // The initiating controller already reports read failures. Do not
+        // report them twice or forward an old connection's error to a new one.
+        return activeController.snapshot();
       });
     }
     node("div", "studio-results", null, jobsSection, "studioResults");
