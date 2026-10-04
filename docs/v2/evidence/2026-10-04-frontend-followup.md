@@ -9,6 +9,7 @@ This follows the user's report that the Photoshop panel is now open. The applica
 - Isolated Companion: the same #66 source, bound to `127.0.0.1:17885`, with dedicated `.local/acceptance-20261004/{agent,studio}` state. Gemini environment overrides were removed. Codex was intentionally disabled with `/usr/bin/false` for form-only testing; no real Agent conversation is claimed.
 - Native host: Photoshop 26.0.0, with the already-open dedicated `review-synthetic.png` (384×256). No capture, pixel mutation, save or user-photo upload was performed in this follow-up.
 - Installed Alpha, port 17880, Downloads snapshot and main were not changed.
+- After browser testing, the temporary browser viewport/tab was reset/closed and the task-owned Companion was stopped. The test data remains only in its ignored local directory; Photoshop was left running.
 
 ## Native observation and remaining obstacle
 
