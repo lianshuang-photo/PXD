@@ -43,7 +43,7 @@
     return { call: call, readAsset: readAsset, base: base };
   }
   function createController(options) {
-    var transport = options.transport, storage = options.storage, storageKey = "pxdls.studio.pending:" + (transport.base || "test"), listeners = [], disposed = false, epoch = 0, localVersion = 0, refreshPromise = null;
+    var transport = options.transport, storage = options.storage, storageKey = "pxdls.studio.pending:" + (transport.base || "test"), listeners = [], disposed = false, epoch = 0, localVersion = 0, refreshPromise = null, refreshError = null;
     var idFactory = options.makeId || function () { return "ui_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2); };
     var state = { discovery: null, drafts: [], draft: null, form: { params: {}, context: null }, dirty: false, conflict: null, jobs: [], selectedJobId: null, observed: { document: null, layers: [], nextOffset: null }, busy: false, error: null, notice: "", pendingRun: null, pendingPlacements: {}, recipes: { items: [], total: 0, nextOffset: null, query: "", selected: null, values: {}, userText: "", loading: false, error: null } }, recipeSequence = 0;
     try {
@@ -56,8 +56,9 @@
     function persist() { try { if (storage) storage.setItem(storageKey, JSON.stringify({ run: state.pendingRun, placements: state.pendingPlacements })); } catch (_) {} }
     function snapshot() { return clone(state); }
     function emit() { if (!disposed) listeners.forEach(function (fn) { try { fn(snapshot()); } catch (_) {} }); }
-    function failure(e) {
+    function failure(e, fromRefresh) {
       state.error = { code: e.code || "UI_ERROR", message: e.message || "操作失败" };
+      if (fromRefresh) refreshError = state.error;
       if (e.code === "REVISION_CONFLICT" && e.details && e.details.current) state.conflict = { current: clone(e.details.current), reason: "revision" };
       emit(); return e;
     }
@@ -87,6 +88,8 @@
       var observedEpoch = epoch;
       refreshPromise = Promise.all([serviceCall("discover", {}), serviceCall("listDrafts", {}), serviceCall("listJobs", {})]).then(function (values) {
         if (disposed || observedEpoch !== epoch) return snapshot();
+        if (state.error === refreshError) state.error = null;
+        refreshError = null;
         state.discovery = clone(values[0]); state.drafts = clone(values[1]); state.jobs = clone(values[2]);
         if (state.draft) {
           var latest = state.drafts.find(function (d) { return d.draftId === state.draft.draftId; });
@@ -105,7 +108,11 @@
         }); persist();
         if (!state.selectedJobId && state.jobs.length) state.selectedJobId = state.jobs[0].jobId;
         emit(); return snapshot();
-      }).catch(function (e) { if (!disposed && observedEpoch === epoch) failure(e); throw e; }).finally(function () { refreshPromise = null; });
+      }).catch(function () {
+        var readError = error("WORKSPACE_READ_FAILED", "无法读取工作区。请检查 Companion 连接后刷新。");
+        if (!disposed && observedEpoch === epoch) failure(readError, true);
+        throw readError;
+      }).finally(function () { refreshPromise = null; });
       return refreshPromise;
     }
     async function createDraft(capabilityId, preserve) {

@@ -45,6 +45,18 @@ function fixture(capabilityId = 'image.edit') {
 }
 const code = expected => e => { assert.equal(e.code, expected); return true; };
 
+test('workspace read failures are safe and clear after reconnect without confirming pending writes', async () => {
+  const f = fixture(); await f.controller.refresh(); f.controller.editParams({ prompt: 'Local work survives connection loss' });
+  f.intercept = async operation => { if (operation === 'listJobs') throw Object.assign(Error('private exception with credentials'), { code: 'NETWORK_ERROR' }); };
+  await assert.rejects(f.controller.refresh(), e => { assert.equal(e.code, 'WORKSPACE_READ_FAILED'); assert.doesNotMatch(e.message, /credentials|提交|保存/); return true; });
+  assert.equal(f.controller.snapshot().error.code, 'WORKSPACE_READ_FAILED');
+  assert.equal(f.controller.snapshot().form.params.prompt, 'Local work survives connection loss');
+  f.intercept = null; await f.controller.refresh(); assert.equal(f.controller.snapshot().error, null); assert.equal(f.controller.snapshot().dirty, true);
+  f.intercept = async operation => { if (operation === 'run') throw Object.assign(Error('提交未确认'), { code: 'NETWORK_ERROR' }); };
+  await assert.rejects(f.controller.run(), code('NETWORK_ERROR')); f.intercept = null; await f.controller.refresh();
+  assert.equal(f.controller.snapshot().error.code, 'NETWORK_ERROR'); assert.ok(f.controller.snapshot().pendingRun);
+});
+
 test('revision draft dispatch uses the chosen job and never saves or runs the current draft', async () => {
   const f = fixture(); f.jobs.push({ jobId: 'historical-job', snapshot: { ...copy(f.drafts[0]), params: { prompt: 'Historical instruction' } }, results: [{ resultId: 'result-1', assetId: 'candidate-asset' }], placement: { status: 'not-requested' } });
   await f.controller.refresh();
