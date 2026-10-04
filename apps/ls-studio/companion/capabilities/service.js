@@ -232,11 +232,21 @@ function createCapabilityService({ assets, jobs, provider, bridge, recipes }) {
     }
   }
   async function delegated(method, ...args) { await ready; return jobs[method](...args); }
+  async function updateReview(method, input) {
+    const request = clone(input);
+    await ready; invariant(!closing, 'SERVICE_CLOSING', 'Service is stopping', 503);
+    try { return await jobs[method](request); }
+    catch (error) {
+      if (error instanceof DomainError && error.code === 'STORAGE_UNAVAILABLE') throw new DomainError('STORAGE_UNAVAILABLE', 'Review save could not be confirmed. Read the review and reconcile with the same requestId and unchanged arguments before making another change.', error.status);
+      throw error;
+    }
+  }
   const deriveResultDraft = createResultDrafts({ assets, jobs, provider, inputsFor });
   async function deriveDraft(input) { await ready; invariant(!closing, 'SERVICE_CLOSING', 'Service is stopping', 503); return deriveResultDraft(input); }
   async function close() { closing = true; for (const controller of controllers.values()) controller.abort(); await Promise.allSettled([...executions.values()]); }
   return { discover, capture, importAsset, observe, listRecipes, getRecipe, loadRecipe, deriveDraft, run, cancel, apply, rollback, ready, close, readAsset: async assetId => { await ready; return assets.read(assetId); },
     createDraft: input => delegated('createDraft', input), getDraft: draftId => delegated('getDraft', draftId), listDrafts: () => delegated('listDrafts'), updateDraft: input => delegated('updateDraft', input), getJob: jobId => delegated('getJob', jobId), listJobs: () => delegated('listJobs'),
+    getJobReview: jobId => delegated('getJobReview', jobId), updateResultFeedback: input => updateReview('updateResultFeedback', input), setAcceptedResult: input => updateReview('setAcceptedResult', input),
     waitForIdle: async () => { await ready; await Promise.allSettled([...executions.values()]); },
   };
 }

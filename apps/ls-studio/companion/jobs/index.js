@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
-const { DomainError, invariant, object, clone, id, validateDraft, validateRunSnapshot, assertTransition, jobTransitions, placementTransitions } = require('../domain/contracts');
+const { DomainError, invariant, object, clone, id, validateDraft, validateRunSnapshot, validateReviewFeedback, assertTransition, jobTransitions, placementTransitions } = require('../domain/contracts');
 const digest = value => createHash('sha256').update(value).digest('hex');
 const MAX_STORE_BYTES = 64 * 1024 * 1024;
 const own = (value, key) => Object.hasOwn(value, key);
@@ -24,6 +24,35 @@ function source(value, fallback = 'ui') {
   return result;
 }
 function revision(value) { invariant(Number.isSafeInteger(value) && value > 0, 'INVALID_INPUT', 'expectedRevision must be a positive integer'); return value; }
+function reviewRevision(value) { invariant(Number.isSafeInteger(value) && value >= 0, 'INVALID_INPUT', 'expectedReviewRevision must be a non-negative safe integer'); return value; }
+function reviewFrom(job) { return job.review || { revision: 0, feedback: [], acceptance: null }; }
+function assertReviewJob(job) {
+  invariant(job.snapshot.capabilityId === 'image.edit', 'CAPABILITY_CONFLICT', 'Only image editing jobs can be reviewed');
+}
+function assertReviewResult(job, resultId) {
+  id(resultId, 'resultId');
+  invariant(job.results.some(result => result.resultId === resultId && result.jobId === job.jobId), 'RESULT_NOT_FOUND', 'The review candidate does not belong to this job', 404);
+}
+function validateStoredReview(job) {
+  assertReviewJob(job);
+  const review = job.review;
+  fields(review, ['revision', 'feedback', 'acceptance', 'updatedAt']);
+  revision(review.revision);
+  invariant(Array.isArray(review.feedback) && own(review, 'acceptance') && timestamp(review.updatedAt), 'INVALID_INPUT', 'Invalid stored review');
+  const reviewedResults = new Set();
+  for (const feedback of review.feedback) {
+    fields(feedback, ['resultId', 'items', 'preserve', 'recordedVia', 'updatedAt']);
+    assertReviewResult(job, feedback.resultId);
+    validateReviewFeedback({ items: feedback.items, preserve: feedback.preserve });
+    invariant(['ui', 'agent', 'system'].includes(feedback.recordedVia) && timestamp(feedback.updatedAt) && !reviewedResults.has(feedback.resultId), 'INVALID_INPUT', 'Invalid stored candidate feedback');
+    reviewedResults.add(feedback.resultId);
+  }
+  if (review.acceptance !== null) {
+    fields(review.acceptance, ['resultId', 'recordedVia', 'updatedAt']);
+    if (review.acceptance.resultId !== null) assertReviewResult(job, review.acceptance.resultId);
+    invariant(['ui', 'agent', 'system'].includes(review.acceptance.recordedVia) && timestamp(review.acceptance.updatedAt), 'INVALID_INPUT', 'Invalid stored acceptance');
+  }
+}
 function metadata(value) {
   const copy = clone(value);
   function check(item) {
@@ -66,7 +95,7 @@ function writeFile(file, contents) {
   try { fs.writeFileSync(fd, contents); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 function validateState(state) {
-  fields(state, ['schemaVersion', 'sequence', 'drafts', 'jobs']);
+  fields(state, ['schemaVersion', 'sequence', 'drafts', 'jobs', 'reviewRequests']);
   invariant(state.schemaVersion === 1 && Number.isSafeInteger(state.sequence) && state.sequence >= 0 && Array.isArray(state.drafts) && Array.isArray(state.jobs), 'INVALID_INPUT', 'Unsupported task state');
   const drafts = new Map(), jobs = new Map(), requestIds = new Set(), resultIds = new Set();
   for (const draft of state.drafts) {
@@ -78,7 +107,7 @@ function validateState(state) {
     drafts.set(draft.draftId, draft);
   }
   for (const job of state.jobs) {
-    fields(job, ['schemaVersion', 'jobId', 'draftId', 'requestId', 'source', 'snapshot', 'status', 'results', 'placement', 'provider', 'error', 'createdAt', 'updatedAt']);
+    fields(job, ['schemaVersion', 'jobId', 'draftId', 'requestId', 'source', 'snapshot', 'status', 'results', 'placement', 'provider', 'error', 'review', 'createdAt', 'updatedAt']);
     id(job.jobId); id(job.requestId); id(job.draftId); source(job.source);
     invariant(job.schemaVersion === 1 && !jobs.has(job.jobId) && !requestIds.has(job.requestId) && drafts.has(job.draftId) && own(jobTransitions, job.status) && timestamp(job.createdAt) && timestamp(job.updatedAt) && Array.isArray(job.results), 'INVALID_INPUT', 'Invalid stored job');
     fields(job.snapshot, ['capabilityId', 'capabilityVersion', 'revision', 'params', 'context', 'lineage']);
@@ -95,6 +124,7 @@ function validateState(state) {
       invariant(result.jobId === job.jobId && result.index === index && timestamp(result.createdAt) && !resultIds.has(result.resultId), 'INVALID_INPUT', 'Invalid stored result');
       resultIds.add(result.resultId);
     }
+    if (own(job, 'review')) validateStoredReview(job);
     fields(job.placement, ['status', 'requestId', 'receipt', 'error', 'updatedAt']);
     invariant(own(placementTransitions, job.placement.status), 'INVALID_INPUT', 'Invalid placement status');
     if (job.placement.status !== 'not-requested') id(job.placement.requestId, 'placement requestId');
@@ -105,6 +135,34 @@ function validateState(state) {
     jobs.set(job.jobId, job); requestIds.add(job.requestId);
   }
   for (const draft of state.drafts) if (draft.lineage) assertLineageSource(draft.lineage, jobs.get(draft.lineage.sourceJobId));
+  // Provenance is a graph of older jobs. A corrupt cycle must never hang a
+  // previous-acceptance lookup, even when every individual link looks valid.
+  const checkedLineages = new Set();
+  for (const job of state.jobs) {
+    const visited = new Set(); let current = job;
+    while (current && !checkedLineages.has(current.jobId)) {
+      invariant(!visited.has(current.jobId), 'INVALID_INPUT', 'Stored revision lineage contains a cycle');
+      visited.add(current.jobId);
+      current = current.snapshot.lineage ? jobs.get(current.snapshot.lineage.sourceJobId) : null;
+    }
+    for (const jobId of visited) checkedLineages.add(jobId);
+  }
+  const reviewRequests = own(state, 'reviewRequests') ? state.reviewRequests : [];
+  invariant(Array.isArray(reviewRequests), 'INVALID_INPUT', 'Invalid stored review requests');
+  const reviewRequestIds = new Set(), appliedReviews = new Map();
+  for (const request of reviewRequests) {
+    fields(request, ['requestId', 'jobId', 'operation', 'payloadHash', 'appliedRevision']);
+    id(request.requestId, 'review requestId'); id(request.jobId, 'review jobId'); revision(request.appliedRevision);
+    const job = jobs.get(request.jobId);
+    invariant(job && own(job, 'review') && request.appliedRevision <= job.review.revision && !reviewRequestIds.has(request.requestId), 'INVALID_INPUT', 'Invalid stored review request ownership');
+    invariant(['updateResultFeedback', 'setAcceptedResult'].includes(request.operation) && typeof request.payloadHash === 'string' && /^[a-f0-9]{64}$/.test(request.payloadHash), 'INVALID_INPUT', 'Invalid stored review request');
+    const revisions = appliedReviews.get(request.jobId) || new Set();
+    invariant(!revisions.has(request.appliedRevision), 'INVALID_INPUT', 'Duplicate stored review revision');
+    revisions.add(request.appliedRevision); appliedReviews.set(request.jobId, revisions); reviewRequestIds.add(request.requestId);
+  }
+  for (const job of state.jobs) if (own(job, 'review')) {
+    invariant(appliedReviews.get(job.jobId)?.size === job.review.revision, 'INVALID_INPUT', 'Stored review is missing its request history');
+  }
   return state;
 }
 function createJobStore({ rootDir } = {}) {
@@ -208,6 +266,60 @@ function createJobStore({ rootDir } = {}) {
     const job = { schemaVersion: 1, jobId: 'job-' + randomUUID(), draftId: draft.draftId, requestId: input.requestId, source: from, snapshot, status: 'queued', results: [], placement: { status: 'not-requested' }, createdAt: now, updatedAt: now };
     state.jobs.push(job); return { job: save(state, job), duplicate: false };
   }
+  function updateReview(input, operation) {
+    const feedbackOperation = operation === 'updateResultFeedback';
+    fields(input, ['jobId', 'resultId', 'expectedReviewRevision', 'requestId', 'source', ...(feedbackOperation ? ['feedback'] : [])]);
+    id(input.jobId, 'jobId'); id(input.requestId, 'requestId'); reviewRevision(input.expectedReviewRevision);
+    if (feedbackOperation || input.resultId !== null) id(input.resultId, 'resultId');
+    const recordedVia = source(input.source);
+    const feedback = feedbackOperation ? (input.feedback === null ? null : validateReviewFeedback(input.feedback)) : undefined;
+    const payloadHash = digest(canonical({ operation, jobId: input.jobId, resultId: input.resultId, expectedReviewRevision: input.expectedReviewRevision, ...(feedbackOperation ? { feedback } : {}) }));
+    const state = read(), requests = state.reviewRequests || [];
+    const duplicate = requests.find(request => request.requestId === input.requestId);
+    // A retry returns the current review, plus the revision first written by
+    // that request. Later edits and a different entry point do not replay it.
+    if (duplicate) {
+      invariant(duplicate.jobId === input.jobId && duplicate.operation === operation && duplicate.payloadHash === payloadHash, 'REQUEST_CONFLICT', 'requestId already identifies another review update', 409);
+      return clone({ jobId: input.jobId, review: reviewFrom(jobFrom(state, input.jobId)), appliedRevision: duplicate.appliedRevision, duplicate: true });
+    }
+    const job = jobFrom(state, input.jobId); assertReviewJob(job);
+    if (input.resultId !== null) assertReviewResult(job, input.resultId);
+    const current = reviewFrom(job);
+    invariant(current.revision === input.expectedReviewRevision, 'REVIEW_REVISION_CONFLICT', 'Review has changed; read its current revision before updating', 409, { jobId: job.jobId, current: clone(current) });
+    invariant(current.revision < Number.MAX_SAFE_INTEGER, 'STATE_CONFLICT', 'Review revision limit reached', 409);
+    const now = new Date().toISOString(), next = { ...current, revision: current.revision + 1, updatedAt: now };
+    if (feedbackOperation) {
+      const entry = feedback === null ? null : { resultId: input.resultId, ...feedback, recordedVia, updatedAt: now };
+      const index = current.feedback.findIndex(item => item.resultId === input.resultId);
+      next.feedback = current.feedback.slice();
+      if (entry === null) { if (index >= 0) next.feedback.splice(index, 1); }
+      else if (index >= 0) next.feedback[index] = entry;
+      else next.feedback.push(entry);
+    } else next.acceptance = { resultId: input.resultId, recordedVia, updatedAt: now };
+    job.review = next;
+    // The independent namespace shares the same checksummed atomic file as
+    // the review mutation. Never evict request records or copy feedback text.
+    state.reviewRequests = requests;
+    requests.push({ requestId: input.requestId, jobId: job.jobId, operation, payloadHash, appliedRevision: next.revision });
+    return save(state, { jobId: job.jobId, review: next, appliedRevision: next.revision, duplicate: false });
+  }
+  function getJobReview(jobId) {
+    const state = read(), job = jobFrom(state, jobId); assertReviewJob(job);
+    const jobs = new Map(state.jobs.map(item => [item.jobId, item])), visited = new Set([jobId]);
+    let current = job, previousAccepted = null;
+    while (current.snapshot.lineage) {
+      const parentId = current.snapshot.lineage.sourceJobId;
+      invariant(!visited.has(parentId), 'STORAGE_CORRUPT', 'Stored revision lineage contains a cycle', 500);
+      visited.add(parentId); current = jobs.get(parentId);
+      invariant(current, 'STORAGE_CORRUPT', 'Stored revision source is missing', 500);
+      if (current.review?.acceptance?.resultId) {
+        const accepted = current.review.acceptance;
+        previousAccepted = { jobId: current.jobId, resultId: accepted.resultId, reviewRevision: current.review.revision, recordedVia: accepted.recordedVia, updatedAt: accepted.updatedAt };
+        break;
+      }
+    }
+    return clone({ jobId, review: reviewFrom(job), previousAccepted });
+  }
   function transition(jobId, status, patch = {}) {
     fields(patch, ['error', 'provider']);
     const update = {};
@@ -299,6 +411,7 @@ function createJobStore({ rootDir } = {}) {
   return {
     createDraft, createDerivedDraft, getDraft: draftId => clone(draftFrom(read(), draftId)), listDrafts: () => clone(read().drafts.slice().reverse()), updateDraft,
     createJob, getJob: jobId => clone(jobFrom(read(), jobId)), listJobs: () => clone(read().jobs.slice().reverse()),
+    getJobReview, updateResultFeedback: input => updateReview(input, 'updateResultFeedback'), setAcceptedResult: input => updateReview(input, 'setAcceptedResult'),
     transition, addResults, cancel, setPlacement, recover,
   };
 }

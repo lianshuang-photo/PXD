@@ -69,10 +69,10 @@ function checkedAsset(value) {
 }
 async function invoke(service, operation, args, source) {
   args = validateOperation(operation, args);
-  if (['createDraft', 'deriveDraft', 'updateDraft', 'run', 'loadRecipe'].includes(operation)) args = { ...args, source };
+  if (['createDraft', 'deriveDraft', 'updateDraft', 'run', 'loadRecipe', 'updateResultFeedback', 'setAcceptedResult'].includes(operation)) args = { ...args, source };
   if (operation === 'getDraft') return service.getDraft(args.draftId);
   if (operation === 'getRecipe') return service.getRecipe(args.recipeId);
-  if (operation === 'getJob' || operation === 'cancel') return service[operation](args.jobId);
+  if (operation === 'getJob' || operation === 'getJobReview' || operation === 'cancel') return service[operation](args.jobId);
   if (operation === 'readAsset') {
     const { asset, data } = checkedAsset(await service.readAsset(args.assetId));
     return { asset, image: { base64: data.toString('base64'), mimeType: asset.mimeType, width: asset.width, height: asset.height } };

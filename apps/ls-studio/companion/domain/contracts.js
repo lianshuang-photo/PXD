@@ -47,6 +47,16 @@ const contextSchema = schema({
   transform: schema({ sourceBounds: rect, inputWidth: integer, inputHeight: integer }, ['sourceBounds', 'inputWidth', 'inputHeight']),
 }, ['documentRef', 'scope']);
 const lineageSchema = schema({ sourceJobId: identifier, mode: { enum: ['original', 'candidate-reference'] }, sourceResultId: identifier }, ['sourceJobId', 'mode']);
+const reviewFeedbackSchema = schema({
+  items: { type: 'array', maxItems: 20, items: schema({
+    category: { enum: ['identity', 'composition', 'lighting', 'color', 'detail', 'artifact', 'scope', 'style', 'other'] },
+    description: { type: 'string', minLength: 1, maxLength: 2000 },
+    area: { type: 'string', minLength: 1, maxLength: 120 },
+    requestedChange: { type: 'string', minLength: 1, maxLength: 2000 },
+  }, ['category', 'description']) },
+  preserve: { type: 'array', maxItems: 20, items: { type: 'string', minLength: 1, maxLength: 500 } },
+}, ['items', 'preserve']);
+const MAX_REVIEW_FEEDBACK_BYTES = 64 * 1024;
 const capabilityDefinitions = [
   { id: 'image.edit', version: 1, title: '图像编辑', backend: 'gemini', inputSchema: schema({ prompt: text(64000), model: text(200), temperature: { type: 'number', minimum: 0, maximum: 2 }, aspectRatio: { enum: ['auto', '1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9', '4:5', '5:4'] }, imageSize: { enum: ['1K', '2K', '4K'] } }), outputSchema: { type: 'object', required: ['results'] }, errors: ['PROVIDER_NOT_CONFIGURED', 'PROVIDER_AUTH', 'PROVIDER_RATE_LIMIT', 'PROVIDER_REJECTED', 'PROVIDER_UNCERTAIN', 'CANCELLED'] },
   { id: 'ps.layer.update', version: 1, title: '修改图层属性', backend: 'photoshop', inputSchema: schema({ layerId: { type: ['integer', 'null'], minimum: 1 }, changes: schema({ name: text(1000), opacity: { type: 'number', minimum: 0, maximum: 100 }, visible: { type: 'boolean' } }) }), outputSchema: { type: 'object', required: ['receipt'] }, errors: ['HOST_UNAVAILABLE', 'DOCUMENT_CONFLICT', 'HOST_EXECUTION_FAILED', 'ROLLBACK_CONFLICT'] },
@@ -60,7 +70,7 @@ function validateSchema(value, rule, label = 'input') {
     object(value, label);
     for (const key of rule.required || []) invariant(Object.hasOwn(value, key), 'INVALID_INPUT', label + '.' + key + ' is required');
     for (const [key, child] of Object.entries(value)) {
-      const sub = (rule.properties && rule.properties[key]) || (rule.additionalProperties && typeof rule.additionalProperties === 'object' ? rule.additionalProperties : undefined);
+      const sub = (rule.properties && Object.hasOwn(rule.properties, key) ? rule.properties[key] : undefined) || (rule.additionalProperties && typeof rule.additionalProperties === 'object' ? rule.additionalProperties : undefined);
       invariant(sub || rule.additionalProperties !== false, 'INVALID_INPUT', label + '.' + key + ' is not supported');
       if (sub) validateSchema(child, sub, label + '.' + key);
     }
@@ -95,6 +105,15 @@ function validateLineage(lineage) {
   validateSchema(lineage, lineageSchema, 'lineage');
   invariant(lineage.mode === 'candidate-reference' ? Object.hasOwn(lineage, 'sourceResultId') : !Object.hasOwn(lineage, 'sourceResultId'), 'INVALID_INPUT', 'A lineage result is required only for candidate-reference mode');
   return clone(lineage);
+}
+function validateReviewFeedback(feedback) {
+  validateSchema(feedback, reviewFeedbackSchema, 'feedback');
+  const checked = clone(feedback);
+  // Validate the serialized shape as well: sparse arrays and non-enumerable
+  // required fields from in-process callers must not become invalid state.
+  validateSchema(checked, reviewFeedbackSchema, 'feedback');
+  invariant(Buffer.byteLength(JSON.stringify(checked)) <= MAX_REVIEW_FEEDBACK_BYTES, 'INVALID_INPUT', 'Review feedback exceeds its encoded size limit');
+  return checked;
 }
 function validateDraft(input) {
   object(input); const def = capability(input.capabilityId);
@@ -138,4 +157,4 @@ const hostOperations = {
   studio_rollback: schema({ receipt: { type: 'object' } }, ['receipt']),
 };
 capabilityDefinitions[0].inputSchema.properties.recipe = schema({ recipeId: identifier, sourceHash: { type: 'string', pattern: '^[a-f0-9]{64}$' }, values: { type: 'object', additionalProperties: { type: 'number', minimum: 0, maximum: 1 } } }, ['recipeId', 'sourceHash', 'values']);
-module.exports = { DomainError, invariant, object, clone, id, schema, identifier, integer, contextSchema, documentRefSchema, lineageSchema, capabilityDefinitions, capability, validateSchema, validateContext, validateLineage, validateDraft, validateRunSnapshot, assertTransition, jobTransitions, placementTransitions, publicError, hostOperations };
+module.exports = { DomainError, invariant, object, clone, id, schema, identifier, integer, contextSchema, documentRefSchema, lineageSchema, reviewFeedbackSchema, MAX_REVIEW_FEEDBACK_BYTES, capabilityDefinitions, capability, validateSchema, validateContext, validateLineage, validateReviewFeedback, validateDraft, validateRunSnapshot, assertTransition, jobTransitions, placementTransitions, publicError, hostOperations };
