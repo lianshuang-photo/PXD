@@ -2,7 +2,13 @@
 (function (root) {
   "use strict";
   function mount(options) {
-    var doc = options.document, ui = options.ui, nodes = {}, state = null, job = null, resultId = null, mode = "split", zoom = 1, signature = "", generation = 0, disposed = false, cache = new Map();
+    var doc = options.document, ui = options.ui, nodes = {}, state = null, job = null, resultId = null, mode = "split", zoom = 1, signature = "", generation = 0, disposed = false, cache = new Map(), selection = { jobId: null, resultId: null };
+    function notifySelection() {
+      var next = { jobId: !panel.hidden && job ? job.jobId : null, resultId: !panel.hidden ? resultId : null };
+      if (next.jobId === selection.jobId && next.resultId === selection.resultId) return;
+      selection = next;
+      if (options.onSelectionChange) options.onSelectionChange(next.jobId, next.resultId);
+    }
     function node(tag, className, text, parent, id) { var el = doc.createElement(tag); el.className = className || ""; if (text != null) el.textContent = text; if (id) { el.id = id; nodes[id] = el; } if (parent) parent.appendChild(el); return el; }
     function button(parent, id, text, action) { var el = ui.createButton("studio-button ghost", text, function () { try { Promise.resolve(action()).catch(options.onError); } catch (error) { options.onError(error); } }); el.id = id; nodes[id] = el; parent.appendChild(el); return el; }
     var panel = node("div", "studio-comparison", null, options.parent, "studioComparison");
@@ -61,7 +67,7 @@
       if (!job || !nextJob || job.jobId !== nextJob.jobId) { resultId = null; mode = "split"; zoom = 1; }
       job = nextJob;
       panel.hidden = !job || !job.snapshot || job.snapshot.capabilityId !== "image.edit";
-      if (panel.hidden) { generation++; signature = ""; sides.forEach(clearImage); return; }
+      if (panel.hidden) { generation++; signature = ""; sides.forEach(clearImage); notifySelection(); return; }
       var results = job.results || [], selected = results.find(function (item) { return item.resultId === resultId; });
       if (!selected) { selected = results[0]; resultId = selected ? selected.resultId : null; }
       var context = job.snapshot.context;
@@ -79,14 +85,15 @@
         read(sourceSide, context && context.baseAssetId, ticket); read(resultSide, selected && selected.assetId, ticket);
       }
       layout();
+      notifySelection();
     }
     function selectResult(jobId, selectedId) {
       if (!job || job.jobId !== jobId || !job.results.some(function (item) { return item.resultId === selectedId; })) return;
       resultId = selectedId; render(state);
     }
-    function reset() { generation++; signature = ""; state = null; job = null; resultId = null; cache.clear(); sides.forEach(clearImage); panel.hidden = true; }
+    function reset() { generation++; signature = ""; state = null; job = null; resultId = null; cache.clear(); sides.forEach(clearImage); panel.hidden = true; notifySelection(); }
     reset();
-    return { render: render, selectResult: selectResult, nodes: nodes, reset: reset, dispose: function () { disposed = true; reset(); if (panel.parentElement) panel.parentElement.removeChild(panel); } };
+    return { render: render, selectResult: selectResult, getSelection: function () { return { jobId: selection.jobId, resultId: selection.resultId }; }, nodes: nodes, reset: reset, dispose: function () { disposed = true; reset(); if (panel.parentElement) panel.parentElement.removeChild(panel); } };
   }
   var api = { mount: mount };
   if (typeof module !== "undefined" && module.exports) module.exports = api;

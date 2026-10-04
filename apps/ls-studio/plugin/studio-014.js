@@ -311,7 +311,7 @@
     var toolbar = node("div", "studio-row", null, draftSection);
     button(toolbar, "studioNewImage", "＋ 图像草稿", function () { return controller.createDraft("image.edit"); });
     button(toolbar, "studioNewLayer", "＋ 图层草稿", function () { return controller.createDraft("ps.layer.update"); });
-    button(toolbar, "studioRefresh", "刷新", function () { return controller.refresh(); });
+    button(toolbar, "studioRefresh", "刷新", refreshWorkspace);
     button(toolbar, "studioLoadLatest", "舍弃本地并重新载入", function () { return controller.reloadDraft(); });
     node("div", "studio-note studio-service", "读取服务状态…", draftSection, "studioService");
     node("div", "studio-list studio-drafts", null, draftSection, "studioDraftList");
@@ -384,8 +384,31 @@
     button(jobActions, "studioRollback", "撤销这次修改", function () { return controller.rollback(controller.snapshot().selectedJobId); });
     var resultsApi = options.resultsApi || win.PXD_STUDIO_RESULTS || (typeof require === "function" && require("./studio-results-014.js"));
     requireValue(resultsApi, "UI_UNAVAILABLE", "候选对比模块尚未加载");
-    var comparison = resultsApi.mount({ document: doc, ui: ui, parent: jobsSection, onError: showError, readAsset: function (assetId) { return transport.readAsset(assetId); }, onDerive: function (jobId, mode, resultId) { return controller.deriveDraft(jobId, mode, resultId); } });
+    var review = null;
+    var comparison = resultsApi.mount({ document: doc, ui: ui, parent: jobsSection, onError: showError, readAsset: function (assetId) { return transport.readAsset(assetId); }, onDerive: function (jobId, mode, resultId) { return controller.deriveDraft(jobId, mode, resultId); }, onSelectionChange: function () {
+      if (!review || !controller || disposed) return;
+      renderReview(controller.snapshot()); review.refresh();
+    } });
     Object.keys(comparison.nodes).forEach(function (key) { nodes[key] = comparison.nodes[key]; });
+    var reviewApi = options.reviewApi || win.PXD_STUDIO_REVIEW || (typeof require === "function" && require("./studio-review-014.js"));
+    requireValue(reviewApi, "UI_UNAVAILABLE", "候选审阅模块尚未加载");
+    review = reviewApi.mount({ document: doc, ui: ui, parent: jobsSection, getTransport: function () { return transport; }, onError: showError, onSelectResult: function (jobId, resultId) {
+      var state = controller.snapshot(), target = state.jobs.find(function (item) { return item.jobId === jobId; });
+      if (!target || !target.snapshot || target.snapshot.capabilityId !== "image.edit" || !(target.results || []).some(function (item) { return item.resultId === resultId; })) return false;
+      controller.selectJob(jobId); comparison.selectResult(jobId, resultId); return true;
+    } });
+    Object.keys(review.nodes).forEach(function (key) { Object.defineProperty(nodes, key, { enumerable: true, configurable: true, get: function () { return review.nodes[key]; } }); });
+    function renderReview(state) {
+      var selection = comparison.getSelection();
+      review.render({ job: state.jobs.find(function (item) { return item.jobId === selection.jobId; }) || null, resultId: selection.resultId, busy: state.busy });
+    }
+    function refreshWorkspace() {
+      var activeController = controller;
+      return activeController.refresh().then(function (state) {
+        if (disposed || controller !== activeController) return state;
+        return review.refresh().then(function () { return state; });
+      });
+    }
     node("div", "studio-results", null, jobsSection, "studioResults");
     var footer = node("div", "composer studio-footer", null, workspace);
     node("div", "studio-message", "", footer, "studioNotice").setAttribute("role", "status");
@@ -495,11 +518,12 @@
       nodes.studioLayerVisible.textContent = "可见性：" + (changes.visible == null ? "保持" : changes.visible ? "显示" : "隐藏");
       nodes.studioAutoApply.hidden = !imageMode; nodes.studioAutoApply.textContent = "自动回贴：" + (context && context.settings && context.settings.autoApply ? "开" : "关"); nodes.studioAutoApply.setAttribute("aria-pressed", String(!!(context && context.settings && context.settings.autoApply)));
       nodes.studioDisableGrouping.hidden = !(context && context.settings && context.settings.groupResults);
-      list("studioJobList", [state.jobs.map(function (j) { return [j.jobId, j.status, j.placement && j.placement.status, j.snapshot && j.snapshot.capabilityId]; }), state.selectedJobId], function (container) {
-        state.jobs.forEach(function (job) { button(container, "job_" + job.jobId, (job.snapshot && job.snapshot.capabilityId === "ps.layer.update" ? "图层修改" : "图像编辑") + " · " + (labels[job.status] || job.status) + " · " + job.jobId.slice(0, 8), function () { controller.selectJob(job.jobId); }, "studio-list-item" + (job.jobId === state.selectedJobId ? " is-on" : "")); });
+      list("studioJobList", [state.jobs.map(function (j) { return [j.jobId, j.status, j.placement && j.placement.status, j.snapshot && j.snapshot.capabilityId, j.review && j.review.revision]; }), state.selectedJobId], function (container) {
+        state.jobs.forEach(function (job) { button(container, "job_" + job.jobId, (job.snapshot && job.snapshot.capabilityId === "ps.layer.update" ? "图层修改" : "图像编辑") + " · " + (labels[job.status] || job.status) + (job.review && job.review.acceptance && job.review.acceptance.resultId ? " · 已采用候选" : "") + " · " + job.jobId.slice(0, 8), function () { controller.selectJob(job.jobId); }, "studio-list-item" + (job.jobId === state.selectedJobId ? " is-on" : "")); });
       });
       var job = state.jobs.find(function (j) { return j.jobId === state.selectedJobId; }), placement = job && job.placement || {};
       comparison.render(state);
+      renderReview(state);
       nodes.studioJobDetail.textContent = job ? (labels[job.status] || job.status) + " · " + (labels[placement.status] || placement.status || "尚未回贴") + " · 草稿 r" + job.snapshot.revision + (job.error ? "\n" + job.error.message : "") + (placement.error ? "\n" + placement.error.message : "") : "运行后会在这里保留任务快照与结果。";
       nodes.studioCancel.hidden = !job || ["queued", "running", "recovery-required"].indexOf(job.status) < 0; nodes.studioRollback.hidden = placement.status !== "applied";
       list("studioResults", [job, busy, host], function (container) {
@@ -522,18 +546,18 @@
     }
     function connect() {
       if (controller) controller.dispose(); if (unsubscribe) unsubscribe(); renderedLists = {}; assets.clear();
-      comparison.reset();
+      review.reset(); comparison.reset();
       var configured = win.PXD_NAV ? win.PXD_NAV.baseUrl() : doc.getElementById("baseUrl") && doc.getElementById("baseUrl").value;
       transport = options.transport || createTransport({ base: configured, location: win.location });
       controller = createController({ transport: transport, storage: options.storage || win.localStorage });
       unsubscribe = controller.subscribe(render); mounted.controller = controller; mounted.transport = transport;
-      controller.refresh().catch(function () {});
+      refreshWorkspace().catch(function () {});
     }
-    var mounted = { controller: null, transport: null, nodes: nodes, toAgent: toAgent, dispose: function () { disposed = true; comparison.dispose(); if (controller) controller.dispose(); if (unsubscribe) unsubscribe(); if (proComposer) proComposer.close(); timers.forEach(clearInterval); var baseInput = doc.getElementById("baseUrl"); if (baseInput) baseInput.removeEventListener("change", connect); if (workspace.parentElement) workspace.parentElement.removeChild(workspace); } };
+    var mounted = { controller: null, transport: null, nodes: nodes, toAgent: toAgent, refresh: refreshWorkspace, dispose: function () { disposed = true; review.dispose(); comparison.dispose(); if (controller) controller.dispose(); if (unsubscribe) unsubscribe(); if (proComposer) proComposer.close(); timers.forEach(clearInterval); var baseInput = doc.getElementById("baseUrl"); if (baseInput) baseInput.removeEventListener("change", connect); if (workspace.parentElement) workspace.parentElement.removeChild(workspace); } };
     connect();
     if (win.PXD_COMPOSER) proComposer = win.PXD_COMPOSER.attach({ field: prompt, frame: prompt.parentElement, document: doc, native: !!(win.PXD_CONTEXT && win.PXD_CONTEXT.isPhotoshop), enterSends: function () { try { return win.localStorage.getItem("pxdls.enter-send") !== "false"; } catch (_) { return true; } }, send: handle(function () { if (!ui.isDisabled(nodes.studioRun)) return controller.run(); }), saveDraft: function () { if (controller.snapshot().draft && controller.snapshot().form.params.prompt !== prompt.value) controller.editParams({ prompt: prompt.value }); } });
     var baseInput = doc.getElementById("baseUrl"); if (baseInput) baseInput.addEventListener("change", connect);
-    if (options.poll !== false) timers.push(setInterval(function () { if (!disposed && doc.visibilityState !== "hidden") controller.refresh().catch(function () {}); }, 2500));
+    if (options.poll !== false) timers.push(setInterval(function () { if (!disposed && doc.visibilityState !== "hidden") refreshWorkspace().catch(function () {}); }, 2500));
     return mounted;
   }
   var api = { createTransport: createTransport, createController: createController, baseFor: baseFor, mount: mount };

@@ -1,0 +1,11 @@
+/* Keep review in the workspace's main scrolling flow and explicit UXP scale. */
+.studio-review { flex: none; min-width: 0; margin-top: var(--s8, 8px); padding-top: var(--s8, 8px); border-top: var(--s1, 1px) solid var(--line); }
+.studio-review-title { margin-bottom: var(--s5, 5px); color: var(--text); font-family: Arial, "PingFang SC", "Microsoft YaHei"; font-size: var(--s12, 12px); line-height: var(--s18, 18px); }
+.studio-review > .studio-row, .studio-review-editor { margin-top: var(--s6, 6px); }
+.studio-review-item { min-width: 0; margin: var(--s6, 6px) 0 var(--s8, 8px); padding: var(--s8, 8px); border: var(--s1, 1px) solid var(--line); background: var(--surf); }
+.studio-review-empty { margin: var(--s5, 5px) 0; }
+.studio-workspace .studio-review .studio-input { box-sizing: border-box; height: auto; min-height: var(--s36, 36px); background: var(--bg); color: var(--text); font-family: Arial, "PingFang SC", "Microsoft YaHei"; }
+.studio-workspace .studio-review textarea.studio-input { height: var(--s88, 88px); min-height: var(--s55, 55px); }
+.studio-review .studio-row > .studio-button { max-width: 100%; }
+.studio-review .studio-review-error { max-height: none; overflow: visible; }
+.studio-review-current { margin-top: var(--s6, 6px); }

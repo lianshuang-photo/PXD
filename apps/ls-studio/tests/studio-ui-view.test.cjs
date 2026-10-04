@@ -33,6 +33,25 @@ function fixture() {
     if (operation === 'discover') return { photoshop: { connected: true }, provider: { configured, model: 'fixture', settings: { aspectRatio: ['auto'], imageSize: ['1K'] } } };
     if (operation === 'listDrafts') return [structuredClone(draft)];
     if (operation === 'listJobs') return structuredClone(jobs);
+    if (operation === 'getJobReview') {
+      const job = jobs.find(item => item.jobId === args.jobId);
+      assert.ok(job, 'Review must address an existing job');
+      const ancestor = jobs.find(item => item.jobId === job.snapshot.lineage?.sourceJobId);
+      const acceptance = ancestor?.review?.acceptance;
+      return { jobId: job.jobId, review: structuredClone(job.review || { revision: 0, feedback: [], acceptance: null }), previousAccepted: acceptance?.resultId ? { jobId: ancestor.jobId, resultId: acceptance.resultId, reviewRevision: ancestor.review.revision, recordedVia: acceptance.recordedVia, updatedAt: acceptance.updatedAt } : null };
+    }
+    if (operation === 'updateResultFeedback' || operation === 'setAcceptedResult') {
+      const job = jobs.find(item => item.jobId === args.jobId);
+      const review = structuredClone(job.review || { revision: 0, feedback: [], acceptance: null });
+      if (review.revision !== args.expectedReviewRevision) throw Object.assign(Error('Review conflict'), { code: 'REVIEW_REVISION_CONFLICT', details: { jobId: job.jobId, current: review } });
+      const updatedAt = '2026-10-04T00:00:00.000Z';
+      if (operation === 'updateResultFeedback') {
+        review.feedback = review.feedback.filter(item => item.resultId !== args.resultId);
+        if (args.feedback) review.feedback.push({ resultId: args.resultId, ...structuredClone(args.feedback), recordedVia: 'ui', updatedAt });
+      } else review.acceptance = { resultId: args.resultId, recordedVia: 'ui', updatedAt };
+      review.revision++; review.updatedAt = updatedAt; job.review = review;
+      return { jobId: job.jobId, review: structuredClone(review), appliedRevision: review.revision, duplicate: false };
+    }
     if (operation === 'getDraft') return structuredClone(draft);
     if (operation === 'updateDraft') { draft.revision++; draft.params = { ...draft.params, ...args.params }; draft.context = args.context; return structuredClone(draft); }
     if (operation === 'run') { const job = { jobId: 'job-1', requestId: args.requestId, snapshot: structuredClone(draft), status: 'queued', results: [], placement: { status: 'not-requested' } }; jobs = [job]; return { job: structuredClone(job), duplicate: false }; }
@@ -40,7 +59,7 @@ function fixture() {
     throw Error('Unexpected operation ' + operation);
   } };
   const mounted = mount({ window: win, document: doc, transport, poll: false });
-  return { doc, win, calls, mounted, ready: () => mounted.controller.refresh(), configure: () => { configured = true; }, draft, setJobs: value => { jobs = structuredClone(value); }, setAssetReader: value => { reader = value; } };
+  return { doc, win, calls, mounted, ready: () => mounted.refresh(), configure: () => { configured = true; }, draft, setJobs: value => { jobs = structuredClone(value); }, getJobs: () => structuredClone(jobs), setAssetReader: value => { reader = value; } };
 }
 const turn = () => new Promise(resolve => setImmediate(resolve));
 test('mounted workspace displays shared draft, protects missing-provider action and populates Agent with record identity', async () => {
@@ -109,5 +128,56 @@ test('reconnecting the workspace discards old comparison image reads even when I
     release('data:image/png;base64,OLD-CONNECTION'); await turn();
     assert.equal(f.mounted.nodes.studioCompareImage_source.src, 'data:image/png;base64,NEW-CONNECTION');
     assert.equal(f.calls.some(c => ['deriveDraft', 'run', 'apply'].includes(c.operation)), false);
+  } finally { f.mounted.dispose(); }
+});
+function storedFeedback(resultId, description) {
+  return { resultId, items: [{ category: 'detail', area: '左侧发丝', description, requestedChange: '保留细节' }, { category: 'color', description: '保持肤色自然' }], preserve: ['角色特征', '原始构图'], recordedVia: 'agent', updatedAt: '2026-10-04T00:00:00.000Z' };
+}
+test('workspace reviews the exact selected candidate even when assets match, independently of an edited generation draft', async () => {
+  const f = fixture(); try {
+    await f.ready();
+    const job = historicalJob(f);
+    job.results[1].assetId = job.results[0].assetId;
+    job.review = { revision: 1, feedback: [storedFeedback('candidate-a', '候选 A 的反馈'), storedFeedback('candidate-b', '候选 B 的反馈')], acceptance: null, updatedAt: '2026-10-04T00:00:00.000Z' };
+    f.setJobs([job]); await f.ready(); await turn(); const n = f.mounted.nodes;
+    assert.equal(n.studioReviewItemFields.length, 2);
+    assert.equal(n.studioReviewItemFields[0].description.value, '候选 A 的反馈');
+    f.mounted.controller.editParams({ prompt: '尚未保存的生成指令' });
+    n.studioReviewItemFields[0].description.value = '局部边缘需要修整'; n.studioReviewItemFields[0].description.dispatchEvent(new Event('input'));
+    n.studioCompareCandidate.value = 'candidate-b'; n.studioCompareCandidate.dispatchEvent(new Event('change')); await turn();
+    assert.equal(n.studioReviewItemFields[0].description.value, '候选 B 的反馈');
+    n['compare_candidate-a'].click(); await turn();
+    assert.equal(n.studioReviewItemFields[0].description.value, '局部边缘需要修整');
+    n.studioReviewSave.click(); await turn(); await turn();
+    const saved = f.calls.find(call => call.operation === 'updateResultFeedback');
+    assert.equal(saved.args.jobId, job.jobId); assert.equal(saved.args.resultId, 'candidate-a'); assert.equal(saved.args.expectedReviewRevision, 1);
+    assert.equal(saved.args.feedback.items.length, 2); assert.deepEqual(saved.args.feedback.preserve, ['角色特征', '原始构图']);
+    assert.equal(f.mounted.controller.snapshot().dirty, true);
+    assert.equal(f.mounted.controller.snapshot().conflict, null);
+    n.studioReviewAccept.click(); await turn(); await turn(); await f.ready();
+    assert.equal(f.getJobs()[0].review.acceptance.resultId, 'candidate-a');
+    assert.match(n['job_' + job.jobId].textContent, /已采用候选/);
+    assert.deepEqual(f.getJobs()[0].snapshot, job.snapshot);
+    assert.equal(f.calls.some(call => ['updateDraft', 'run', 'apply', 'deriveDraft', 'rollback'].includes(call.operation)), false);
+  } finally { f.mounted.dispose(); }
+});
+test('workspace refreshes ancestor acceptance without a child revision change and navigates to the exact previous candidate', async () => {
+  const f = fixture(); try {
+    await f.ready();
+    const parent = historicalJob(f, 'parent-job'), child = historicalJob(f, 'child-job');
+    parent.review = { revision: 1, feedback: [], acceptance: { resultId: 'candidate-b', recordedVia: 'ui', updatedAt: '2026-10-04T00:00:00.000Z' }, updatedAt: '2026-10-04T00:00:00.000Z' };
+    child.snapshot.lineage = { sourceJobId: parent.jobId };
+    f.setJobs([child, parent]); await f.ready(); await turn(); const n = f.mounted.nodes;
+    assert.equal(n.studioReviewPrevious.hidden, false);
+    parent.review.revision = 2; parent.review.acceptance.resultId = null;
+    f.setJobs([child, parent]); await f.ready();
+    assert.equal(n.studioReviewPrevious.hidden, true);
+    parent.review.revision = 3; parent.review.acceptance.resultId = 'candidate-b';
+    f.setJobs([child, parent]); await f.ready();
+    n.studioReviewPrevious.click(); await turn(); await turn();
+    assert.equal(f.mounted.controller.snapshot().selectedJobId, parent.jobId);
+    assert.equal(n.studioCompareCandidate.value, 'candidate-b');
+    assert.match(n.studioReviewStatus.textContent, /候选 2 · 已采用此候选/);
+    assert.equal(f.calls.some(call => ['run', 'apply', 'deriveDraft', 'rollback'].includes(call.operation)), false);
   } finally { f.mounted.dispose(); }
 });
