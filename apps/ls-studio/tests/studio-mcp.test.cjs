@@ -5,14 +5,15 @@ const { createPhotoshopMcp, listen } = require('../companion/photoshop-mcp.cjs')
 const { tools, publicTools } = require('../companion/photoshop-tools');
 const message = (name, args = {}, id = 1) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
 const response = value => new Response(JSON.stringify({ ok: true, value }));
-test('MCP discovery includes18 shared Studio tools plus7 observation tools, never raw host mutation schemas', async () => {
+test('MCP discovery includes 21 shared Studio tools plus 7 observation tools, never raw host mutation schemas', async () => {
   const mcp = createPhotoshopMcp();
   const result = await mcp.handle({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
   assert.equal(tools.length, 7, 'bridge discovery stays observation-only');
-  assert.equal(publicTools.length, 25); assert.equal(result.result.tools.length, 25);
+  assert.equal(publicTools.length, 28); assert.equal(result.result.tools.length, 28);
   const names = result.result.tools.map(tool => tool.name);
   for (const name of ['studio_capabilities', 'studio_capture_context', 'studio_import_asset', 'studio_create_draft', 'studio_derive_draft', 'studio_list_drafts', 'studio_get_draft', 'studio_update_draft', 'studio_run', 'studio_list_jobs', 'studio_get_job', 'studio_cancel', 'studio_apply_result', 'studio_rollback', 'studio_read_asset', 'studio_list_recipes', 'studio_get_recipe', 'studio_load_recipe']) assert.ok(names.includes(name));
   assert.ok(!names.includes('studio_edit_layer')); assert.ok(!names.includes('studio_capture'));
+  for (const name of ['studio_get_job_review', 'studio_update_result_feedback', 'studio_set_accepted_result']) assert.ok(names.includes(name));
   const rollback = result.result.tools.find(tool => tool.name === 'studio_rollback');
   assert.deepEqual(rollback.inputSchema.required, ['jobId']); assert.equal(rollback.inputSchema.properties.receipt, undefined);
   result.result.tools[0].name = 'mutated';
